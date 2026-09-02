@@ -3,7 +3,9 @@
 A compact TCP protocol for pushing batches of CAN frames into wiretap-server
 from microcontroller-class capture devices (ESP32, STM32, etc.). The server
 feeds frames into the same pipeline as local SocketCAN capture: batching,
-PostgreSQL COPY ingest, and the SQLite disk cache for outage resilience.
+relay to the gateway, and the SQLite disk cache for outage resilience. It is
+also the protocol the server speaks as a *client* in `[forward]` mode, so one
+codec covers both ends.
 
 Design priorities, in order: tiny client footprint (fixed little-endian
 layouts pack directly as C structs — no varint or text encoding), bounded
@@ -158,10 +160,12 @@ keepalive_secs = 30
 max_batch_frames = 256
 ```
 
-Requires `[postgres].enable = true`. Set `[server].iface = ""` for an
-ingest-only deployment with no local CAN hardware. The token is sent in
-clear text — deploy on a trusted network or wrap the connection in a VPN /
-stunnel if it crosses untrusted segments.
+Requires a configured sink — `[forward]` to a gateway. (The Python
+implementation also accepted `[postgres].enable = true`, writing to a database
+directly; the Rust port drops that path, so ingested frames are always relayed
+onward.) Set `[server].iface = ""` for an ingest-only deployment with no local
+CAN hardware. The token is sent in clear text — deploy on a trusted network or
+wrap the connection in a VPN / stunnel if it crosses untrusted segments.
 
 ## Sizing guidance for clients
 
@@ -170,3 +174,109 @@ A worst-case batch (256 × classic CAN, 8-byte payloads) is
 at full load (~4000 frames/s), flushing 256-frame batches means ~16 batches/s
 ≈ 74 KB/s of TCP traffic, comfortably inside ESP32 Wi-Fi capability. Flush
 partial batches on a timer (e.g. 250 ms) so quiet buses still record promptly.
+
+---
+
+## Proposed: v2 typed batches
+
+> **Not implemented. Do not write firmware against this section.** No server
+> accepts `BATCH_TYPED` today and no client sends it. It is recorded here so the
+> shape is settled before Modbus capture lands, and because the upgrade path
+> constrains what v1 clients may assume. The v1 protocol above is frozen and
+> stays supported indefinitely.
+
+Modbus capture needs to reach the archive through the same pipeline as CAN —
+same batching, same disk cache, same ACK-after-write. A v1 record cannot carry
+it: the layout is fixed at 10 bytes plus payload, and every bit of `id_flags` is
+already allocated (0–28 arbitration id, 29 extended, 30 FD, 31 direction), so
+there is no spare bit to mean "this is a register, not a frame", and nowhere to
+put a unit id, an address and a register kind.
+
+### A new message type, not a new version
+
+| type   | name          | direction       |
+|--------|---------------|-----------------|
+| `0x04` | `BATCH_TYPED` | client → server |
+
+`0x02 BATCH` is **frozen** and keeps its exact v1 meaning forever. A device that
+only captures CAN never needs updating.
+
+`BATCH_TYPED` body:
+
+| offset | size | field        | notes                                        |
+|--------|------|--------------|----------------------------------------------|
+| 0      | 4    | `seq`        | u32 — as v1, echoed in the ACK               |
+| 4      | 8    | `base_ts_us` | u64 — as v1 (0 when `TIME_RELATIVE`)         |
+| 12     | 1    | `kind`       | u8 — record layout: 0 = CAN, 1 = register    |
+| 13     | 1    | `reserved`   | u8 — must be 0                               |
+| 14     | 2    | `count`      | u16 — records that follow                    |
+| 16     | …    | records      | `count` records, ascending `delta_ts_us`     |
+
+One `kind` per batch rather than per record: a device is almost always one
+protocol, it keeps per-record overhead at zero, and it lets the gateway write a
+whole batch to one table. A mixed source flushes one batch per kind.
+
+`kind = 0` records are **byte-identical to v1's**, so the encoder and parser are
+shared rather than reimplemented. In practice a CAN-only device just keeps using
+`0x02`.
+
+`kind = 1` — Modbus register:
+
+| offset | size  | field         | notes                                             |
+|--------|-------|---------------|---------------------------------------------------|
+| 0      | 4     | `delta_ts_us` | u32 — µs offset from `base_ts_us`, as v1          |
+| 4      | 2     | `address`     | u16 — register / coil address                     |
+| 6      | 1     | `unit`        | u8 — Modbus unit (slave) id                       |
+| 7      | 1     | `reg_kind`    | u8 — 0 coil, 1 discrete input, 2 holding, 3 input |
+| 8      | 1     | `bus`         | u8 — link index (which RTU port or TCP endpoint)  |
+| 9      | 1     | `flags`       | u8 — bit 0 direction (0 = read, 1 = write)        |
+| 10     | 1     | `len`         | u8 — value length in bytes                        |
+| 11     | `len` | `value`       | raw bytes, big-endian as Modbus delivers them     |
+
+11 bytes of overhead, so 13 for a 16-bit holding register. Size is not the
+constraint here — register polling runs at tens of samples per second against
+CAN's thousands.
+
+`ACK` is unchanged and applies to `BATCH_TYPED` exactly as to `BATCH`.
+
+### Upgrading without breaking deployed devices
+
+Both server implementations check the version with **strict equality**, not as a
+floor — `version != PROTO_VERSION` is rejected with `HELLO_BAD_VERSION`. So a
+client that announces 2 is locked out of every server that has not been upgraded
+first, and the hardest things in the fleet to reflash are exactly the
+microcontrollers.
+
+**So clients never bump the version they announce.** `HELLO_ACK` already carries
+`accepted_version` at offset 1, and every server already populates it. Capability
+discovery uses that field:
+
+1. The client sends `HELLO` with `proto_version = 1`, as it always has.
+2. The server replies `status = 0`, `accepted_version = 2`.
+3. The client sends `0x04` **only** if that byte is ≥ 2; otherwise it stays on
+   `0x02`.
+
+This reads the version byte as *"the minimum version I require"* rather than
+*"the version I speak"* — compatible with every client already deployed, which
+all send 1, and every server, which all accept 1. No handshake change and no
+reflashing.
+
+**Ordering.** A server must accept `0x04` before any client emits it. Nothing
+about `0x02` or the handshake changes, so v1 devices are unaffected by that
+upgrade and keep working indefinitely.
+
+**The trap.** Unknown message types are *ignored*, not rejected — deliberately,
+for forward compatibility. A client that skips the `accepted_version` check and
+sends `0x04` to a v1 server therefore gets no ACK at all and, under
+at-least-once delivery, resends forever: a silent stall rather than a clean
+error. Treat the check as a hard precondition, and cover it in the conformance
+suite. Servers should also relax the equality test to reject only
+`version > PROTO_VERSION`, so a client that does announce a future version
+degrades instead of being refused outright.
+
+### Still open
+
+The wire format is half the question. Where a `kind = 1` record *lands* —
+a `protocol` discriminator on `can_frame`, or a separate `modbus_register`
+hypertable — is undecided, and it is one change spanning this protocol, the
+gateway's ingest writer and `init_schema.sql`.
