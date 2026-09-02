@@ -185,10 +185,23 @@ Once both read and ingest go through the gateway, retire the host PostgreSQL.
 
 ```bash
 cargo test                 # unit tests (proto codec, schema splitter, db names)
-./smoke_test.sh            # HTTP endpoint + auth-matrix + import (needs stack up)
 ./parity_test.py           # backend SQL vs direct-psql ground truth
 # protocol conformance against the running ingest listener:
 python3 ../../tools/test_ingest_client.py \
     --host localhost --port 9323 --token "$WIRETAP_ADMIN_KEY" \
     --database conformance --conformance
 ```
+
+`smoke_test.sh` needs the stack up **and a seeded database** — its read-path checks query
+`frame_id` 2016 (`0x7E0`), and nothing here creates that data, so an unseeded run fails
+four checks for the wrong reason. Seed it with the ingest client, which sends exactly the
+ids those checks expect (`0x7E0`–`0x7E3`):
+
+```bash
+python3 ../../tools/test_ingest_client.py --host localhost --port 9323 \
+    --token "$WIRETAP_ADMIN_KEY" --database vehicle_test --count 40
+./smoke_test.sh http://localhost:8423 "$WIRETAP_ADMIN_KEY" vehicle_test
+```
+
+Expect **29 passed, 0 failed**. The third argument is the seeded database and defaults to
+`vehicle_test`.

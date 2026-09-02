@@ -31,8 +31,31 @@ All notable changes to this project are documented here. Entries go under
   than ignored, because silently ignoring it would drop every frame an operator believes is
   being archived. `tools/migrate_to_timescale.py` remains for moving an existing archive.
 
+### Fixed
+
+- `.dockerignore`'s secrets patterns were root-anchored and so matched nothing below the
+  top level — Docker, unlike git, does not treat a slash-free pattern as any-depth. The
+  `.env` the READMEs tell you to create sits at `crates/wiretap-backend/.env` and was
+  therefore inside the build context, alongside a `COPY crates/` that would have carried it
+  into the image. Both halves are fixed: the patterns are `**/`-prefixed, and the Dockerfile
+  copies only the manifest, `src/` and `schema/`. Narrowing the copy also keeps the admin-ui
+  sources out of the layer that gates `cargo build`, where editing a `.tsx` recompiled every
+  dependency.
+- Folding the gateway crate's `.gitignore` into the root dropped `docker-compose.override.yml`
+  and `*.tsbuildinfo`. Restored, and the patterns are now path-independent so a second crate
+  is covered before it exists.
+- Six documentation links and paths left dangling by the move. The pass that rewrote them
+  originally only matched references that *named* the moved directory, which is why some
+  survived.
+- Two clippy warnings inherited from the gateway crate, and a one-off `rustfmt` pass over
+  it — it had never been formatted, having lived in a repo whose CI only built the desktop
+  app. `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test` all pass.
+
 ### Notes
 
 - Nothing is packaged yet. The `.deb` files and a published multi-architecture gateway
   image arrive with the first tagged release; until then the gateway is built from source
   by its own Compose stack, as before.
+- The Docker stack is verified on Apple Silicon (native arm64): image builds in ~46 s,
+  both services healthy, `smoke_test.sh` 29/29 and the ingest conformance suite 12/12.
+  `smoke_test.sh` needs a seeded database first — see the gateway's README.
