@@ -10,7 +10,7 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
 - **`wiretap-backend`** (Rust / axum) — the only process that talks to Postgres.
   Two listeners plus a built-in admin UI:
   - **Binary ingest** (TCP 9323) — the protocol in
-    [docs/ingest-protocol.md](../docs/ingest-protocol.md), for MCUs and the Pi's
+    [docs/ingest-protocol.md](../../docs/ingest-protocol.md), for MCUs and the Pi's
     forward mode. Writes are **ACK-after-write**: a batch is stored in Postgres
     before the device is acknowledged, so a database outage back-pressures the
     device into its own disk cache (nothing is buffered in gateway RAM).
@@ -175,8 +175,9 @@ profile: the Query app's engines, bookmarks and time ranges, replay with speed
 control, and the headless MCP analysis tools (`frame_inventory`,
 `frame_byte_profile`, `frame_checksum_scan`, `catalog_coverage`, and the
 `query_*` engines) — pass the backend profile's id as `profile_id` exactly as
-before. See the WireTAP desktop repo,
-which also records how sampling differs between a capture and an archive.
+before. See [docs/mcp-analysis-tools.md](https://github.com/Wired-Square/WireTAP/blob/main/docs/mcp-analysis-tools.md)
+in the desktop repo, which also records how sampling differs between a capture
+and an archive.
 
 Once both read and ingest go through the gateway, retire the host PostgreSQL.
 
@@ -187,7 +188,7 @@ cargo test                 # unit tests (proto codec, schema splitter, db names)
 ./smoke_test.sh            # HTTP endpoint + auth-matrix + import (needs stack up)
 ./parity_test.py           # backend SQL vs direct-psql ground truth
 # protocol conformance against the running ingest listener:
-python3 ../wiretap-server/test_ingest_client.py \
+python3 ../../tools/test_ingest_client.py \
     --host localhost --port 9323 --token "$WIRETAP_ADMIN_KEY" \
     --database conformance --conformance
 ```

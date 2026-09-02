@@ -1,11 +1,13 @@
-# Workspace root for WireTAP-Server. Crates live under `crates/<name>/` and
-# share the metadata below via `<field>.workspace = true` — including `version`,
-# so the whole workspace is versioned and released as a single unit and one
-# `vX.Y.Z` tag covers every member and every .deb.
+# Workspace root for WireTAP-Server.
 #
-# Dependency versions live HERE, not in the member manifests, so two crates
-# cannot end up on different minor versions of the same crate and quietly
-# disagree about a type that crosses between them.
+# `version` is inherited by every member, so one `vX.Y.Z` tag covers the whole
+# workspace and every .deb built from it.
+#
+# Dependency *versions* are declared here so two crates cannot disagree about a
+# type that crosses between them. Feature sets are NOT: a member can only add to
+# an inherited feature list, never subtract, so `features` in this table would
+# become a floor for all five planned crates — including the static-musl
+# appliance binaries, which want a much smaller tokio than the gateway does.
 [workspace]
 resolver = "2"
 members = ["crates/*"]
@@ -21,21 +23,21 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 [workspace.dependencies]
 # --- async runtime and HTTP ---
 axum = "0.8"
-tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tokio = "1"
+tower-http = "0.6"
 futures-util = "0.3"
 
-# --- PostgreSQL, for the gateway only ---
-# The capture server does NOT talk to PostgreSQL: it forwards to the gateway
-# over the binary ingest protocol, which is what keeps its .deb a static musl
-# binary with no TLS stack and no libpq.
+# --- PostgreSQL ---
+# Only the gateway uses these. The capture server forwards to it over the binary
+# ingest protocol rather than writing to PostgreSQL, which is what keeps its .deb
+# a static musl binary with no TLS stack and no libpq.
 deadpool-postgres = "0.14"
-tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+tokio-postgres = "0.7"
 
 # --- serialisation and encoding ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = "0.4"
 base64 = "0.22"
 bytes = "1"
 hex = "0.4"
@@ -51,7 +53,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # One binary per package, shipped to appliances over the network: size and
-# start-up cost more than build time does.
+# start-up cost more than build time does. codegen-units = 1 is worth its ~5s —
+# without it the binary is 35% larger.
 [profile.release]
 lto = "thin"
 codegen-units = 1

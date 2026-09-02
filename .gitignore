@@ -1,16 +1,18 @@
 # Local agent instructions and settings — never pushed to a remote.
+# A slash-free pattern already matches at any depth, so this covers crates too.
 CLAUDE.md
-**/CLAUDE.md
 .claude/
 
-# Rust
-/target/
+# Rust and Node build products. Patterns are path-independent so a new crate is
+# covered the day it lands, rather than when someone remembers to edit this file.
 **/target/
+**/node_modules/
+**/dist/
+**/*.tsbuildinfo
 
-# Node / frontend
-node_modules/
-frontend/dist/
-crates/wiretap-backend/admin-ui/dist/
+# A developer's local compose tweaks — the file most likely to hold a published
+# port or a credential.
+**/docker-compose.override.yml
 
 # Secrets and local environment
 .env
@@ -19,15 +21,15 @@ crates/wiretap-backend/admin-ui/dist/
 *.key
 *.crt
 
-# Appliance image build: pi-gen clone, work dirs, deploy artefacts and the
-# operator-identity half of the config, which carries an SSH key.
+# Appliance image build. pi-gen clones itself here and writes multi-gigabyte
+# work trees; config.local carries the operator's SSH public key, which is the
+# half of the image config that must not be tracked.
 packaging/image/pi-gen/
 packaging/image/work/
 packaging/image/deploy/
 packaging/image/config.local
 
-# Build output
-/dist/
+# Release artefacts
 *.deb
 *.img
 *.img.xz

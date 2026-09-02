@@ -16,14 +16,12 @@ TrueNAS (and most NAS app systems) install from a prebuilt image, not a
 Dockerfile. Pick one:
 
 **A. Build natively on the target host** (no registry; what we use for the NAS).
-Copy a checkout to the host and build from the workspace root:
+Copy a checkout to the host, then:
 ```bash
-# from a checkout on the host, at the repo root:
 docker build -f crates/wiretap-backend/Dockerfile -t wiretap-backend:latest .
 ```
-The build context must be the workspace root — `wiretap-backend` is a workspace
-member, so cargo needs the root `Cargo.toml` and `Cargo.lock` as well as
-`crates/`.
+Run it from the repo root — `wiretap-backend` is a workspace member, so cargo
+needs the root `Cargo.toml` and `Cargo.lock`, and the context must include them.
 
 **B. Build elsewhere, copy the image** (no registry, cross-machine). Build for
 the target's architecture, then stream it over SSH:

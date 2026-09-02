@@ -33,5 +33,6 @@ All notable changes to this project are documented here. Entries go under
 
 ### Notes
 
-- Nothing in this release is packaged yet. The `.deb` and Docker artefacts arrive with the
-  first tagged release.
+- Nothing is packaged yet. The `.deb` files and a published multi-architecture gateway
+  image arrive with the first tagged release; until then the gateway is built from source
+  by its own Compose stack, as before.

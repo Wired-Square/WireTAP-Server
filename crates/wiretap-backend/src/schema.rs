@@ -1,11 +1,8 @@
 //! Capture-database schema bootstrap. The canonical schema lives in
 //! schema/init_schema.sql and is embedded at compile time.
-//!
-//! It used to sit beside the Python server and be reached with a
-//! cross-directory include, because that server wrote to PostgreSQL directly
-//! and needed the same file. It no longer does — the gateway owns the database
-//! and everything else forwards to it — so the schema lives here, with its one
-//! consumer, and the Docker build context is an ordinary workspace root.
+//! It lives in this crate because the gateway is the only program that applies
+//! it: the capture server forwards over the ingest protocol rather than writing
+//! to PostgreSQL itself.
 //!
 //! TimescaleDB continuous aggregates cannot be created inside a transaction
 //! block, and the simple-protocol batch executor runs a multi-statement
@@ -15,10 +12,6 @@
 use tokio_postgres::Client;
 
 const INIT_SCHEMA: &str = include_str!("../schema/init_schema.sql");
-
-/// Ingest role the grants in init_schema.sql target. Kept in step with that file
-/// by `preamble_role_matches_schema_grants`.
-const INGEST_ROLE: &str = "wiretap";
 
 /// Create the ingest role (NOLOGIN) so a pristine container database accepts the
 /// schema unchanged. A cluster predating the rename still holds it as `candor`;
@@ -142,6 +135,11 @@ fn is_only_comments(stmt: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ingest role the grants in init_schema.sql target. Lives here because
+    /// it is the test's expectation of what PREAMBLE and those grants must
+    /// agree on, not something the schema code itself reads.
+    const INGEST_ROLE: &str = "wiretap";
 
     #[test]
     fn splits_simple_statements() {

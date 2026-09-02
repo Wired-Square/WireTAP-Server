@@ -1,23 +1,28 @@
 # Build context is the WORKSPACE ROOT (see docker-compose.yml), because the
 # crate is a workspace member and cargo needs the root manifest and lockfile.
-# The capture schema now lives inside this crate, so nothing reaches across
-# directories any more.
 
 # --- admin UI (static SPA served at /admin) ---
 FROM node:22-bookworm-slim AS admin-ui
 WORKDIR /ui
-COPY crates/wiretap-backend/admin-ui/package.json crates/wiretap-backend/admin-ui/package-lock.json* ./
-RUN npm install
+COPY crates/wiretap-backend/admin-ui/package.json crates/wiretap-backend/admin-ui/package-lock.json ./
+# ci, not install: install re-resolves the `^` ranges against the registry, so
+# the image can drift off the committed lockfile.
+RUN npm ci
 COPY crates/wiretap-backend/admin-ui/ ./
 RUN npm run build
 
 # --- backend binary ---
 FROM rust:1-bookworm AS build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock* ./
-# The whole crates/ tree: cargo resolves every workspace member's manifest, so
-# copying only this one would fail as soon as a second crate lands.
-COPY crates/ crates/
+COPY Cargo.toml Cargo.lock ./
+# Only what cargo compiles. Copying all of crates/ would put the admin-ui
+# sources, the READMEs and the compose files in the layer that gates
+# `cargo build`, so editing a .tsx would recompile all ~130 crates.
+# A second workspace member needs its manifest here too — cargo resolves every
+# member — but only its manifest.
+COPY crates/wiretap-backend/Cargo.toml crates/wiretap-backend/
+COPY crates/wiretap-backend/src        crates/wiretap-backend/src
+COPY crates/wiretap-backend/schema     crates/wiretap-backend/schema
 RUN cargo build --release -p wiretap-backend
 
 # --- runtime ---

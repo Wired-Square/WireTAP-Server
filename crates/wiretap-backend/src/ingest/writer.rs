@@ -44,9 +44,9 @@ pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), String> {
             .ok_or_else(|| format!("timestamp out of range: {}", row.ts_us))?;
         // COPY text format: literal backslash is escaped, so bytea hex input
         // (\x…) is written as \\x…
-        let _ = write!(
+        let _ = writeln!(
             buf,
-            "{}\t{}\t{}\t{}\t{}\t\\\\x{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t\\\\x{}\t{}\t{}",
             ts.format("%Y-%m-%dT%H:%M:%S%.6f+00:00"),
             row.id,
             if row.extended { 't' } else { 'f' },

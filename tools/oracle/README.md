@@ -322,7 +322,7 @@ sudo systemctl restart postgresql
 ### 4. Initialize the Schema
 
 ```bash
-sudo -u postgres psql -d wiretap -f init_schema.sql
+sudo -u postgres psql -d wiretap -f ../../crates/wiretap-backend/schema/init_schema.sql
 ```
 
 ### 5. Configure the Server
@@ -398,14 +398,14 @@ source archive is static during the move.
 SRC=postgresql://user:pass@old-host:5432/legacy_archive
 TGT=postgresql://postgres:pass@127.0.0.1:5432/wiretap   # backend container
 
-./migrate_to_timescale.py --source-dsn "$SRC" --target-dsn "$TGT"
-./migrate_to_timescale.py --source-dsn "$SRC" --target-dsn "$TGT" --status
+../migrate_to_timescale.py --source-dsn "$SRC" --target-dsn "$TGT"
+../migrate_to_timescale.py --source-dsn "$SRC" --target-dsn "$TGT" --status
 ```
 
 The script needs `psycopg2` (`pip install psycopg2-binary`) and network access
 to both databases. The container's Postgres isn't published by default — either
 run the script on the compose network or temporarily uncomment
-`127.0.0.1:5432:5432` in `tools/wiretap-backend/docker-compose.yml`.
+`127.0.0.1:5432:5432` in `crates/wiretap-backend/docker-compose.yml`.
 
 ## Binary Ingest API (Microcontroller Clients)
 

@@ -12,45 +12,28 @@ Two programs that run on your network rather than on your desktop:
   to it: not the desktop app, not capture devices, not the server. Serves an HTTP query API,
   a browser admin interface, and the binary ingest listener.
 
-A third package, `wiretap-web`, adds a browser interface for administering a capture
-appliance. It is not built yet.
+A third package, `wiretap-web`, will add a browser interface for administering a capture
+appliance.
 
 ## Status
 
-**Early.** The server is being ported from the Python implementation that lived in the
-WireTAP repo; that Python is kept at [tools/oracle/](tools/oracle/) as the reference the
-port is tested against, and it still runs. The gateway is production code and moved here
-unchanged.
+**Early.** The gateway is production code and moved here unchanged — run it with Docker as
+described below. The capture server is being ported from the Python implementation that
+lived in the WireTAP repo; that Python is kept at [tools/oracle/](tools/oracle/) as the
+reference the port is tested against, and it still runs.
 
-## Install
+**Nothing is packaged yet.** The Debian packages — `wiretap-server` and `wiretap-web` as
+static musl binaries for amd64 and arm64, installable on any distribution with systemd —
+arrive with the first tagged release, along with a multi-architecture gateway image.
 
-### Debian and Raspberry Pi OS
+## Running the gateway
 
-Download the `.deb` for your architecture from the
-[latest release](https://github.com/Wired-Square/WireTAP-Server/releases) and install it:
-
-```sh
-sudo apt install ./wiretap-server_0.1.0_arm64.deb   # or _amd64.deb
-sudoedit /etc/wiretap-server/wiretap-server.toml    # set iface and [forward]
-sudo systemctl enable --now wiretap-server
-```
-
-The binaries are statically linked against musl, so the packages declare no library
-dependencies and install on any distribution with systemd — a Raspberry Pi on arm64, or a
-VM or container on amd64.
-
-### The gateway, with Docker
-
-```sh
+```bash
 cd crates/wiretap-backend
-cp .env.example .env          # set POSTGRES_PASSWORD
-docker compose up -d --build
-curl http://localhost:8423/v1/health
-open http://localhost:8423/admin
 ```
 
-For a production host that cannot build images, see
-[crates/wiretap-backend/deploy/](crates/wiretap-backend/deploy/).
+then follow [its README](crates/wiretap-backend/README.md#quick-start). For a production
+host that cannot build images, see [crates/wiretap-backend/deploy/](crates/wiretap-backend/deploy/).
 
 ## Layout
 
@@ -59,8 +42,8 @@ For a production host that cannot build images, see
 | [crates/wiretap-backend/](crates/wiretap-backend/) | The gateway: HTTP API, ingest listener, admin SPA, Docker stack, capture schema |
 | [tools/](tools/) | Test and admin scripts. Never packaged, never shipped |
 | [tools/oracle/](tools/oracle/) | The Python server, kept runnable as the port's reference |
-| [docs/](docs/) | The ingest and GVRET protocol specifications |
-| [debian/](debian/), [packaging/](packaging/) | Package metadata, build scripts, appliance image |
+| [docs/ingest-protocol.md](docs/ingest-protocol.md) | The binary ingest wire format, for anyone writing capture-device firmware |
+| [debian/](debian/) | Package metadata |
 
 ## Build
 

@@ -85,9 +85,9 @@ def query_all(conn, sql, args=()):
 
 def ensure_target(tgt):
     if query1(tgt, "SELECT 1 FROM pg_extension WHERE extname='timescaledb'") is None:
-        sys.exit("target has no timescaledb extension — start the backend (or run init_schema.sql) first")
+        sys.exit("target has no timescaledb extension — start the backend, which applies the schema itself")
     if query1(tgt, "SELECT to_regclass('public.can_frame')")[0] is None:
-        sys.exit("target has no public.can_frame table — run init_schema.sql on the target first")
+        sys.exit("target has no public.can_frame table — apply crates/wiretap-backend/schema/init_schema.sql to it first")
     with tgt.cursor() as cur:
         cur.execute(PROGRESS_TABLE)
     tgt.commit()
