@@ -1,0 +1,58 @@
+# Workspace root for WireTAP-Server. Crates live under `crates/<name>/` and
+# share the metadata below via `<field>.workspace = true` — including `version`,
+# so the whole workspace is versioned and released as a single unit and one
+# `vX.Y.Z` tag covers every member and every .deb.
+#
+# Dependency versions live HERE, not in the member manifests, so two crates
+# cannot end up on different minor versions of the same crate and quietly
+# disagree about a type that crosses between them.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Alex Ferrara <alex@wiredsquare.com>"]
+repository = "https://github.com/Wired-Square/WireTAP-Server"
+
+[workspace.dependencies]
+# --- async runtime and HTTP ---
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs"] }
+futures-util = "0.3"
+
+# --- PostgreSQL, for the gateway only ---
+# The capture server does NOT talk to PostgreSQL: it forwards to the gateway
+# over the binary ingest protocol, which is what keeps its .deb a static musl
+# binary with no TLS stack and no libpq.
+deadpool-postgres = "0.14"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+
+# --- serialisation and encoding ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+bytes = "1"
+hex = "0.4"
+
+# --- hashing, checksums, secrets ---
+# crc32fast is the ingest protocol's frame check; sha2 hashes API keys at rest.
+crc32fast = "1"
+sha2 = "0.10"
+rand = "0.8"
+
+# --- logging ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# One binary per package, shipped to appliances over the network: size and
+# start-up cost more than build time does.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -21,7 +21,7 @@ Usage:
 
 The source needs only SELECT on public.can_frame. To reach the container's
 Postgres, temporarily publish its port (uncomment "127.0.0.1:5432:5432" in
-tools/wiretap-backend/docker-compose.yml) or run this on the compose network.
+crates/wiretap-backend/docker-compose.yml) or run this on the compose network.
 """
 
 import argparse

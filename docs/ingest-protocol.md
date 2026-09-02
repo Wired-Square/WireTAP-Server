@@ -11,9 +11,9 @@ buffer sizes known at compile time, and at-least-once delivery with explicit
 backpressure.
 
 The reference server implementation is `IngestTcpServer` in
-[tools/wiretap-server/wiretap-server.py](../tools/wiretap-server/wiretap-server.py);
+[tools/oracle/wiretap-server.py](../tools/oracle/wiretap-server.py);
 a Python reference client and loopback test suite is
-[tools/wiretap-server/test_ingest_client.py](../tools/wiretap-server/test_ingest_client.py).
+[tools/test_ingest_client.py](../tools/test_ingest_client.py).
 
 ## Transport and framing
 

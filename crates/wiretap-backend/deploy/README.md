@@ -16,19 +16,19 @@ TrueNAS (and most NAS app systems) install from a prebuilt image, not a
 Dockerfile. Pick one:
 
 **A. Build natively on the target host** (no registry; what we use for the NAS).
-Copy the build context (the `tools/wiretap-backend/` tree + the shared schema
-file) to the host and build there:
+Copy a checkout to the host and build from the workspace root:
 ```bash
-# from a checkout on the host, repo root:
-docker build -f tools/wiretap-backend/Dockerfile -t wiretap-backend:latest .
+# from a checkout on the host, at the repo root:
+docker build -f crates/wiretap-backend/Dockerfile -t wiretap-backend:latest .
 ```
-The build context must contain `tools/wiretap-backend/` and `tools/wiretap-server/init_schema.sql`
-(the Dockerfile `include_str!`s the schema), so build from the repo root.
+The build context must be the workspace root — `wiretap-backend` is a workspace
+member, so cargo needs the root `Cargo.toml` and `Cargo.lock` as well as
+`crates/`.
 
 **B. Build elsewhere, copy the image** (no registry, cross-machine). Build for
 the target's architecture, then stream it over SSH:
 ```bash
-docker build --platform linux/amd64 -f tools/wiretap-backend/Dockerfile -t wiretap-backend:latest .
+docker build --platform linux/amd64 -f crates/wiretap-backend/Dockerfile -t wiretap-backend:latest .
 docker save wiretap-backend:latest | ssh root@nas 'docker load'
 ```
 (Apple Silicon must pass `--platform linux/amd64` for an x86_64 NAS.)
@@ -110,4 +110,4 @@ Notes:
   `ingest` key (admin UI → Keys).
 - **Migrate an existing archive** into the NAS database: see the runbook in
   [../README.md](../README.md#migrating-an-existing-archive-into-the-container)
-  and [tools/wiretap-server/migrate_to_timescale.py](../../wiretap-server/migrate_to_timescale.py).
+  and [tools/migrate_to_timescale.py](../../../tools/migrate_to_timescale.py).

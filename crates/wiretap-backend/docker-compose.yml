@@ -29,7 +29,7 @@ services:
   backend:
     build:
       context: ../..
-      dockerfile: tools/wiretap-backend/Dockerfile
+      dockerfile: crates/wiretap-backend/Dockerfile
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       WIRETAP_ADMIN_KEY: ${WIRETAP_ADMIN_KEY:-}

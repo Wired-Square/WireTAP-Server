@@ -1,6 +1,11 @@
 //! Capture-database schema bootstrap. The canonical schema lives in
-//! tools/wiretap-server/init_schema.sql (shared with standalone
-//! wiretap-server deployments) and is embedded at compile time.
+//! schema/init_schema.sql and is embedded at compile time.
+//!
+//! It used to sit beside the Python server and be reached with a
+//! cross-directory include, because that server wrote to PostgreSQL directly
+//! and needed the same file. It no longer does — the gateway owns the database
+//! and everything else forwards to it — so the schema lives here, with its one
+//! consumer, and the Docker build context is an ordinary workspace root.
 //!
 //! TimescaleDB continuous aggregates cannot be created inside a transaction
 //! block, and the simple-protocol batch executor runs a multi-statement
@@ -9,7 +14,7 @@
 
 use tokio_postgres::Client;
 
-const INIT_SCHEMA: &str = include_str!("../../wiretap-server/init_schema.sql");
+const INIT_SCHEMA: &str = include_str!("../schema/init_schema.sql");
 
 /// Ingest role the grants in init_schema.sql target. Kept in step with that file
 /// by `preamble_role_matches_schema_grants`.
@@ -18,7 +23,7 @@ const INGEST_ROLE: &str = "wiretap";
 /// Create the ingest role (NOLOGIN) so a pristine container database accepts the
 /// schema unchanged. A cluster predating the rename still holds it as `candor`;
 /// rename it *before* deploying this, or these grants land on a fresh, unused
-/// role. Runbook: tools/wiretap-server/README.md.
+/// role. Runbook: tools/oracle/README.md.
 const PREAMBLE: &str = r#"
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'wiretap') THEN

@@ -30,7 +30,7 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
 ## Quick start
 
 ```bash
-cd tools/wiretap-backend
+cd crates/wiretap-backend
 cp .env.example .env
 # edit .env: set POSTGRES_PASSWORD and WIRETAP_ADMIN_KEY (openssl rand -hex 32)
 docker compose up -d --build
@@ -105,7 +105,7 @@ volume first.
 ## Migrating an existing archive into the container
 
 If you already have months of captures in a host PostgreSQL, move them into the
-container with [tools/wiretap-server/migrate_to_timescale.py](../wiretap-server/migrate_to_timescale.py).
+container with [tools/migrate_to_timescale.py](../../tools/migrate_to_timescale.py).
 It copies `public.can_frame` day-by-day from the source into the container's
 hypertable, validating each day by row count + checksum and compressing as it
 goes; it's resumable, so re-running skips finished days. (A plain `pg_dump`
@@ -127,7 +127,7 @@ docker compose up -d
 SRC=postgresql://user:pass@old-host:5432/legacy_archive
 TGT=postgresql://postgres:$POSTGRES_PASSWORD@127.0.0.1:5432/wiretap
 pip install psycopg2-binary    # one-off, for the migrator
-../wiretap-server/migrate_to_timescale.py --source-dsn "$SRC" --target-dsn "$TGT"
+../../tools/migrate_to_timescale.py --source-dsn "$SRC" --target-dsn "$TGT"
 
 # 3. Verify counts and that the hourly rollup is populated
 docker compose exec timescaledb psql -U postgres -d wiretap \
@@ -175,7 +175,7 @@ profile: the Query app's engines, bookmarks and time ranges, replay with speed
 control, and the headless MCP analysis tools (`frame_inventory`,
 `frame_byte_profile`, `frame_checksum_scan`, `catalog_coverage`, and the
 `query_*` engines) — pass the backend profile's id as `profile_id` exactly as
-before. See [docs/mcp-analysis-tools.md](../../docs/mcp-analysis-tools.md),
+before. See the WireTAP desktop repo,
 which also records how sampling differs between a capture and an archive.
 
 Once both read and ingest go through the gateway, retire the host PostgreSQL.

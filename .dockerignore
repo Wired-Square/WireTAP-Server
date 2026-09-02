@@ -1,0 +1,37 @@
+# The backend image builds from the workspace root, because wiretap-backend is
+# a workspace member and cargo needs the root manifest and lockfile.
+#
+# This is an ordinary deny-list. It replaces the allowlist the WireTAP repo had
+# to carry, which existed only to re-admit one SQL file from a sibling directory
+# — that file now lives inside the crate that uses it.
+
+**/target/
+**/node_modules/
+**/dist/
+
+.git/
+.github/
+.claude/
+CLAUDE.md
+**/CLAUDE.md
+
+.env
+.env.local
+*.pem
+*.key
+*.crt
+
+# Not needed to build the image: the appliance packaging, the Python oracle and
+# admin tools, and the docs.
+debian/
+packaging/
+tools/
+docs/
+
+*.deb
+*.img
+*.img.xz
+*.db
+*.db-wal
+*.db-shm
+.DS_Store

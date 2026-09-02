@@ -1,0 +1,47 @@
+# Local agent instructions and settings — never pushed to a remote.
+CLAUDE.md
+**/CLAUDE.md
+.claude/
+
+# Rust
+/target/
+**/target/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+crates/wiretap-backend/admin-ui/dist/
+
+# Secrets and local environment
+.env
+.env.local
+*.pem
+*.key
+*.crt
+
+# Appliance image build: pi-gen clone, work dirs, deploy artefacts and the
+# operator-identity half of the config, which carries an SSH key.
+packaging/image/pi-gen/
+packaging/image/work/
+packaging/image/deploy/
+packaging/image/config.local
+
+# Build output
+/dist/
+*.deb
+*.img
+*.img.xz
+
+# Capture data and caches
+*.db
+*.db-wal
+*.db-shm
+*.dump
+*.pcapng
+
+# Editor / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.sw?
