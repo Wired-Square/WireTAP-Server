@@ -94,7 +94,10 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                 let rest = &sql[i + 1..];
                 if let Some(end) = rest.find('$') {
                     let tag_body = &rest[..end];
-                    if tag_body.chars().all(|t| t.is_ascii_alphanumeric() || t == '_') {
+                    if tag_body
+                        .chars()
+                        .all(|t| t.is_ascii_alphanumeric() || t == '_')
+                    {
                         let tag = format!("${tag_body}$");
                         current.push(c);
                         for _ in 0..tag.len() - 1 {
@@ -169,7 +172,9 @@ mod tests {
     #[test]
     fn embedded_schema_splits_and_contains_expected_objects() {
         let stmts = split_statements(INIT_SCHEMA);
-        assert!(stmts.iter().any(|s| s.contains("CREATE TABLE IF NOT EXISTS public.can_frame")));
+        assert!(stmts
+            .iter()
+            .any(|s| s.contains("CREATE TABLE IF NOT EXISTS public.can_frame")));
         assert!(stmts.iter().any(|s| s.contains("create_hypertable")));
         assert!(stmts.iter().any(|s| s.contains("can_frame_hourly")));
         // The plpgsql function body must survive as a single statement
@@ -200,7 +205,8 @@ mod tests {
             assert!(
                 grant.contains(&format!("TO {}", INGEST_ROLE)),
                 "grant does not target {}: {}",
-                INGEST_ROLE, grant
+                INGEST_ROLE,
+                grant
             );
         }
     }

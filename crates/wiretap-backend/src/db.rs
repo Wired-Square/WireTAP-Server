@@ -16,7 +16,9 @@ pub fn valid_db_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
         && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 #[derive(Clone)]
@@ -49,7 +51,9 @@ impl Databases {
         let mgr = Manager::from_config(
             pg_config,
             NoTls,
-            ManagerConfig { recycling_method: RecyclingMethod::Fast },
+            ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            },
         );
         Pool::builder(mgr)
             .max_size(8)
@@ -73,7 +77,10 @@ impl Databases {
     pub async fn database_exists(&self, name: &str) -> Result<bool, String> {
         let client = self.connect_raw("postgres").await?;
         let row = client
-            .query_one("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)", &[&name])
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
+                &[&name],
+            )
             .await
             .map_err(|e| format!("pg_database lookup failed: {e}"))?;
         Ok(row.get(0))
@@ -139,7 +146,10 @@ impl Databases {
             return Err(format!("database '{name}' does not exist"));
         }
         let pool = self.build_pool(name)?;
-        self.pools.lock().await.insert(name.to_string(), pool.clone());
+        self.pools
+            .lock()
+            .await
+            .insert(name.to_string(), pool.clone());
         Ok(pool)
     }
 
@@ -151,7 +161,9 @@ impl Databases {
         }
         if !self.database_exists(name).await? {
             if !(allow_create && self.config.auto_create_databases) {
-                return Err(format!("database '{name}' does not exist (auto-create disabled)"));
+                return Err(format!(
+                    "database '{name}' does not exist (auto-create disabled)"
+                ));
             }
             self.create_database(name).await?;
         }

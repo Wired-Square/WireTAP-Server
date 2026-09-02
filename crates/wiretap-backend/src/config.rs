@@ -29,7 +29,10 @@ fn var_or(name: &str, default: &str) -> String {
 }
 
 fn parse_or<T: std::str::FromStr>(name: &str, default: T) -> T {
-    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 impl Config {

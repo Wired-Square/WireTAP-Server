@@ -79,7 +79,11 @@ async fn run() -> Result<(), String> {
         }
     });
 
-    let app_state = Arc::new(AppState { dbs, keys, sessions });
+    let app_state = Arc::new(AppState {
+        dbs,
+        keys,
+        sessions,
+    });
     let listener = tokio::net::TcpListener::bind(&config.http_listen)
         .await
         .map_err(|e| format!("http bind {}: {e}", config.http_listen))?;

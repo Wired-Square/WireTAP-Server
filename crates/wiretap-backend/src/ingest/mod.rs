@@ -116,7 +116,10 @@ impl IngestServer {
                 match frame.mtype {
                     MSG_HELLO => match self.handle_hello(&frame.body, peer).await {
                         Ok((ack, session)) => {
-                            stream.write_all(&ack).await.map_err(|e| format!("write: {e}"))?;
+                            stream
+                                .write_all(&ack)
+                                .await
+                                .map_err(|e| format!("write: {e}"))?;
                             match session {
                                 Some(s) => authed = Some(s),
                                 None => return self.finish(authed, Ok(())).await,
@@ -137,7 +140,10 @@ impl IngestServer {
                         let ack = self
                             .handle_batch(&frame.body, pool, *session_id, *time_relative)
                             .await;
-                        stream.write_all(&ack).await.map_err(|e| format!("write: {e}"))?;
+                        stream
+                            .write_all(&ack)
+                            .await
+                            .map_err(|e| format!("write: {e}"))?;
                     }
                     _ => {} // unknown type: ignore (forward compatibility)
                 }
@@ -261,7 +267,11 @@ impl IngestServer {
                     ts_us: base_ts_us + rec.delta_us as i64,
                     id: rec.id_flags & ID_ARB_MASK,
                     extended: rec.id_flags & ID_EXTENDED != 0,
-                    dlc: if is_fd { proto::len_to_dlc(plen) } else { plen.min(8) as u8 },
+                    dlc: if is_fd {
+                        proto::len_to_dlc(plen)
+                    } else {
+                        plen.min(8) as u8
+                    },
                     is_fd,
                     data: rec.payload,
                     bus: rec.bus,

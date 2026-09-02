@@ -30,7 +30,10 @@ impl Args {
     }
 
     fn refs(&self) -> Vec<&(dyn ToSql + Sync)> {
-        self.boxed.iter().map(|b| b.as_ref() as &(dyn ToSql + Sync)).collect()
+        self.boxed
+            .iter()
+            .map(|b| b.as_ref() as &(dyn ToSql + Sync))
+            .collect()
     }
 }
 
@@ -112,7 +115,10 @@ pub async fn byte_changes(
            AND prev_byte IS DISTINCT FROM curr_byte \
          ORDER BY ts LIMIT {limit}"
     );
-    let rows = client.query(&query, &args.refs()).await.map_err(|e| format!("Query failed: {e}"))?;
+    let rows = client
+        .query(&query, &args.refs())
+        .await
+        .map_err(|e| format!("Query failed: {e}"))?;
     let results: Vec<ByteChangeResult> = rows
         .iter()
         .map(|row| ByteChangeResult {
@@ -122,7 +128,10 @@ pub async fn byte_changes(
         })
         .collect();
     let n = results.len();
-    Ok(ByteChangeQueryResult { results, stats: stats(t0, n, n) })
+    Ok(ByteChangeQueryResult {
+        results,
+        stats: stats(t0, n, n),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,7 +159,10 @@ pub async fn frame_changes(
          WHERE prev_data IS NOT NULL AND prev_data IS DISTINCT FROM data_bytes \
          ORDER BY ts LIMIT {limit}"
     );
-    let rows = client.query(&query, &args.refs()).await.map_err(|e| format!("Query failed: {e}"))?;
+    let rows = client
+        .query(&query, &args.refs())
+        .await
+        .map_err(|e| format!("Query failed: {e}"))?;
     let results: Vec<FrameChangeResult> = rows
         .iter()
         .map(|row| {
@@ -166,7 +178,10 @@ pub async fn frame_changes(
         })
         .collect();
     let n = results.len();
-    Ok(FrameChangeQueryResult { results, stats: stats(t0, n, n) })
+    Ok(FrameChangeQueryResult {
+        results,
+        stats: stats(t0, n, n),
+    })
 }
 
 fn diff_indices(a: &[u8], b: &[u8]) -> Vec<usize> {
@@ -215,7 +230,10 @@ pub async fn mirror_validation(
          WHERE m.data_bytes IS DISTINCT FROM s.data_bytes \
          ORDER BY m.ts LIMIT {limit}"
     );
-    let rows = client.query(&query, &args.refs()).await.map_err(|e| format!("Query failed: {e}"))?;
+    let rows = client
+        .query(&query, &args.refs())
+        .await
+        .map_err(|e| format!("Query failed: {e}"))?;
     let results: Vec<MirrorValidationResult> = rows
         .iter()
         .map(|row| {
@@ -232,7 +250,10 @@ pub async fn mirror_validation(
         })
         .collect();
     let n = results.len();
-    Ok(MirrorValidationQueryResult { results, stats: stats(t0, n, n) })
+    Ok(MirrorValidationQueryResult {
+        results,
+        stats: stats(t0, n, n),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -285,8 +306,10 @@ pub async fn mux_statistics(
         end_b = plen - 1,
     );
 
-    let count_rows =
-        client.query(&count_query, &args.refs()).await.map_err(|e| format!("Query failed: {e}"))?;
+    let count_rows = client
+        .query(&count_query, &args.refs())
+        .await
+        .map_err(|e| format!("Query failed: {e}"))?;
     let byte_rows = client
         .query(&byte_query, &args.refs())
         .await
@@ -300,7 +323,12 @@ pub async fn mux_statistics(
         total_frames += frame_count;
         cases.insert(
             mux_value,
-            MuxCaseStats { mux_value, frame_count, byte_stats: Vec::new(), word16_stats: Vec::new() },
+            MuxCaseStats {
+                mux_value,
+                frame_count,
+                byte_stats: Vec::new(),
+                word16_stats: Vec::new(),
+            },
         );
     }
     for row in &byte_rows {
@@ -376,7 +404,10 @@ pub struct FirstLastParams {
     pub query_id: Option<String>,
 }
 
-pub async fn first_last(client: &Client, p: &FirstLastParams) -> Result<FirstLastQueryResult, String> {
+pub async fn first_last(
+    client: &Client,
+    p: &FirstLastParams,
+) -> Result<FirstLastQueryResult, String> {
     let t0 = Instant::now();
     let mut args = Args::default();
     let w = p.filter.where_clause(&mut args);
@@ -384,18 +415,27 @@ pub async fn first_last(client: &Client, p: &FirstLastParams) -> Result<FirstLas
         "SELECT (EXTRACT(EPOCH FROM ts) * 1000000)::float8 AS timestamp_us, data_bytes FROM public.can_frame";
 
     let first_rows = client
-        .query(&format!("{select} {w} ORDER BY ts ASC LIMIT 1"), &args.refs())
+        .query(
+            &format!("{select} {w} ORDER BY ts ASC LIMIT 1"),
+            &args.refs(),
+        )
         .await
         .map_err(|e| format!("First query failed: {e}"))?;
     if first_rows.is_empty() {
         return Err("No frames found matching the filter".to_string());
     }
     let last_rows = client
-        .query(&format!("{select} {w} ORDER BY ts DESC LIMIT 1"), &args.refs())
+        .query(
+            &format!("{select} {w} ORDER BY ts DESC LIMIT 1"),
+            &args.refs(),
+        )
         .await
         .map_err(|e| format!("Last query failed: {e}"))?;
     let count_rows = client
-        .query(&format!("SELECT COUNT(*) AS count FROM public.can_frame {w}"), &args.refs())
+        .query(
+            &format!("SELECT COUNT(*) AS count FROM public.can_frame {w}"),
+            &args.refs(),
+        )
         .await
         .map_err(|e| format!("Count query failed: {e}"))?;
 
@@ -420,7 +460,10 @@ pub struct FrequencyParams {
     pub query_id: Option<String>,
 }
 
-pub async fn frequency(client: &Client, p: &FrequencyParams) -> Result<FrequencyQueryResult, String> {
+pub async fn frequency(
+    client: &Client,
+    p: &FrequencyParams,
+) -> Result<FrequencyQueryResult, String> {
     let t0 = Instant::now();
     let limit = p.limit.unwrap_or(500_000);
     let bucket_us = p.bucket_size_ms as i64 * 1000;
@@ -436,7 +479,10 @@ pub async fn frequency(client: &Client, p: &FrequencyParams) -> Result<Frequency
                FROM (SELECT ts FROM public.can_frame {w} ORDER BY ts LIMIT {limit}) f) s \
          WHERE dt_us IS NOT NULL GROUP BY 1 ORDER BY 1"
     );
-    let rows = client.query(&query, &args.refs()).await.map_err(|e| format!("Query failed: {e}"))?;
+    let rows = client
+        .query(&query, &args.refs())
+        .await
+        .map_err(|e| format!("Query failed: {e}"))?;
     let mut rows_scanned = 0usize;
     let results: Vec<FrequencyBucket> = rows
         .iter()
@@ -453,7 +499,10 @@ pub async fn frequency(client: &Client, p: &FrequencyParams) -> Result<Frequency
         })
         .collect();
     let n = results.len();
-    Ok(FrequencyQueryResult { results, stats: stats(t0, rows_scanned, n) })
+    Ok(FrequencyQueryResult {
+        results,
+        stats: stats(t0, rows_scanned, n),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -476,7 +525,10 @@ pub async fn distribution(
         "SELECT public.get_byte_safe(data_bytes, ${byte_idx}::int4) AS value, COUNT(*) AS count \
          FROM public.can_frame {w} GROUP BY value ORDER BY count DESC"
     );
-    let rows = client.query(&query, &args.refs()).await.map_err(|e| format!("Query failed: {e}"))?;
+    let rows = client
+        .query(&query, &args.refs())
+        .await
+        .map_err(|e| format!("Query failed: {e}"))?;
     let mut results: Vec<DistributionResult> = Vec::new();
     let mut total: i64 = 0;
     for row in &rows {
@@ -494,7 +546,10 @@ pub async fn distribution(
         }
     }
     let n = results.len();
-    Ok(DistributionQueryResult { results, stats: stats(t0, n, n) })
+    Ok(DistributionQueryResult {
+        results,
+        stats: stats(t0, n, n),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -525,7 +580,10 @@ pub async fn gap_analysis(
          AND (EXTRACT(EPOCH FROM ts - prev_ts) * 1000)::float8 > {threshold} \
          ORDER BY duration_ms DESC LIMIT {limit}"
     );
-    let rows = client.query(&query, &args.refs()).await.map_err(|e| format!("Query failed: {e}"))?;
+    let rows = client
+        .query(&query, &args.refs())
+        .await
+        .map_err(|e| format!("Query failed: {e}"))?;
     let results: Vec<GapResult> = rows
         .iter()
         .map(|row| GapResult {
@@ -535,7 +593,10 @@ pub async fn gap_analysis(
         })
         .collect();
     let n = results.len();
-    Ok(GapAnalysisQueryResult { results, stats: stats(t0, n, n) })
+    Ok(GapAnalysisQueryResult {
+        results,
+        stats: stats(t0, n, n),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -579,7 +640,11 @@ pub async fn pattern_search(
 
     let mut rows_scanned = 0usize;
     let mut results: Vec<PatternSearchResult> = Vec::new();
-    while let Some(row) = row_stream.try_next().await.map_err(|e| format!("Row fetch failed: {e}"))? {
+    while let Some(row) = row_stream
+        .try_next()
+        .await
+        .map_err(|e| format!("Row fetch failed: {e}"))?
+    {
         rows_scanned += 1;
         let data_bytes: Vec<u8> = row.get("data_bytes");
         if data_bytes.len() < p.pattern.len() {
@@ -588,7 +653,8 @@ pub async fn pattern_search(
         let match_positions: Vec<usize> = (0..=data_bytes.len() - p.pattern.len())
             .filter(|&start| {
                 (0..p.pattern.len()).all(|j| {
-                    (data_bytes[start + j] & p.pattern_mask[j]) == (p.pattern[j] & p.pattern_mask[j])
+                    (data_bytes[start + j] & p.pattern_mask[j])
+                        == (p.pattern[j] & p.pattern_mask[j])
                 })
             })
             .collect();
@@ -606,7 +672,10 @@ pub async fn pattern_search(
         }
     }
     let n = results.len();
-    Ok(PatternSearchQueryResult { results, stats: stats(t0, rows_scanned, n) })
+    Ok(PatternSearchQueryResult {
+        results,
+        stats: stats(t0, rows_scanned, n),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -615,7 +684,10 @@ pub async fn pattern_search(
 
 async fn rollup_available(client: &Client) -> bool {
     client
-        .query_one("SELECT to_regclass('public.can_frame_hourly') IS NOT NULL", &[])
+        .query_one(
+            "SELECT to_regclass('public.can_frame_hourly') IS NOT NULL",
+            &[],
+        )
         .await
         .map(|r| r.get::<_, bool>(0))
         .unwrap_or(false)
@@ -708,7 +780,10 @@ pub async fn payloads(client: &Client, p: &PayloadsParams) -> Result<Vec<Vec<u8>
         sql += &format!(" AND extended = ${}::bool", args.add(ext));
     }
     sql += &format!(" ORDER BY ts DESC LIMIT {limit}");
-    let rows = client.query(&sql, &args.refs()).await.map_err(|e| format!("Payload fetch failed: {e}"))?;
+    let rows = client
+        .query(&sql, &args.refs())
+        .await
+        .map_err(|e| format!("Payload fetch failed: {e}"))?;
     Ok(rows.iter().map(|r| r.get("data_bytes")).collect())
 }
 
@@ -726,7 +801,10 @@ pub fn decode_cursor(cursor: &str) -> Result<(i64, u32), String> {
         .map_err(|_| "bad cursor".to_string())?;
     let s = String::from_utf8(raw).map_err(|_| "bad cursor".to_string())?;
     let (ts, skip) = s.split_once(':').ok_or("bad cursor")?;
-    Ok((ts.parse().map_err(|_| "bad cursor")?, skip.parse().map_err(|_| "bad cursor")?))
+    Ok((
+        ts.parse().map_err(|_| "bad cursor")?,
+        skip.parse().map_err(|_| "bad cursor")?,
+    ))
 }
 
 /// One keyset-cursor batch of frames in ascending time order. The cursor is
@@ -756,7 +834,10 @@ pub async fn frames_batch(
     let skip = cursor.map(|(_, s)| s).unwrap_or(0) as usize;
     sql += &format!(" ORDER BY ts ASC LIMIT {}", limit as usize + skip);
 
-    let rows = client.query(&sql, &args.refs()).await.map_err(|e| format!("Frame query failed: {e}"))?;
+    let rows = client
+        .query(&sql, &args.refs())
+        .await
+        .map_err(|e| format!("Frame query failed: {e}"))?;
     let exhausted = rows.len() < limit as usize + skip;
 
     let frames: Vec<FrameBatchRow> = rows
@@ -778,7 +859,11 @@ pub async fn frames_batch(
         None
     } else {
         let last_ts = frames.last().unwrap().ts_us;
-        let ties = frames.iter().rev().take_while(|f| f.ts_us == last_ts).count() as u32;
+        let ties = frames
+            .iter()
+            .rev()
+            .take_while(|f| f.ts_us == last_ts)
+            .count() as u32;
         // If the whole batch (and the cursor row before it) shares one ts,
         // carry the previous skip forward
         let carried = match cursor {
@@ -788,7 +873,10 @@ pub async fn frames_batch(
         Some(encode_cursor(last_ts, ties + carried))
     };
 
-    Ok(FrameBatch { frames, next_cursor })
+    Ok(FrameBatch {
+        frames,
+        next_cursor,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -837,7 +925,11 @@ pub async fn activity(client: &Client, database: &str) -> Result<DatabaseActivit
 }
 
 pub async fn signal_backend(client: &Client, pid: i32, terminate: bool) -> Result<bool, String> {
-    let func = if terminate { "pg_terminate_backend" } else { "pg_cancel_backend" };
+    let func = if terminate {
+        "pg_terminate_backend"
+    } else {
+        "pg_cancel_backend"
+    };
     let row = client
         .query_one(&format!("SELECT {func}($1)"), &[&pid])
         .await

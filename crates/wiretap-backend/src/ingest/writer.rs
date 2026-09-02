@@ -57,7 +57,11 @@ pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), String> {
             if row.dir_tx { "tx" } else { "rx" },
         );
     }
-    sink.send(Bytes::from(buf)).await.map_err(|e| format!("copy send: {e}"))?;
-    sink.finish().await.map_err(|e| format!("copy finish: {e}"))?;
+    sink.send(Bytes::from(buf))
+        .await
+        .map_err(|e| format!("copy send: {e}"))?;
+    sink.finish()
+        .await
+        .map_err(|e| format!("copy finish: {e}"))?;
     Ok(())
 }

@@ -186,7 +186,11 @@ pub fn parse_batch(body: &[u8], max_frames: usize) -> Option<Result<Batch, u32>>
         });
         off += plen;
     }
-    Some(Ok(Batch { seq, base_ts_us, records }))
+    Some(Ok(Batch {
+        seq,
+        base_ts_us,
+        records,
+    }))
 }
 
 #[cfg(test)]
@@ -234,7 +238,12 @@ mod tests {
 
     #[test]
     fn hello_with_database() {
-        let h = parse_hello(&hello_body(b"sekrit", "vehicle_1", HELLO_FLAG_TIME_RELATIVE)).unwrap();
+        let h = parse_hello(&hello_body(
+            b"sekrit",
+            "vehicle_1",
+            HELLO_FLAG_TIME_RELATIVE,
+        ))
+        .unwrap();
         assert_eq!(h.token, b"sekrit");
         assert_eq!(h.database, "vehicle_1");
         assert!(h.time_relative);
