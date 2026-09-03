@@ -28,6 +28,23 @@ moves an existing archive.
 This also removes `tokio-postgres` and its TLS surface from the server
 entirely, which is what keeps the `.deb` a static musl binary with no libpq.
 
+### Remote-transmission frames are dropped
+
+An RTR frame carries a data length code but no data. The Python passed them
+through to GVRET clients and to the archive, where the payload came out as
+whatever the receive buffer held — in practice zeros. The Rust skips them.
+
+Skipped in `CanReader::recv`. This is a **behaviour change**, listed here
+because the rule at the top of this file requires it: replicating the Python
+would mean archiving a frame whose payload is an artefact of a buffer, not of
+the bus.
+
+Error frames are *not* a deviation, despite looking like one in the same match
+arm. Neither implementation sets `CAN_RAW_ERR_FILTER`, and the kernel's default
+error mask is zero, so no error frame is ever delivered to either. If bus-health
+reporting is wanted later it needs the socket option first; discarding them is
+not what stops them arriving.
+
 ## Replicated quirks
 
 Each is pinned by a test that names it.
@@ -75,6 +92,17 @@ Recorded so a future reader does not go looking.
   carries the *code*, not the byte count, so 32 bytes is 13 and 64 bytes is 15.
   The desktop's parser depends on this. Test:
   `fd_frame_packs_the_dlc_code_not_the_length`.
+- **Kernel receive timestamps.** `socketcan` asks for `SO_TIMESTAMPNS` where
+  the Python asked for `SO_TIMESTAMP` — nanosecond timespec against microsecond
+  timeval, the same kernel software receive time, truncated to microseconds
+  either way. One `recvmsg` per frame in both.
+- **Bitrate detection, now without pyroute2.** `nl::CanInterface::details()`
+  replaces the hand-rolled `IFLA_CAN_BITTIMING` parsing. The fallback matches
+  the Python case for case, which is subtler than "any error yields
+  (500_000, 0)": a *missing* nominal falls back to 500 kbit/s without
+  discarding a data rate that was read, and a nominal of **zero** — an
+  interface that is up but was never given a bitrate — is reported as zero
+  rather than replaced by the fallback.
 - **Binary-mode resync.** Leading bytes that cannot start a command are skipped
   rather than stalling the connection — deliberate stream recovery in the
   original, kept. The Rust skips to the next candidate in one step where the
@@ -96,10 +124,3 @@ Listed so they are not mistaken for regressions when they land.
   `RecvError::Lagged(n)`. A slow viewer will no longer cost archived frames;
   it will drop its own instead, which is the right trade for a lossy monitor
   protocol.
-- **Kernel timestamps move from `SO_TIMESTAMP` to `SO_TIMESTAMPNS`.**
-  `socketcan`'s `read_frame_with_timestamp` uses nanosecond timespec where the
-  Python used microsecond timeval. Same kernel software receive timestamp,
-  truncated to microseconds either way.
-- **Bitrate detection loses its pyroute2 dependency.** `nl::CanInterface`
-  replaces the hand-rolled `IFLA_CAN_BITTIMING` netlink parsing. The failure
-  semantics are preserved: any error yields `(500_000, 0)`.

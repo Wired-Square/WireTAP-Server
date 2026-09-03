@@ -37,7 +37,9 @@ All notable changes to this project are documented here. Entries go under
   run in the test suite on a development machine, so the arithmetic worth testing — mapping
   a GVRET bus number to an interface index, where an off-by-one puts a transmit on the
   wrong physical bus — sits in a platform-independent module with its own tests, and CI
-  exercises the rest against `vcan`.
+  exercises the rest against `vcan`. Bus numbers are a `SourceId` rather than a bare `u8`
+  through that arithmetic, so an interface index cannot be passed where a bus number is
+  meant — which is the mistake the module exists to prevent.
 - `docs/porting-notes.md` — where the Rust deviates from the Python, and the quirks
   replicated deliberately rather than fixed mid-port.
 
