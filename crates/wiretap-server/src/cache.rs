@@ -8,6 +8,7 @@
 //! at the cost of frames already captured.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rusqlite::{params_from_iter, Connection};
 use wiretap_model::{payload_dlc, CanSample, Direction, SourceId};
@@ -39,7 +40,9 @@ pub type Result<T> = std::result::Result<T, CacheError>;
 pub struct Cached {
     /// Opaque to the caller: a rowid here, a file offset in a segment store.
     pub id: i64,
-    pub sample: CanSample,
+    /// Shared, because the frames on this path came from a capture that had
+    /// already wrapped them and go to a sink that only reads them.
+    pub sample: Arc<CanSample>,
 }
 
 /// A durable FIFO of frames waiting for the gateway.
@@ -56,7 +59,7 @@ pub struct Cached {
 /// worker.
 pub trait FrameCache: Send {
     /// Append frames, returning how many were stored.
-    fn append(&mut self, frames: &[CanSample]) -> Result<usize>;
+    fn append(&mut self, frames: &[Arc<CanSample>]) -> Result<usize>;
 
     /// The oldest `limit` frames, in capture order.
     fn oldest(&mut self, limit: usize) -> Result<Vec<Cached>>;
@@ -181,7 +184,7 @@ fn from_secs(ts: f64) -> i64 {
 }
 
 impl FrameCache for SqliteCache {
-    fn append(&mut self, frames: &[CanSample]) -> Result<usize> {
+    fn append(&mut self, frames: &[Arc<CanSample>]) -> Result<usize> {
         if frames.is_empty() {
             return Ok(0);
         }
@@ -219,7 +222,7 @@ impl FrameCache for SqliteCache {
         let rows = stmt.query_map([limit as i64], |r| {
             Ok(Cached {
                 id: r.get(0)?,
-                sample: CanSample {
+                sample: Arc::new(CanSample {
                     ts_us: from_secs(r.get(1)?),
                     extended: r.get(2)?,
                     is_fd: r.get(3)?,
@@ -230,7 +233,7 @@ impl FrameCache for SqliteCache {
                     // `--pg-dir` said, so a cache from one could hold anything,
                     // and the direction is not worth dropping a frame over.
                     dir: r.get::<_, String>(7)?.parse().unwrap_or(Direction::Rx),
-                },
+                }),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -329,8 +332,8 @@ mod tests {
         (dir, cache)
     }
 
-    fn sample(ts_us: i64, arb_id: u32) -> CanSample {
-        CanSample {
+    fn sample(ts_us: i64, arb_id: u32) -> Arc<CanSample> {
+        Arc::new(CanSample {
             ts_us,
             arb_id,
             extended: false,
@@ -338,13 +341,13 @@ mod tests {
             data: vec![1, 2, 3],
             bus: SourceId(0),
             dir: Direction::Rx,
-        }
+        })
     }
 
     #[test]
     fn frames_come_back_out_in_the_order_they_went_in() {
         let (_dir, mut c) = temp_cache("fifo", 100);
-        let frames: Vec<CanSample> = (0..5).map(|i| sample(1_000 + i, i as u32)).collect();
+        let frames: Vec<Arc<CanSample>> = (0..5).map(|i| sample(1_000 + i, i as u32)).collect();
         assert_eq!(c.append(&frames).unwrap(), 5);
         assert_eq!(c.count().unwrap(), 5);
 
@@ -369,7 +372,7 @@ mod tests {
     #[test]
     fn a_frame_survives_the_round_trip_intact() {
         let (_dir, mut c) = temp_cache("roundtrip", 100);
-        let original = CanSample {
+        let original = Arc::new(CanSample {
             ts_us: 1_700_000_000_123_456,
             arb_id: 0x18DA_F110,
             extended: true,
@@ -377,7 +380,7 @@ mod tests {
             data: (0..64).collect(),
             bus: SourceId(7),
             dir: Direction::Tx,
-        };
+        });
         c.append(std::slice::from_ref(&original)).unwrap();
         assert_eq!(c.oldest(1).unwrap()[0].sample, original);
     }
@@ -404,7 +407,7 @@ mod tests {
     #[test]
     fn the_size_includes_the_write_ahead_log() {
         let (_dir, mut c) = temp_cache("size", 100);
-        let frames: Vec<CanSample> = (0..2_000).map(|i| sample(i, i as u32)).collect();
+        let frames: Vec<Arc<CanSample>> = (0..2_000).map(|i| sample(i, i as u32)).collect();
         c.append(&frames).unwrap();
 
         let db_only = std::fs::metadata(c.path()).map(|m| m.len()).unwrap_or(0);
@@ -519,7 +522,7 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
 
         let frames = c.oldest(10).unwrap();
         assert_eq!(
-            frames[0].sample,
+            *frames[0].sample,
             CanSample {
                 ts_us: 1_700_000_000_123_456,
                 arb_id: 0x123,
@@ -531,7 +534,7 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
             }
         );
         assert_eq!(
-            frames[1].sample,
+            *frames[1].sample,
             CanSample {
                 ts_us: 1_700_000_000_987_654,
                 arb_id: 0x18DA_F110,
@@ -556,7 +559,7 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
     #[test]
     fn a_python_could_read_what_this_writes() {
         let (_dir, mut c) = temp_cache("forward-compat", 100);
-        c.append(&[CanSample {
+        c.append(&[Arc::new(CanSample {
             ts_us: 1_700_000_000_123_456,
             arb_id: 0x18DA_F110,
             extended: true,
@@ -564,7 +567,7 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
             data: vec![0xAA; 12],
             bus: SourceId(7),
             dir: Direction::Tx,
-        }])
+        })])
         .unwrap();
 
         let row: (f64, i64, i64, i64, i64, Vec<u8>, i64, String) = c

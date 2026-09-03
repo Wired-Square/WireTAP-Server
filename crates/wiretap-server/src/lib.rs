@@ -13,6 +13,7 @@ pub mod archive;
 pub mod cache;
 pub mod cli;
 pub mod console;
+pub mod forward;
 pub mod gvret;
 /// Wiring the capture loop together. Linux-only: it starts with a CAN socket.
 #[cfg(target_os = "linux")]

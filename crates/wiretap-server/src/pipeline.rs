@@ -14,21 +14,30 @@
 //! a read, and no read can delay a client.
 
 use std::io::{self, Write as _};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
-use wiretap_model::CanSample;
+use wiretap_model::{CanSample, Direction};
 
+use crate::archive;
+use crate::cache::{CacheError, FrameCache, SqliteCache};
 use crate::console;
+use crate::forward::ForwardSink;
 use crate::gvret::server;
-use crate::settings::Settings;
+use crate::settings::{Forward, Settings};
 use crate::source::{
     bus_count, bus_for_index, index_for_bus,
     socketcan::{detect_bitrates, CanReader},
-    Transmit,
+    system_time_to_us, Transmit,
 };
+
+/// Frames moved at a time out of a cache an older install left behind. Big
+/// enough that a large one moves quickly, small enough that an interrupted
+/// transfer loses nothing.
+const LEGACY_DRAIN_BATCH: usize = 1_000;
 
 /// Frames held for a GVRET client that is behind.
 ///
@@ -56,6 +65,10 @@ pub enum RunError {
     Bind {
         addr: String,
         err: io::Error,
+    },
+    Cache {
+        path: String,
+        err: String,
     },
     /// No CAN interfaces and no ingest listener.
     NothingToDo,
@@ -87,6 +100,12 @@ impl std::fmt::Display for RunError {
                 "cannot listen on {addr}: {err}{}",
                 hint(err, ". A port below 1024 needs CAP_NET_BIND_SERVICE")
             ),
+            // Refusing to start is right: the cache is what stands between a
+            // gateway outage and lost frames, and capturing without one would
+            // look identical until the outage came.
+            Self::Cache { path, err } => {
+                write!(f, "cannot open the disk cache at {path}: {err}")
+            }
             Self::NothingToDo => write!(
                 f,
                 "no CAN interfaces configured and the ingest listener is disabled; nothing to do"
@@ -174,18 +193,139 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
         },
     );
 
+    // The archive, if there is one to send to. Its absence is already warned
+    // about at startup, and the capture runs either way — a GVRET bridge with
+    // no archive is a legitimate deployment.
+    let archive = match &settings.forward {
+        Some(forward) => Some(start_archive(forward, settings.stats_interval)?),
+        None => None,
+    };
+
     for (reader, iface) in readers.iter().cloned().zip(settings.ifaces.clone()) {
-        tokio::spawn(read_loop(reader, iface, frames.clone()));
+        tokio::spawn(read_loop(
+            reader,
+            iface,
+            frames.clone(),
+            archive.as_ref().map(|a| a.frames.clone()),
+        ));
     }
     if settings.echo_console {
         tokio::spawn(echo_loop(frames.subscribe(), settings.colour));
     }
-    tokio::spawn(transmit_loop(readers, settings.bus_offset, transmit_queue));
+    tokio::spawn(transmit_loop(
+        readers,
+        settings.bus_offset,
+        transmit_queue,
+        archive.as_ref().map(|a| a.frames.clone()),
+    ));
     tokio::spawn(listener.run());
 
     shutdown().await;
     info!("Shutting down");
+
+    // Dropping the last sender is what tells the batcher to flush and stop, so
+    // this has to outlive the reader tasks — which the runtime drops when this
+    // returns. `TimeoutStopSec` in the unit is what gives the flush room.
+    if let Some(archive) = archive {
+        drop(archive.frames);
+        let _ = archive.worker.await;
+    }
     Ok(())
+}
+
+/// The queue, the worker task, and the disk cache behind them.
+struct RunningArchive {
+    frames: archive::Archive,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+/// Open the cache, drain anything an older install left in `$HOME`, and start
+/// the batcher.
+fn start_archive(forward: &Forward, stats_interval: f64) -> Result<RunningArchive, RunError> {
+    let batching = &forward.batching;
+    let mut cache =
+        SqliteCache::open(&batching.cache_path, batching.cache_max_mb).map_err(|e| {
+            RunError::Cache {
+                path: batching.cache_path.display().to_string(),
+                err: e.to_string(),
+            }
+        })?;
+    adopt_legacy_cache(&mut cache, &batching.cache_path);
+
+    let (frames, batcher) =
+        archive::channel(ForwardSink::new(forward), cache, batching, stats_interval);
+    Ok(RunningArchive {
+        frames,
+        worker: tokio::spawn(batcher.run()),
+    })
+}
+
+/// Move frames out of the cache an older, `$HOME`-based install left behind.
+///
+/// The Python cached to `~/.wiretap-server-cache.db` unconditionally. Once the
+/// default moves under `StateDirectory=`, an upgrade would otherwise leave
+/// whatever an outage had captured sitting in a file nothing reads again. This
+/// runs once, at startup, before anything is enqueued — so the recovered frames
+/// come out of the cache ahead of everything captured since, which is the
+/// ordering the drain is built to preserve.
+fn adopt_legacy_cache(cache: &mut SqliteCache, in_use: &Path) {
+    let Some(legacy) = std::env::var_os("HOME")
+        .map(|home| Path::new(&home).join(".wiretap-server-cache.db"))
+        .filter(|p| p != in_use && p.exists())
+    else {
+        return;
+    };
+
+    let mut old = match SqliteCache::open(&legacy, u64::MAX / (1024 * 1024)) {
+        Ok(c) => c,
+        Err(e) => {
+            error!(
+                "cannot open the previous cache at {}: {e}",
+                legacy.display()
+            );
+            return;
+        }
+    };
+    let moved = match old.count() {
+        Ok(0) => 0,
+        Ok(_) => match transfer(&mut old, cache) {
+            Ok(n) => n,
+            Err(e) => {
+                error!("cannot drain the previous cache: {e}; leaving it alone");
+                return;
+            }
+        },
+        Err(e) => {
+            error!("cannot read the previous cache: {e}; leaving it alone");
+            return;
+        }
+    };
+
+    if moved > 0 {
+        info!(
+            "adopted {moved} frames from the previous cache at {}",
+            legacy.display()
+        );
+    }
+    if let Err(e) = old.delete() {
+        warn!("cannot remove the previous cache: {e}");
+    }
+}
+
+/// Copy every frame from one cache to another, oldest first, deleting as it
+/// goes so an interrupted transfer resumes rather than duplicating.
+fn transfer(from: &mut SqliteCache, to: &mut SqliteCache) -> Result<u64, CacheError> {
+    let mut moved = 0;
+    loop {
+        let batch = from.oldest(LEGACY_DRAIN_BATCH)?;
+        if batch.is_empty() {
+            return Ok(moved);
+        }
+        let frames: Vec<Arc<CanSample>> = batch.iter().map(|c| Arc::clone(&c.sample)).collect();
+        to.append(&frames)?;
+        from.remove(&batch)?;
+        moved += frames.len() as u64;
+    }
 }
 
 fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {
@@ -197,14 +337,19 @@ async fn read_loop(
     reader: Arc<CanReader>,
     iface: String,
     frames: broadcast::Sender<Arc<CanSample>>,
+    archive: Option<archive::Archive>,
 ) {
     loop {
         match reader.recv().await {
             Ok(sample) => {
-                // A send error only means nothing is subscribed. The archive
-                // will not be — a lossy channel is right for a live monitor and
-                // wrong for a capture, so Stage 3's batcher takes its own.
-                let _ = frames.send(Arc::new(sample));
+                let sample = Arc::new(sample);
+                // Two consumers, two disciplines: the archive's queue is
+                // bounded and spills to disk, while a send error on the
+                // broadcast only means no GVRET client is watching.
+                if let Some(archive) = &archive {
+                    archive.enqueue(Arc::clone(&sample));
+                }
+                let _ = frames.send(sample);
             }
             Err(e) => {
                 // An interface that goes down fails every read, and the Python
@@ -249,6 +394,7 @@ async fn transmit_loop(
     readers: Vec<Arc<CanReader>>,
     bus_offset: u8,
     mut queue: mpsc::Receiver<Transmit>,
+    archive: Option<archive::Archive>,
 ) {
     while let Some(t) = queue.recv().await {
         // A bus this server does not have is dropped in silence, as the Python
@@ -258,6 +404,22 @@ async fn transmit_loop(
         };
         if let Err(e) = readers[index].transmit(t.arb_id, t.extended, &t.data).await {
             warn!("transmit on bus {} failed: {e}", t.bus.0);
+            continue;
+        }
+        // Archived as `tx`, so a request this server made can be told apart
+        // from the traffic it was answering. The Python did the same, and the
+        // frame is timestamped here rather than on the wire — nothing reads a
+        // frame back from a socket it wrote it to.
+        if let Some(archive) = &archive {
+            archive.enqueue(Arc::new(CanSample {
+                ts_us: system_time_to_us(SystemTime::now()),
+                arb_id: t.arb_id,
+                extended: t.extended,
+                is_fd: false,
+                data: t.data,
+                bus: t.bus,
+                dir: Direction::Tx,
+            }));
         }
     }
 }

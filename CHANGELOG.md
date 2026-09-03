@@ -66,6 +66,15 @@ All notable changes to this project are documented here. Entries go under
   against literals, so neither can move alone. This codec had been hand-written four times
   across the two repos — a format where one side is a `struct.Struct("<IIBB")` and the
   other is four `to_le_bytes` calls is a format that drifts.
+- **The capture server archives.** `ForwardSink` speaks the client half of the ingest
+  protocol to a gateway — HELLO with the API key and target database, batches of up to 256
+  records, and a `PING` when the bus is quiet — and every batch is acknowledged only after
+  the gateway has written it, so a slow archive is felt as a failed write and the frames go
+  to disk rather than being accepted and lost. Transmitted frames are archived too, tagged
+  `tx`, so a request this server made can be told from the traffic it was answering.
+- A cache left behind by an older install at `~/.wiretap-server-cache.db` is drained into
+  the configured one at startup and then removed, before a frame is enqueued — so an
+  upgrade during an outage keeps what the outage captured, and keeps it in order.
 - The batcher: a bounded queue, a worker that batches and writes, and the spill-to-disk and
   reconnect-backoff behaviour around it. On an outage it caches the batch it was holding,
   empties the queue behind it and backs off from half a second to ten; when the sink returns

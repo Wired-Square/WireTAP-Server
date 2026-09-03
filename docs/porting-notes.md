@@ -81,6 +81,16 @@ Three `debug` lines are gone, being progress chatter the Rust states once
 three are new, all naming a disk-cache failure the Python swallowed: a failed
 read, delete or reset.
 
+### A cache left in `$HOME` is adopted, then removed
+
+Because the default moved, an upgrade would otherwise strand whatever an outage
+had put in `~/.wiretap-server-cache.db`. At startup, before a frame is
+enqueued, that file is drained into the configured cache a thousand frames at a
+time — deleting as it goes, so an interrupted transfer resumes rather than
+duplicating — and then removed. Draining it *first* is what keeps the archive's
+order intact: those frames are older than anything this run will capture, and
+the batcher already sends the cache ahead of the queue.
+
 ### The disk cache counts its write-ahead log
 
 `size_bytes()` stat'd the database file alone. In WAL mode — which the Python
@@ -229,10 +239,8 @@ and error frames never arrive, both above.
 
 Listed so they are not mistaken for regressions when they land.
 
-- **Transmitted frames are not archived.** The Python enqueued a frame it sent
-  for a GVRET client to its writer, tagged `tx`, so the archive could tell a
-  request apart from bus traffic. The Rust puts it on the bus and no more,
-  because it has no sink yet. Stage 3's batcher takes its own channel — the
-  broadcast behind the GVRET clients is deliberately not it, since a lossy
-  channel is right for a live monitor and wrong for a capture — and the
-  transmit path enqueues to it there.
+- **The binary ingest listener.** Devices that push frames to this server,
+  rather than the server pulling them off a bus, have nowhere to connect yet. A
+  configuration with `[ingest].enable = true` and no CAN interfaces is refused
+  at startup rather than idling as the Python did, because idling would look
+  exactly like working.

@@ -12,8 +12,8 @@
 //! call the gateway "database", where renaming it would break the greps that
 //! are the whole reason anyone reads these lines.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -71,7 +71,7 @@ pub trait BatchSink: Send {
     /// rather than being acknowledged and lost.
     fn write_batch(
         &mut self,
-        batch: &[CanSample],
+        batch: &[Arc<CanSample>],
     ) -> impl std::future::Future<Output = SinkResult> + Send;
 
     /// Called when there is nothing to write, to keep an idle connection from
@@ -108,13 +108,17 @@ fn get(field: &AtomicU64) -> u64 {
 ///
 /// Dropping a frame here is the last resort and the only lossy step in the
 /// archive path, which is why it is counted and logged rather than silent.
+/// Cloneable, and the reporting state is shared rather than copied: there is
+/// one queue however many interfaces feed it, so its high-water mark should be
+/// reported once and not once per reader.
+#[derive(Clone)]
 pub struct Archive {
-    tx: mpsc::Sender<CanSample>,
+    tx: mpsc::Sender<Arc<CanSample>>,
     counters: Arc<Counters>,
     /// Which of the 80/95/100 buckets the queue was last reported in; -1 for
     /// "below 80", so a recovery is reported once rather than every frame.
-    last_bucket: i32,
-    last_full_log: Option<Instant>,
+    last_bucket: Arc<AtomicI64>,
+    last_full_log: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Archive {
@@ -122,7 +126,7 @@ impl Archive {
     ///
     /// Never blocks and never awaits: this is called from the capture path,
     /// where waiting on the archive is what the whole design exists to avoid.
-    pub fn enqueue(&mut self, sample: CanSample) {
+    pub fn enqueue(&self, sample: Arc<CanSample>) {
         match self.tx.try_send(sample) {
             Ok(()) => {
                 add(&self.counters.enqueued, 1);
@@ -143,35 +147,37 @@ impl Archive {
 
     /// Report each 80/95/100 threshold once as the queue fills, and once more
     /// when it falls back below 80.
-    fn warn_thresholds(&mut self) {
+    fn warn_thresholds(&self) {
         let (size, cap) = self.depth();
         if cap == 0 {
             return;
         }
-        let bucket = match (size as f64) / (cap as f64) {
+        let bucket: i64 = match (size as f64) / (cap as f64) {
             r if r >= 1.0 => 100,
             r if r >= 0.95 => 95,
             r if r >= 0.80 => 80,
             _ => -1,
         };
-        if bucket != -1 && bucket != self.last_bucket {
-            self.last_bucket = bucket;
+        // `swap` rather than load-then-store: two readers crossing the same
+        // threshold at once would otherwise both report it.
+        if bucket == -1 {
+            if self.last_bucket.swap(-1, Ordering::Relaxed) != -1 {
+                info!("queue recovered: size={size} cap={cap}");
+            }
+        } else if self.last_bucket.swap(bucket, Ordering::Relaxed) != bucket {
             warn!("queue high water mark: {bucket}% (size={size} cap={cap})");
-        } else if bucket == -1 && self.last_bucket != -1 {
-            self.last_bucket = -1;
-            info!("queue recovered: size={size} cap={cap}");
         }
     }
 
-    fn log_queue_full(&mut self) {
+    fn log_queue_full(&self) {
         let now = Instant::now();
-        if self
-            .last_full_log
-            .is_some_and(|t| now.duration_since(t) < FULL_LOG_INTERVAL)
-        {
+        let mut last = self.last_full_log.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| now.duration_since(t) < FULL_LOG_INTERVAL) {
             return;
         }
-        self.last_full_log = Some(now);
+        *last = Some(now);
+        drop(last);
+
         let (size, cap) = self.depth();
         error!(
             "queue FULL: size={size} cap={cap} dropped_total={}",
@@ -182,7 +188,7 @@ impl Archive {
 
 /// The worker: batches from the queue, writes to the sink, spills to the cache.
 pub struct Batcher<S: BatchSink, C: FrameCache> {
-    rx: mpsc::Receiver<CanSample>,
+    rx: mpsc::Receiver<Arc<CanSample>>,
     sink: S,
     cache: C,
     counters: Arc<Counters>,
@@ -216,8 +222,8 @@ pub fn channel<S: BatchSink, C: FrameCache>(
         Archive {
             tx,
             counters: counters.clone(),
-            last_bucket: -1,
-            last_full_log: None,
+            last_bucket: Arc::new(AtomicI64::new(-1)),
+            last_full_log: Arc::new(Mutex::new(None)),
         },
         Batcher {
             rx,
@@ -377,8 +383,8 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
 
     /// Collect up to `batch_size` frames, waiting `flush_interval` for the
     /// first and taking whatever else is already there.
-    async fn next_batch(&mut self) -> Vec<CanSample> {
-        let mut batch = Vec::new();
+    async fn next_batch(&mut self) -> Vec<Arc<CanSample>> {
+        let mut batch: Vec<Arc<CanSample>> = Vec::new();
         match tokio::time::timeout(self.flush_interval, self.rx.recv()).await {
             Ok(Some(s)) => batch.push(s),
             // Closed, or nothing arrived in time.
@@ -415,7 +421,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
             info!("draining {count} cached frames to database");
         }
 
-        let frames: Vec<CanSample> = cached.iter().map(|c| c.sample.clone()).collect();
+        let frames: Vec<Arc<CanSample>> = cached.iter().map(|c| Arc::clone(&c.sample)).collect();
         self.sink.write_batch(&frames).await?;
         if let Err(e) = blocking(|| self.cache.remove(&cached)) {
             // The frames are safe; the cache now holds duplicates of them.
@@ -434,7 +440,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
 
     /// The sink failed: say so once, put `batch` somewhere durable, and empty
     /// the queue behind it so the capture keeps its own path clear.
-    async fn fail(&mut self, e: SinkError, batch: Vec<CanSample>) {
+    async fn fail(&mut self, e: SinkError, batch: Vec<Arc<CanSample>>) {
         error!("write error: {e}");
         self.sink.close().await;
         self.connected = false;
@@ -449,7 +455,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     }
 
     /// Store a batch on disk, or count it dropped and say why.
-    fn cache_batch(&mut self, batch: &[CanSample]) {
+    fn cache_batch(&mut self, batch: &[Arc<CanSample>]) {
         if blocking(|| self.cache.is_full()) {
             error!(
                 "disk cache full ({} MB), dropping {} frames",
@@ -471,7 +477,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// Empty the in-memory queue onto disk, in cache-sized batches.
     fn drain_queue_to_cache(&mut self) {
         let mut drained = 0usize;
-        let mut batch = Vec::new();
+        let mut batch: Vec<Arc<CanSample>> = Vec::new();
         while let Ok(s) = self.rx.try_recv() {
             batch.push(s);
             if batch.len() >= self.batch_size {
@@ -510,7 +516,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// On the way out: everything still queued goes to the sink if it is
     /// there, and to disk if it is not.
     async fn shutdown_flush(&mut self) {
-        let mut remaining = Vec::new();
+        let mut remaining: Vec<Arc<CanSample>> = Vec::new();
         while let Ok(s) = self.rx.try_recv() {
             remaining.push(s);
         }
@@ -566,8 +572,8 @@ mod tests {
     use std::sync::Mutex;
     use wiretap_model::{Direction, SourceId};
 
-    fn sample(arb_id: u32) -> CanSample {
-        CanSample {
+    fn sample(arb_id: u32) -> Arc<CanSample> {
+        Arc::new(CanSample {
             ts_us: i64::from(arb_id),
             arb_id,
             extended: false,
@@ -575,7 +581,7 @@ mod tests {
             data: vec![1],
             bus: SourceId(0),
             dir: Direction::Rx,
-        }
+        })
     }
 
     /// Small and quick: a batch that fills fast, a queue that is easy to fill,
@@ -626,7 +632,7 @@ mod tests {
             self.0.check()
         }
 
-        async fn write_batch(&mut self, batch: &[CanSample]) -> SinkResult {
+        async fn write_batch(&mut self, batch: &[Arc<CanSample>]) -> SinkResult {
             self.0.check()?;
             self.0
                 .frames
@@ -668,12 +674,12 @@ mod tests {
     struct FakeCache(CacheState);
 
     impl FrameCache for FakeCache {
-        fn append(&mut self, frames: &[CanSample]) -> crate::cache::Result<usize> {
+        fn append(&mut self, frames: &[Arc<CanSample>]) -> crate::cache::Result<usize> {
             let mut held = self.0.frames.lock().unwrap();
             for f in frames {
                 held.push(Cached {
                     id: self.0.next_id.fetch_add(1, Ordering::Relaxed),
-                    sample: f.clone(),
+                    sample: Arc::clone(f),
                 });
             }
             Ok(frames.len())
@@ -768,7 +774,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn frames_reach_the_sink() {
-        let mut r = rig(100);
+        let r = rig(100);
         for i in 0..10 {
             r.archive.enqueue(sample(i));
         }
@@ -783,7 +789,7 @@ mod tests {
     /// bus's order across the boundary.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_outage_caches_and_drains_in_order() {
-        let mut r = rig(100);
+        let r = rig(100);
         r.sink.fail(Some("gateway down"));
 
         for i in 0..8 {
@@ -820,7 +826,7 @@ mod tests {
     async fn a_full_queue_drops_and_counts() {
         let sink = SinkState::default();
         sink.fail(Some("gateway down"));
-        let (mut archive, batcher) = channel(
+        let (archive, batcher) = channel(
             FakeSink(sink.clone()),
             FakeCache(CacheState::default()),
             &batching(4),
@@ -849,7 +855,7 @@ mod tests {
         let cache = CacheState::default();
         let mut cfg = batching(20);
         cfg.queue_flush_pct = 50;
-        let (mut archive, batcher) =
+        let (archive, batcher) =
             channel(FakeSink(sink.clone()), FakeCache(cache.clone()), &cfg, 0.0);
         let task = tokio::spawn(batcher.run());
 
@@ -870,7 +876,7 @@ mod tests {
     /// bound, and the frames it drops are counted.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_full_cache_drops_rather_than_growing() {
-        let mut r = rig(100);
+        let r = rig(100);
         r.sink.fail(Some("gateway down"));
         r.cache.full.store(true, Ordering::Relaxed);
 
@@ -899,7 +905,7 @@ mod tests {
     /// What is still queued at shutdown is written, not dropped.
     #[tokio::test(flavor = "multi_thread")]
     async fn shutdown_flushes_what_is_left() {
-        let mut r = rig(100);
+        let r = rig(100);
         for i in 0..3 {
             r.archive.enqueue(sample(i));
         }
@@ -911,7 +917,7 @@ mod tests {
     /// And if the sink is gone at shutdown, it goes to disk instead.
     #[tokio::test(flavor = "multi_thread")]
     async fn shutdown_falls_back_to_the_cache() {
-        let mut r = rig(100);
+        let r = rig(100);
         r.sink.fail(Some("gateway down"));
         for i in 0..3 {
             r.archive.enqueue(sample(i));
