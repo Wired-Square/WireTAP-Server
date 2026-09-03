@@ -35,6 +35,9 @@ impl From<rusqlite::Error> for CacheError {
 
 pub type Result<T> = std::result::Result<T, CacheError>;
 
+/// Frames moved at a time when adopting a cache an older install left behind.
+const ADOPT_BATCH: usize = 1_000;
+
 /// A frame in the cache, with whatever the store needs to find it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cached {
@@ -86,6 +89,12 @@ pub struct SqliteCache {
     conn: Connection,
     path: PathBuf,
     max_bytes: u64,
+    /// Tracked rather than counted. SQLite has no O(1) `COUNT(*)` and there is
+    /// no index to scan instead, so asking the database would read every BLOB
+    /// page — up to `cache_max_mb` of SD card — and the stats line asks every
+    /// ten seconds, during an outage, on the task that should be spilling the
+    /// queue.
+    rows: u64,
 }
 
 impl SqliteCache {
@@ -99,7 +108,114 @@ impl SqliteCache {
             std::fs::create_dir_all(parent)
                 .map_err(|e| CacheError(format!("cannot create {}: {e}", parent.display())))?;
         }
-        let conn = Connection::open(&path)?;
+        let conn = Self::open_conn(&path)?;
+        Ok(Self {
+            rows: count_rows(&conn)?,
+            conn,
+            path,
+            max_bytes: max_mb.saturating_mul(1024 * 1024),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Take everything out of a cache an older install left behind, oldest
+    /// first, and delete it.
+    ///
+    /// The Python cached to `~/.wiretap-server-cache.db` unconditionally. Now
+    /// that the default lives under `StateDirectory=`, an upgrade would leave
+    /// whatever an outage had captured in a file nothing reads again. Called at
+    /// startup before a frame is enqueued, so the recovered frames are ahead of
+    /// everything this run captures — the ordering the drain exists to keep.
+    ///
+    /// Frames are deleted from the source as they land in the destination, so
+    /// an interruption resumes rather than duplicating. Returns how many moved;
+    /// a source that is not there is `Ok(0)`.
+    pub fn adopt(&mut self, legacy: &Path) -> Result<u64> {
+        if !legacy.exists() || legacy == self.path {
+            return Ok(0);
+        }
+        // No size limit: this is a move, and refusing it because the old cache
+        // is over the *new* cache's limit would strand exactly the frames the
+        // limit was never meant to be about.
+        let old = Self::open(legacy, u64::MAX)?;
+        let moved = old.rows;
+        if moved == 0 {
+            old.delete()?;
+            return Ok(0);
+        }
+
+        // The upgrade case is an empty destination that was created moments
+        // ago, and then this is a rename rather than ten million rows through
+        // Rust and back into SQLite — which on a full cache is minutes of SD
+        // card during which nothing is being captured.
+        if self.rows == 0 && self.take_over(old).is_ok() {
+            return Ok(moved);
+        }
+
+        let mut old = Self::open(legacy, u64::MAX)?;
+        loop {
+            let batch = old.oldest(ADOPT_BATCH)?;
+            if batch.is_empty() {
+                break;
+            }
+            let frames: Vec<Arc<CanSample>> = batch.iter().map(|c| Arc::clone(&c.sample)).collect();
+            self.append(&frames)?;
+            old.remove(&batch)?;
+        }
+        old.delete()?;
+        Ok(moved)
+    }
+
+    /// Replace this cache's file with `other`'s, keeping `other`'s contents.
+    ///
+    /// Only sound because the caller has established that this cache is empty.
+    /// A rename across filesystems fails with `EXDEV` — `$HOME` and
+    /// `/var/lib` can be different mounts — which is why the caller keeps the
+    /// copying path for when this does not work.
+    fn take_over(&mut self, other: Self) -> Result<()> {
+        let source = other.path.clone();
+        // Dropping the connection closes it, which checkpoints the write-ahead
+        // log into the database and removes it — so the file about to be moved
+        // is the whole of the cache.
+        drop(other);
+
+        // Ours closes too, and its sidecars go: they describe a database that
+        // is about to be replaced, and SQLite would read them against the new
+        // one. The database itself is left for `rename` to replace atomically.
+        self.conn = Connection::open_in_memory()?;
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(sidecar(&self.path, suffix));
+        }
+        let renamed = std::fs::rename(&source, &self.path);
+
+        // Reopened whatever happened: on a failed rename this restores a
+        // working, empty cache and the caller falls back to copying.
+        self.conn = Self::open_conn(&self.path)?;
+        self.rows = count_rows(&self.conn)?;
+        renamed.map_err(|e| {
+            CacheError(format!(
+                "cannot move {} to {}: {e}",
+                source.display(),
+                self.path.display()
+            ))
+        })
+    }
+
+    /// Close the connection and delete the file, with its sidecars.
+    pub fn delete(self) -> Result<()> {
+        // Unlinking a file SQLite still has open leaves it writing to an inode
+        // nothing can find, so the connection goes first.
+        let Self { conn, path, .. } = self;
+        drop(conn);
+        unlink(&path)
+    }
+
+    /// The connection, with the pragmas and the schema the Python set.
+    fn open_conn(path: &Path) -> Result<Connection> {
+        let conn = Connection::open(path)?;
         // WAL so a reader and the appending writer do not block each other;
         // NORMAL because losing the last few frames to a power cut is better
         // than an fsync per batch on an SD card. Both are the Python's.
@@ -118,51 +234,37 @@ impl SqliteCache {
                 dir TEXT NOT NULL
             )",
         )?;
-        Ok(Self {
-            conn,
-            path,
-            max_bytes: max_mb.saturating_mul(1024 * 1024),
-        })
+        Ok(conn)
     }
+}
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
+/// The database and the two files SQLite keeps beside it. Named once: a caller
+/// that forgets `-wal` reintroduces the size bug `docs/porting-notes.md`
+/// describes.
+const SIDECARS: [&str; 3] = ["", "-wal", "-shm"];
 
-    /// Remove the database and both of SQLite's sidecar files.
-    fn unlink(&self) -> Result<()> {
-        for suffix in ["", "-wal", "-shm"] {
-            let f = sidecar(&self.path, suffix);
-            match std::fs::remove_file(&f) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(CacheError(format!("cannot remove {}: {e}", f.display()))),
-            }
+/// The one full `COUNT(*)`, on opening a file that is empty except on an
+/// upgrade or after an outage.
+fn count_rows(conn: &Connection) -> Result<u64> {
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM frames", [], |r| r.get(0))?;
+    Ok(n.max(0) as u64)
+}
+
+/// Remove the database and its sidecars, tolerating any that are absent.
+fn unlink(path: &Path) -> Result<()> {
+    for suffix in SIDECARS {
+        let f = sidecar(path, suffix);
+        match std::fs::remove_file(&f) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(CacheError(format!("cannot remove {}: {e}", f.display()))),
         }
-        Ok(())
     }
-
-    /// Close the connection and delete the file, with its sidecars.
-    ///
-    /// For the one-shot drain of a cache left by an older install: the frames
-    /// are somewhere durable, and leaving an empty database behind invites the
-    /// next version to find it and wonder.
-    pub fn delete(self) -> Result<()> {
-        // Unlinking a file SQLite still has open leaves it writing to an inode
-        // nothing can find, so the connection goes first.
-        let closed = Self {
-            conn: Connection::open_in_memory()?,
-            ..self
-        };
-        closed.unlink()
-    }
+    Ok(())
 }
 
 /// The cache file, or one of the two files SQLite keeps beside it.
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
-    if suffix.is_empty() {
-        return path.to_path_buf();
-    }
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
@@ -211,6 +313,7 @@ impl FrameCache for SqliteCache {
             }
         }
         tx.commit()?;
+        self.rows += frames.len() as u64;
         Ok(frames.len())
     }
 
@@ -219,6 +322,7 @@ impl FrameCache for SqliteCache {
             "SELECT id, ts, extended, is_fd, arb_id, data, bus, dir
              FROM frames ORDER BY id LIMIT ?1",
         )?;
+        let mut out = Vec::with_capacity(limit);
         let rows = stmt.query_map([limit as i64], |r| {
             Ok(Cached {
                 id: r.get(0)?,
@@ -229,38 +333,46 @@ impl FrameCache for SqliteCache {
                     arb_id: r.get(4)?,
                     data: r.get(5)?,
                     bus: SourceId(r.get(6)?),
-                    // An unreadable tag is `rx`: the Python wrote whatever
+                    // Read as a borrowed str: `parse()` would allocate a
+                    // `String` for the column and a second one to lowercase it,
+                    // per row, over millions of rows on a long drain. An
+                    // unreadable tag is `rx` — the Python wrote whatever
                     // `--pg-dir` said, so a cache from one could hold anything,
                     // and the direction is not worth dropping a frame over.
-                    dir: r.get::<_, String>(7)?.parse().unwrap_or(Direction::Rx),
+                    dir: match r.get_ref(7)?.as_str() {
+                        Ok(s) if s.eq_ignore_ascii_case("tx") => Direction::Tx,
+                        _ => Direction::Rx,
+                    },
                 }),
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     fn remove(&mut self, frames: &[Cached]) -> Result<()> {
         if frames.is_empty() {
             return Ok(());
         }
-        // Built per call rather than prepared: the placeholder count is the
-        // batch size, and a short final batch would miss a cached statement
-        // anyway.
+        // `prepare_cached` rather than `execute`: the placeholder count is the
+        // batch size, which is the same for every batch but the last, so the
+        // statement is parsed once for a whole drain rather than once per 500
+        // frames.
         let placeholders = std::iter::repeat_n("?", frames.len())
             .collect::<Vec<_>>()
             .join(",");
-        self.conn.execute(
-            &format!("DELETE FROM frames WHERE id IN ({placeholders})"),
-            params_from_iter(frames.iter().map(|f| f.id)),
-        )?;
+        let removed = self
+            .conn
+            .prepare_cached(&format!("DELETE FROM frames WHERE id IN ({placeholders})"))?
+            .execute(params_from_iter(frames.iter().map(|f| f.id)))?;
+        self.rows = self.rows.saturating_sub(removed as u64);
         Ok(())
     }
 
     fn count(&mut self) -> Result<u64> {
-        let n: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM frames", [], |r| r.get(0))?;
-        Ok(n.max(0) as u64)
+        Ok(self.rows)
     }
 
     /// **The write-ahead log counts.** The Python stat'd the database file
@@ -268,7 +380,7 @@ impl FrameCache for SqliteCache {
     /// under-reported by however much had not been checkpointed, and
     /// `cache_max_mb` was a number the cache could sail past.
     fn size_bytes(&self) -> u64 {
-        ["", "-wal", "-shm"]
+        SIDECARS
             .iter()
             .filter_map(|s| std::fs::metadata(sidecar(&self.path, s)).ok())
             .map(|m| m.len())
@@ -291,9 +403,9 @@ impl FrameCache for SqliteCache {
         // unlink without making the field an `Option` that every other method
         // would have to unwrap.
         self.conn = Connection::open_in_memory()?;
-        self.unlink()?;
-        let fresh = Self::open(&self.path, self.max_bytes / (1024 * 1024))?;
-        self.conn = fresh.conn;
+        unlink(&self.path)?;
+        self.conn = Self::open_conn(&self.path)?;
+        self.rows = 0;
         Ok(())
     }
 }
@@ -596,6 +708,68 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
         assert_eq!(row.5.len(), 12);
         assert_eq!(row.6, 7);
         assert_eq!(row.7, "tx");
+    }
+
+    /// The upgrade path, taken as a rename because the destination is the
+    /// empty file a fresh install just made.
+    #[test]
+    fn a_previous_cache_is_adopted_whole() {
+        let dir = TempDir::new("adopt");
+        let legacy = dir.0.join("old.db");
+        {
+            let mut old = SqliteCache::open(&legacy, 100).unwrap();
+            old.append(&(0..2_000).map(|i| sample(i, i as u32)).collect::<Vec<_>>())
+                .unwrap();
+        }
+
+        let mut cache = SqliteCache::open(dir.db(), 100).unwrap();
+        assert_eq!(cache.adopt(&legacy).unwrap(), 2_000);
+        assert_eq!(cache.count().unwrap(), 2_000);
+        assert!(!legacy.exists(), "and the old one is gone");
+
+        // In order, and usable — the frames are older than anything this run
+        // will capture, so they have to come out first.
+        let oldest = cache.oldest(3).unwrap();
+        assert_eq!(
+            oldest.iter().map(|c| c.sample.arb_id).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        cache.append(&[sample(9_999, 0x321)]).unwrap();
+        assert_eq!(cache.count().unwrap(), 2_001);
+    }
+
+    /// The copying path, taken when the destination already holds frames —
+    /// a second start after a partial adoption, or a restart during an outage.
+    #[test]
+    fn a_previous_cache_merges_into_a_populated_one() {
+        let dir = TempDir::new("adopt-merge");
+        let legacy = dir.0.join("old.db");
+        {
+            let mut old = SqliteCache::open(&legacy, 100).unwrap();
+            old.append(&(0..5).map(|i| sample(i, i as u32)).collect::<Vec<_>>())
+                .unwrap();
+        }
+
+        let mut cache = SqliteCache::open(dir.db(), 100).unwrap();
+        cache.append(&[sample(100, 0xAAA)]).unwrap();
+        assert_eq!(cache.adopt(&legacy).unwrap(), 5);
+        assert_eq!(cache.count().unwrap(), 6);
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn adopting_nothing_is_not_an_error() {
+        let dir = TempDir::new("adopt-nothing");
+        let mut cache = SqliteCache::open(dir.db(), 100).unwrap();
+        assert_eq!(cache.adopt(&dir.0.join("absent.db")).unwrap(), 0);
+        // Its own path is not a previous cache, however it is spelled.
+        assert_eq!(cache.adopt(&dir.db()).unwrap(), 0);
+
+        // An empty one is removed rather than left to be reconsidered.
+        let empty = dir.0.join("empty.db");
+        drop(SqliteCache::open(&empty, 100).unwrap());
+        assert_eq!(cache.adopt(&empty).unwrap(), 0);
+        assert!(!empty.exists());
     }
 
     #[test]

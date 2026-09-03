@@ -72,9 +72,16 @@ All notable changes to this project are documented here. Entries go under
   the gateway has written it, so a slow archive is felt as a failed write and the frames go
   to disk rather than being accepted and lost. Transmitted frames are archived too, tagged
   `tx`, so a request this server made can be told from the traffic it was answering.
-- A cache left behind by an older install at `~/.wiretap-server-cache.db` is drained into
-  the configured one at startup and then removed, before a frame is enqueued — so an
-  upgrade during an outage keeps what the outage captured, and keeps it in order.
+- A cache left behind by an older install at `~/.wiretap-server-cache.db` is taken over at
+  startup and then removed, before a frame is enqueued — so an upgrade during an outage
+  keeps what the outage captured, and keeps it in order. An empty destination, which is the
+  ordinary upgrade, is a file rename rather than ten million rows through Rust and back
+  into SQLite; `--check-config` says whether there is one waiting to be adopted.
+- `tests/outage_drill.rs`, ignored by default, runs the drill against a real gateway: push
+  ten thousand frames, stop the gateway mid-stream, start it again, and check what landed.
+  Its first real run put 3,700 frames on disk and recovered all of them — ten thousand rows
+  in TimescaleDB, no duplicates, no gaps, and zero inversions in arrival order, which is
+  what "the archive's order matches the bus's across the boundary" means when measured.
 - The batcher: a bounded queue, a worker that batches and writes, and the spill-to-disk and
   reconnect-backoff behaviour around it. On an outage it caches the batch it was holding,
   empties the queue behind it and backs off from half a second to ten; when the sink returns

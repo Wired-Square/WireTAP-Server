@@ -117,13 +117,25 @@ impl ForwardSink {
     }
 }
 
+/// Bound any one exchange with the gateway, and name it if it fails.
+///
+/// The timeout is what stops a gateway that has stopped answering — a NAT that
+/// dropped the flow, a host that was powered off — from wedging the batcher
+/// instead of being cached around.
+async fn with_timeout<T>(
+    what: &str,
+    op: impl std::future::Future<Output = std::io::Result<T>>,
+) -> Result<T, SinkError> {
+    match tokio::time::timeout(IO_TIMEOUT, op).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(SinkError(format!("forward: {what} failed: {e}"))),
+        Err(_) => Err(SinkError(format!("forward: timed out on {what}"))),
+    }
+}
+
 impl Connection {
     async fn send(&mut self, bytes: &[u8]) -> SinkResult {
-        match tokio::time::timeout(IO_TIMEOUT, self.stream.write_all(bytes)).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(SinkError(format!("forward: write failed: {e}"))),
-            Err(_) => Err(SinkError("forward: timed out writing to gateway".into())),
-        }
+        with_timeout("write", self.stream.write_all(bytes)).await
     }
 
     /// Read until one complete, intact message has arrived.
@@ -139,12 +151,7 @@ impl Connection {
             }
 
             let mut buf = [0u8; READ_BUF];
-            let read = tokio::time::timeout(IO_TIMEOUT, self.stream.read(&mut buf)).await;
-            let n = match read {
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => return Err(SinkError(format!("forward: read failed: {e}"))),
-                Err(_) => return Err(SinkError("forward: timed out reading from gateway".into())),
-            };
+            let n = with_timeout("read", self.stream.read(&mut buf)).await?;
             if n == 0 {
                 return Err(SinkError("forward: gateway closed connection".into()));
             }
@@ -155,38 +162,33 @@ impl Connection {
 
 impl BatchSink for ForwardSink {
     async fn connect(&mut self) -> SinkResult {
-        let stream = match tokio::time::timeout(
-            IO_TIMEOUT,
+        let stream = with_timeout(
+            "connect",
             TcpStream::connect((self.host.as_str(), self.port)),
         )
-        .await
-        {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(SinkError(format!("forward: connect failed: {e}"))),
-            Err(_) => return Err(SinkError("forward: timed out connecting to gateway".into())),
-        };
-        self.conn = Some(Connection {
+        .await?;
+        // Handshaken on a local and stored only once it has worked, so no
+        // failure path has to remember to undo it.
+        let mut conn = Connection {
             stream,
             rx: Vec::new(),
-        });
+        };
 
         let hello = proto::encode_hello(self.api_key.expose().as_bytes(), &self.database, false);
-        let conn = self.connection()?;
         conn.send(&hello).await?;
         let frame = conn.recv().await?;
         if frame.mtype != proto::MSG_HELLO_ACK {
-            self.conn = None;
             return Err(SinkError("forward: no HELLO_ACK from gateway".into()));
         }
         let ack =
             proto::parse_hello_ack(&frame.body).map_err(|e| SinkError(format!("forward: {e}")))?;
         if ack.status != proto::HELLO_OK {
-            self.conn = None;
             return Err(SinkError(format!(
                 "forward: HELLO rejected (status={})",
                 ack.status
             )));
         }
+        self.conn = Some(conn);
 
         info!(
             "connected (forward -> {}:{} db={})",
@@ -336,6 +338,7 @@ mod tests {
                 cache_path: PathBuf::from("unused"),
                 cache_max_mb: 1,
                 queue_flush_pct: 100,
+                legacy_cache_path: None,
             },
         })
     }

@@ -30,6 +30,11 @@ const BACKOFF_MAX: Duration = Duration::from_secs(10);
 /// time, so without this a full queue would out-log the capture.
 const FULL_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How many drops pass before the clock is consulted about the line above. At
+/// the rate a full queue drops, a thousand of them take a fraction of the
+/// interval, so nothing is delayed by waiting for the count to come round.
+const DROPS_PER_CLOCK_CHECK: u64 = 1024;
+
 /// Why a sink write failed. A string for the same reason [`crate::cache`]'s is:
 /// the caller's response is to cache the batch and back off, whatever went
 /// wrong.
@@ -39,12 +44,6 @@ pub struct SinkError(pub String);
 impl std::fmt::Display for SinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-impl From<std::io::Error> for SinkError {
-    fn from(e: std::io::Error) -> Self {
-        Self(e.to_string())
     }
 }
 
@@ -133,10 +132,16 @@ impl Archive {
                 self.warn_thresholds();
             }
             Err(_) => {
-                add(&self.counters.dropped, 1);
-                self.log_queue_full();
+                let prior = self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+                self.log_queue_full(prior);
             }
         }
+    }
+
+    /// The running totals, for a stats line or a test that wants to know
+    /// whether an outage was actually survived.
+    pub fn counters(&self) -> Arc<Counters> {
+        Arc::clone(&self.counters)
     }
 
     /// Frames in the queue, and the size it was given.
@@ -147,29 +152,48 @@ impl Archive {
 
     /// Report each 80/95/100 threshold once as the queue fills, and once more
     /// when it falls back below 80.
+    ///
+    /// Integer comparisons rather than a ratio, and a load before the swap:
+    /// this runs on every accepted frame, on every reader task, and the answer
+    /// is the same as last time for all but a handful of them. A blind
+    /// read-modify-write would put 30–60k contended writes a second on one
+    /// cache line to say nothing had changed.
     fn warn_thresholds(&self) {
         let (size, cap) = self.depth();
-        if cap == 0 {
+        let bucket: i64 = if size >= cap {
+            100
+        } else if size * 100 >= cap * 95 {
+            95
+        } else if size * 100 >= cap * 80 {
+            80
+        } else {
+            -1
+        };
+        if self.last_bucket.load(Ordering::Relaxed) == bucket {
             return;
         }
-        let bucket: i64 = match (size as f64) / (cap as f64) {
-            r if r >= 1.0 => 100,
-            r if r >= 0.95 => 95,
-            r if r >= 0.80 => 80,
-            _ => -1,
-        };
-        // `swap` rather than load-then-store: two readers crossing the same
-        // threshold at once would otherwise both report it.
+        // The swap is what settles a race between two readers crossing the
+        // same threshold together: only the one that changed the value reports.
+        if self.last_bucket.swap(bucket, Ordering::Relaxed) == bucket {
+            return;
+        }
         if bucket == -1 {
-            if self.last_bucket.swap(-1, Ordering::Relaxed) != -1 {
-                info!("queue recovered: size={size} cap={cap}");
-            }
-        } else if self.last_bucket.swap(bucket, Ordering::Relaxed) != bucket {
+            info!("queue recovered: size={size} cap={cap}");
+        } else {
             warn!("queue high water mark: {bucket}% (size={size} cap={cap})");
         }
     }
 
-    fn log_queue_full(&self) {
+    /// The queue is full and a frame has been dropped.
+    ///
+    /// `prior` is the drop count before this one. Consulting the clock is
+    /// itself a syscall, on the path that is by definition already overloaded,
+    /// so all but one drop in `DROPS_PER_CLOCK_CHECK` returns without taking
+    /// the lock or reading the time.
+    fn log_queue_full(&self, prior: u64) {
+        if prior % DROPS_PER_CLOCK_CHECK != 0 {
+            return;
+        }
         let now = Instant::now();
         let mut last = self.last_full_log.lock().unwrap_or_else(|e| e.into_inner());
         if last.is_some_and(|t| now.duration_since(t) < FULL_LOG_INTERVAL) {
@@ -336,11 +360,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         self.last_stats = Instant::now();
 
         let (size, cap) = (self.rx.len(), self.rx.max_capacity());
-        let occupancy = if cap == 0 {
-            0.0
-        } else {
-            (size as f64) / (cap as f64) * 100.0
-        };
+        let occupancy = (size as f64) / (cap as f64) * 100.0;
         let c = &self.counters;
         let mut line = format!(
             "stats queued={size}/{cap} ({occupancy:.0}%) enq={} wrote={} dropped={} conn={}",
@@ -384,7 +404,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// Collect up to `batch_size` frames, waiting `flush_interval` for the
     /// first and taking whatever else is already there.
     async fn next_batch(&mut self) -> Vec<Arc<CanSample>> {
-        let mut batch: Vec<Arc<CanSample>> = Vec::new();
+        let mut batch: Vec<Arc<CanSample>> = Vec::with_capacity(self.batch_size);
         match tokio::time::timeout(self.flush_interval, self.rx.recv()).await {
             Ok(Some(s)) => batch.push(s),
             // Closed, or nothing arrived in time.
@@ -400,10 +420,22 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     }
 
     /// Write one cache batch onward. `Ok(true)` means there may be more.
+    ///
+    /// A *cache* failure is reported and swallowed rather than returned: the
+    /// error type is the sink's, and treating an unreadable cache as a dead
+    /// gateway would close a healthy connection, log `database unavailable`,
+    /// and empty the live queue into the very store that just failed. A failing
+    /// cache must never stop a capture; frames keep flowing to the gateway
+    /// while it is unhappy.
     async fn drain_cache(&mut self) -> Result<bool, SinkError> {
         let batch_size = self.batch_size;
-        let cached = blocking(|| self.cache.oldest(batch_size))
-            .map_err(|e| SinkError(format!("disk cache read error: {e}")))?;
+        let cached = match blocking(|| self.cache.oldest(batch_size)) {
+            Ok(cached) => cached,
+            Err(e) => {
+                error!("disk cache read error: {e}");
+                return Ok(false);
+            }
+        };
 
         if cached.is_empty() {
             if self.draining_cache {
@@ -456,53 +488,57 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
 
     /// Store a batch on disk, or count it dropped and say why.
     fn cache_batch(&mut self, batch: &[Arc<CanSample>]) {
-        if blocking(|| self.cache.is_full()) {
-            error!(
-                "disk cache full ({} MB), dropping {} frames",
-                blocking(|| self.cache.size_bytes()) / (1024 * 1024),
-                batch.len()
-            );
-            add(&self.counters.dropped, batch.len() as u64);
-            return;
-        }
-        match blocking(|| self.cache.append(batch)) {
+        // One region, because `is_full` stats three files and `append` writes:
+        // handing the runtime two separate blocking hints for one logical
+        // operation buys nothing.
+        let stored = blocking(|| {
+            if self.cache.is_full() {
+                return Err(format!(
+                    "disk cache full ({} MB), dropping {} frames",
+                    self.cache.size_bytes() / (1024 * 1024),
+                    batch.len()
+                ));
+            }
+            self.cache
+                .append(batch)
+                .map_err(|e| format!("disk cache write error: {e}"))
+        });
+        match stored {
             Ok(written) => add(&self.counters.cached, written as u64),
-            Err(e) => {
-                error!("disk cache write error: {e}");
+            Err(why) => {
+                error!("{why}");
                 add(&self.counters.dropped, batch.len() as u64);
             }
         }
     }
 
+    /// Everything waiting in the queue, taken at once. Bounded by the queue.
+    fn take_queued(&mut self) -> Vec<Arc<CanSample>> {
+        let mut queued = Vec::new();
+        while let Ok(s) = self.rx.try_recv() {
+            queued.push(s);
+        }
+        queued
+    }
+
     /// Empty the in-memory queue onto disk, in cache-sized batches.
     fn drain_queue_to_cache(&mut self) {
-        let mut drained = 0usize;
-        let mut batch: Vec<Arc<CanSample>> = Vec::new();
-        while let Ok(s) = self.rx.try_recv() {
-            batch.push(s);
-            if batch.len() >= self.batch_size {
-                self.cache_batch(&batch);
-                drained += batch.len();
-                batch.clear();
-            }
+        let queued = self.take_queued();
+        for chunk in queued.chunks(self.batch_size) {
+            self.cache_batch(chunk);
         }
-        if !batch.is_empty() {
-            self.cache_batch(&batch);
-            drained += batch.len();
-        }
-        if drained > 0 {
-            info!("drained {drained} frames from queue to disk cache");
+        if !queued.is_empty() {
+            info!("drained {} frames from queue to disk cache", queued.len());
         }
     }
 
     /// Move frames to disk *before* the queue fills, so a burst that outruns
     /// the gateway costs disk rather than frames.
     fn spill_if_queue_filling(&mut self) {
-        let cap = self.rx.max_capacity();
-        if cap == 0 || self.flush_threshold <= 0.0 {
+        if self.flush_threshold <= 0.0 {
             return;
         }
-        let size = self.rx.len();
+        let (size, cap) = (self.rx.len(), self.rx.max_capacity());
         let ratio = (size as f64) / (cap as f64);
         if ratio >= self.flush_threshold {
             warn!(
@@ -516,24 +552,20 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// On the way out: everything still queued goes to the sink if it is
     /// there, and to disk if it is not.
     async fn shutdown_flush(&mut self) {
-        let mut remaining: Vec<Arc<CanSample>> = Vec::new();
-        while let Ok(s) = self.rx.try_recv() {
-            remaining.push(s);
-        }
-
+        let remaining = self.take_queued();
         if !remaining.is_empty() {
-            let mut stored = false;
-            if self.connected {
-                match self.sink.write_batch(&remaining).await {
-                    Ok(()) => {
-                        add(&self.counters.written, remaining.len() as u64);
-                        info!("shutdown: flushed {} frames to database", remaining.len());
-                        stored = true;
+            let flushed = self.connected
+                && match self.sink.write_batch(&remaining).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        error!("shutdown flush to DB failed: {e}");
+                        false
                     }
-                    Err(e) => error!("shutdown flush to DB failed: {e}"),
-                }
-            }
-            if !stored {
+                };
+            if flushed {
+                add(&self.counters.written, remaining.len() as u64);
+                info!("shutdown: flushed {} frames to database", remaining.len());
+            } else {
                 self.cache_batch(&remaining);
                 info!("shutdown: flushed {} frames to disk cache", remaining.len());
             }
@@ -594,6 +626,7 @@ mod tests {
             cache_path: PathBuf::from("unused"),
             cache_max_mb: 100,
             queue_flush_pct: 100,
+            legacy_cache_path: None,
         }
     }
 

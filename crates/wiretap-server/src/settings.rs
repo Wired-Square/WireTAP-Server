@@ -48,6 +48,13 @@ pub struct Batching {
     pub cache_path: PathBuf,
     pub cache_max_mb: u64,
     pub queue_flush_pct: u8,
+    /// A cache an older install left in `$HOME`, to be taken over at startup,
+    /// or `None` when there is nothing to adopt.
+    ///
+    /// Resolved here rather than looked for later so `--check-config` can say
+    /// whether an upgrade is about to move something, and so the one filename
+    /// this and [`cache_path`] have to agree on is written once.
+    pub legacy_cache_path: Option<PathBuf>,
 }
 
 /// The Python's default, and what an existing Pi has a populated copy of.
@@ -56,15 +63,29 @@ const LEGACY_CACHE_FILE: &str = ".wiretap-server-cache.db";
 impl Batching {
     /// Flags first; the file overrides them in [`Settings::apply_file`].
     fn from_cli(cli: &Cli, env: &Env) -> Self {
+        let cache_path = cache_path(cli.pg_cache_path.as_deref(), env);
         Self {
             size: cli.pg_batch_size,
             flush_interval: cli.pg_flush_interval,
             queue_size: cli.pg_queue_size,
-            cache_path: cache_path(cli.pg_cache_path.as_deref(), env),
+            legacy_cache_path: legacy_cache_path(&cache_path, env),
+            cache_path,
             cache_max_mb: cli.pg_cache_max_mb,
             queue_flush_pct: cli.pg_queue_flush_pct,
         }
     }
+}
+
+/// The cache an older install would have written, if it is not the one in use
+/// and it is actually there.
+///
+/// `None` once it has been adopted, so the answer changes across a restart —
+/// which is what makes it worth showing in `--check-config`.
+fn legacy_cache_path(in_use: &Path, env: &Env) -> Option<PathBuf> {
+    env.home
+        .as_deref()
+        .map(|home| Path::new(home).join(LEGACY_CACHE_FILE))
+        .filter(|p| p != in_use && p.exists())
 }
 
 /// Where the disk cache lives, given whatever was configured.
@@ -446,6 +467,7 @@ impl Settings {
             // directory.
             if let Some(p) = f.forward.cache_path.as_deref() {
                 b.cache_path = cache_path(Some(p).filter(|p| !p.is_empty()), env);
+                b.legacy_cache_path = legacy_cache_path(&b.cache_path, env);
             }
         }
         Ok(())
@@ -526,6 +548,9 @@ impl Settings {
                     "disk cache",
                     format!("{} (max {} MB)", b.cache_path.display(), b.cache_max_mb),
                 ));
+                if let Some(legacy) = &b.legacy_cache_path {
+                    r.push(("adopt on start", legacy.display().to_string()));
+                }
             }
             None => r.push((
                 "forward to",

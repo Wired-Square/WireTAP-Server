@@ -14,7 +14,6 @@
 //! a read, and no read can delay a client.
 
 use std::io::{self, Write as _};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -23,7 +22,7 @@ use tracing::{error, info, warn};
 use wiretap_model::{CanSample, Direction};
 
 use crate::archive;
-use crate::cache::{CacheError, FrameCache, SqliteCache};
+use crate::cache::SqliteCache;
 use crate::console;
 use crate::forward::ForwardSink;
 use crate::gvret::server;
@@ -33,11 +32,6 @@ use crate::source::{
     socketcan::{detect_bitrates, CanReader},
     system_time_to_us, Transmit,
 };
-
-/// Frames moved at a time out of a cache an older install left behind. Big
-/// enough that a large one moves quickly, small enough that an interrupted
-/// transfer loses nothing.
-const LEGACY_DRAIN_BATCH: usize = 1_000;
 
 /// Frames held for a GVRET client that is behind.
 ///
@@ -196,10 +190,11 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
     // The archive, if there is one to send to. Its absence is already warned
     // about at startup, and the capture runs either way — a GVRET bridge with
     // no archive is a legitimate deployment.
-    let archive = match &settings.forward {
-        Some(forward) => Some(start_archive(forward, settings.stats_interval)?),
-        None => None,
-    };
+    let archive = settings
+        .forward
+        .as_ref()
+        .map(|forward| start_archive(forward, settings.stats_interval))
+        .transpose()?;
 
     for (reader, iface) in readers.iter().cloned().zip(settings.ifaces.clone()) {
         tokio::spawn(read_loop(
@@ -250,7 +245,23 @@ fn start_archive(forward: &Forward, stats_interval: f64) -> Result<RunningArchiv
                 err: e.to_string(),
             }
         })?;
-    adopt_legacy_cache(&mut cache, &batching.cache_path);
+
+    // A failure here is logged rather than fatal: the old cache is left where
+    // it is to be tried again next start, and refusing to capture because a
+    // previous run's leftovers could not be moved is the worse trade.
+    if let Some(legacy) = &batching.legacy_cache_path {
+        match cache.adopt(legacy) {
+            Ok(0) => {}
+            Ok(moved) => info!(
+                "adopted {moved} frames from the previous cache at {}",
+                legacy.display()
+            ),
+            Err(e) => error!(
+                "cannot adopt the previous cache at {}: {e}; leaving it alone",
+                legacy.display()
+            ),
+        }
+    }
 
     let (frames, batcher) =
         archive::channel(ForwardSink::new(forward), cache, batching, stats_interval);
@@ -258,74 +269,6 @@ fn start_archive(forward: &Forward, stats_interval: f64) -> Result<RunningArchiv
         frames,
         worker: tokio::spawn(batcher.run()),
     })
-}
-
-/// Move frames out of the cache an older, `$HOME`-based install left behind.
-///
-/// The Python cached to `~/.wiretap-server-cache.db` unconditionally. Once the
-/// default moves under `StateDirectory=`, an upgrade would otherwise leave
-/// whatever an outage had captured sitting in a file nothing reads again. This
-/// runs once, at startup, before anything is enqueued — so the recovered frames
-/// come out of the cache ahead of everything captured since, which is the
-/// ordering the drain is built to preserve.
-fn adopt_legacy_cache(cache: &mut SqliteCache, in_use: &Path) {
-    let Some(legacy) = std::env::var_os("HOME")
-        .map(|home| Path::new(&home).join(".wiretap-server-cache.db"))
-        .filter(|p| p != in_use && p.exists())
-    else {
-        return;
-    };
-
-    let mut old = match SqliteCache::open(&legacy, u64::MAX / (1024 * 1024)) {
-        Ok(c) => c,
-        Err(e) => {
-            error!(
-                "cannot open the previous cache at {}: {e}",
-                legacy.display()
-            );
-            return;
-        }
-    };
-    let moved = match old.count() {
-        Ok(0) => 0,
-        Ok(_) => match transfer(&mut old, cache) {
-            Ok(n) => n,
-            Err(e) => {
-                error!("cannot drain the previous cache: {e}; leaving it alone");
-                return;
-            }
-        },
-        Err(e) => {
-            error!("cannot read the previous cache: {e}; leaving it alone");
-            return;
-        }
-    };
-
-    if moved > 0 {
-        info!(
-            "adopted {moved} frames from the previous cache at {}",
-            legacy.display()
-        );
-    }
-    if let Err(e) = old.delete() {
-        warn!("cannot remove the previous cache: {e}");
-    }
-}
-
-/// Copy every frame from one cache to another, oldest first, deleting as it
-/// goes so an interrupted transfer resumes rather than duplicating.
-fn transfer(from: &mut SqliteCache, to: &mut SqliteCache) -> Result<u64, CacheError> {
-    let mut moved = 0;
-    loop {
-        let batch = from.oldest(LEGACY_DRAIN_BATCH)?;
-        if batch.is_empty() {
-            return Ok(moved);
-        }
-        let frames: Vec<Arc<CanSample>> = batch.iter().map(|c| Arc::clone(&c.sample)).collect();
-        to.append(&frames)?;
-        from.remove(&batch)?;
-        moved += frames.len() as u64;
-    }
 }
 
 fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {

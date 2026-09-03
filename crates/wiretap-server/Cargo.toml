@@ -27,3 +27,8 @@ tracing-subscriber.workspace = true
 # netlink answers the bitrate query that replaced pyroute2; dump is its
 # companion and is what `default` would have brought in.
 socketcan = { workspace = true, features = ["tokio", "netlink", "dump"] }
+
+[dev-dependencies]
+# The outage drill is an integration test, so it links against the crate rather
+# than into it and needs its own runtime.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
