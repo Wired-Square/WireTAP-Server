@@ -13,3 +13,9 @@ wiretap-model = { path = "../wiretap-model" }
 # No `color` (stdout is a journal pipe) and no `suggestions` (a typo at an
 # interactive shell is one --help away): together they cost 33 KB and 7 crates.
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
+tokio = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# netlink answers the bitrate query that replaced pyroute2; dump is its
+# companion and is what `default` would have brought in.
+socketcan = { workspace = true, features = ["tokio", "netlink", "dump"] }

@@ -24,6 +24,11 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 # --- CLI ---
 clap = { version = "4", default-features = false }
 
+# --- CAN capture (Linux only) ---
+# Replaces the Python's raw AF_CAN socket code and its pyroute2 dependency:
+# the netlink module answers bitrate queries directly.
+socketcan = { version = "3.6", default-features = false }
+
 # --- async runtime and HTTP ---
 axum = "0.8"
 tokio = "1"

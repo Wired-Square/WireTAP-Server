@@ -31,6 +31,13 @@ All notable changes to this project are documented here. Entries go under
   answer to "which of the flag, the file and the environment won", a question the Python
   could only be asked by reading its source: the file overrides the command line, which the
   shipped config file's own header states backwards.
+- SocketCAN capture. The `socketcan` crate replaces both hand-rolled halves of the Python:
+  CAN FD is a typed frame variant rather than a guess from a 72-byte read, and the netlink
+  bitrate query retires the pyroute2 dependency. The socket code is Linux-only and cannot
+  run in the test suite on a development machine, so the arithmetic worth testing — mapping
+  a GVRET bus number to an interface index, where an off-by-one puts a transmit on the
+  wrong physical bus — sits in a platform-independent module with its own tests, and CI
+  exercises the rest against `vcan`.
 - `docs/porting-notes.md` — where the Rust deviates from the Python, and the quirks
   replicated deliberately rather than fixed mid-port.
 
