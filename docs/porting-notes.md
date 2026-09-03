@@ -67,6 +67,26 @@ The Python wrote its console line from inside the capture loop, so a terminal
 over a slow SSH link or a pipe into `less` back-pressured the capture exactly as
 a stalled client did. It can now drop lines, and logs how many.
 
+### The batcher is configured under `[forward]`, and the cache moves
+
+Those six settings — batch size, flush interval, queue size, cache path, cache
+size limit, spill threshold — lived under `[postgres]` in the Python, because
+the forward sink subclassed the PostgreSQL writer and inherited its queue. But
+`apply_config_overrides` read that section only when `enable = true`, and this
+server refuses to start in exactly that case, so under `[postgres]` they could
+never take effect at all. They are `[forward]` keys now. A migrated file's
+copies stay where they are and stay ignored, which is what the Python did with
+them once the sink was off.
+
+The **default cache path** moves from `~/.wiretap-server-cache.db` to
+`$STATE_DIRECTORY/cache.db` when systemd provides one. The Python opened the
+`$HOME` path unconditionally while the shipped unit sets
+`ProtectHome=read-only`, so archiving under that unit could not have worked —
+anyone doing it had edited the unit or was not using it. Without a state
+directory the Python's path is still what is used, so a hand-run upgrade finds
+an existing cache rather than starting an empty one beside it. `PG_CACHE_PATH`
+is unchanged and still beats both.
+
 ### A bus offset no longer breaks `F1 06`
 
 `bus_count` is `bus_offset + interfaces`, and `reply_canbus_params` advertised

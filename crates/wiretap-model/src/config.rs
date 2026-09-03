@@ -69,6 +69,15 @@ pub struct IngestSection {
     pub unknown: toml::Table,
 }
 
+/// Forwarding to a gateway: where to send, and how to batch and cache on the
+/// way.
+///
+/// The batching half is new here. In the Python those six settings lived under
+/// `[postgres]`, because the forward sink subclassed the PostgreSQL writer and
+/// inherited its queue — but `apply_config_overrides` only read that section
+/// when `enable = true`, which is exactly the case this server refuses to
+/// start on. Under `[postgres]` they could therefore never take effect. A
+/// migrated file's copies stay where they are and stay ignored, as they were.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct ForwardSection {
@@ -77,6 +86,18 @@ pub struct ForwardSection {
     pub port: Option<u16>,
     pub api_key: Option<String>,
     pub database: Option<String>,
+    /// Frames per batch sent to the gateway.
+    pub batch_size: Option<usize>,
+    /// Seconds to wait for a batch to fill before sending it short.
+    pub flush_interval: Option<f64>,
+    /// Frames held in memory before the queue starts dropping.
+    pub queue_size: Option<usize>,
+    /// Where the disk cache lives through a gateway outage.
+    pub cache_path: Option<String>,
+    pub cache_max_mb: Option<u64>,
+    /// Queue occupancy, as a percentage, at which frames are moved to disk
+    /// pre-emptively rather than waiting for it to fill.
+    pub queue_flush_pct: Option<u8>,
     #[serde(flatten)]
     pub unknown: toml::Table,
 }

@@ -12,7 +12,7 @@ use tracing::{error, warn};
 use tracing_subscriber::filter::LevelFilter;
 use wiretap_server::{
     cli::Cli,
-    settings::{self, LogLevel, Secrets, Settings},
+    settings::{self, Env, LogLevel, Settings},
 };
 
 fn main() -> ExitCode {
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
         None => None,
     };
 
-    let resolved = match Settings::resolve(&cli, file.as_ref(), &Secrets::from_env()) {
+    let resolved = match Settings::resolve(&cli, file.as_ref(), &Env::from_env()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("wiretap-server: {e}");

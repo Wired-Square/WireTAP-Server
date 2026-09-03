@@ -2040,7 +2040,6 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
- "crc32fast",
  "deadpool-postgres",
  "futures-util",
  "hex",
@@ -2053,6 +2052,15 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "wiretap-ingest-proto",
+ "wiretap-model",
+]
+
+[[package]]
+name = "wiretap-ingest-proto"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
  "wiretap-model",
 ]
 

@@ -60,6 +60,16 @@ All notable changes to this project are documented here. Entries go under
   named, and stops on `SIGTERM` or Ctrl-C. Logs go to stderr at the configured level, as the
   Python's did, which leaves stdout to `--check-config` and the console echo. It still
   cannot archive: that is the batcher and the forward sink, next.
+- `wiretap-ingest-proto` — the binary ingest wire codec as a crate, with both ends of the
+  protocol in it. The gateway's half moved here with its tests; the client half a capture
+  server needs is new beside it, and the two are asserted against each other rather than
+  against literals, so neither can move alone. This codec had been hand-written four times
+  across the two repos — a format where one side is a `struct.Struct("<IIBB")` and the
+  other is four `to_le_bytes` calls is a format that drifts.
+- The batcher and the disk cache are configured under `[forward]`. Those six settings lived
+  under `[postgres]` in the Python because its forward sink subclassed the PostgreSQL
+  writer, and that section is only read when the retired sink is enabled — which this
+  server refuses to start on, so they could never have taken effect.
 - `docs/porting-notes.md` — where the Rust deviates from the Python, and the quirks
   replicated deliberately rather than fixed mid-port.
 
@@ -69,6 +79,11 @@ All notable changes to this project are documented here. Entries go under
   onto the gateway, the only crate that wants it. A feature named at the root is a floor for
   every member, and `RUST_LOG` filtering costs a regex engine inside a binary that is shipped
   over the network to appliances; the capture server takes its level from its config file.
+- The disk cache defaults to `$STATE_DIRECTORY/cache.db` rather than
+  `~/.wiretap-server-cache.db`. The Python opened the `$HOME` path unconditionally while
+  its own systemd unit sets `ProtectHome=read-only`, so archiving under that unit could not
+  have worked. With no state directory — a server run by hand — the old path is still used,
+  so an existing cache is found rather than stranded.
 - The capture schema moved into the gateway crate at
   `crates/wiretap-backend/schema/init_schema.sql`. It used to sit beside the Python server
   and be reached with a cross-directory `include_str!`, which forced the Docker build

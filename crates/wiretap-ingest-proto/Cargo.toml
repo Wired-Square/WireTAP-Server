@@ -1,0 +1,15 @@
+[package]
+name = "wiretap-ingest-proto"
+description = "Wire codec for the WireTAP binary ingest protocol, spoken by the capture server and the gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Only the sample types: this crate is a codec, and a client of it should not
+# have to take a TOML parser to speak the protocol.
+wiretap-model = { path = "../wiretap-model", default-features = false }
+crc32fast.workspace = true

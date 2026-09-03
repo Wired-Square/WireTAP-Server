@@ -11,10 +11,10 @@ repository.workspace = true
 [dependencies]
 # Only the sample types; default-features off keeps the TOML parser out.
 wiretap-model = { path = "../wiretap-model", default-features = false }
+wiretap-ingest-proto = { path = "../wiretap-ingest-proto" }
 axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
-crc32fast.workspace = true
 deadpool-postgres.workspace = true
 futures-util.workspace = true
 hex.workspace = true

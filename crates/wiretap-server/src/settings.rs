@@ -9,6 +9,7 @@
 //! rather than argued about.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use wiretap_model::{config::FileConfig, parse_ifaces, Direction, Secret};
 
@@ -29,6 +30,63 @@ pub struct Forward {
     pub api_key: Secret,
     /// Empty means the gateway's default capture database.
     pub database: String,
+    pub batching: Batching,
+}
+
+/// How frames are grouped on the way to the gateway, and where they wait when
+/// it is not there.
+///
+/// One struct because it is one mechanism: the batcher owns the queue, decides
+/// when a batch goes, and owns the cache it spills to. The Python spelled the
+/// same settings `--pg-*`, which is why they are still called that on the
+/// command line.
+#[derive(Debug, Clone)]
+pub struct Batching {
+    pub size: usize,
+    pub flush_interval: f64,
+    pub queue_size: usize,
+    pub cache_path: PathBuf,
+    pub cache_max_mb: u64,
+    pub queue_flush_pct: u8,
+}
+
+/// The Python's default, and what an existing Pi has a populated copy of.
+const LEGACY_CACHE_FILE: &str = ".wiretap-server-cache.db";
+
+impl Batching {
+    /// Flags first; the file overrides them in [`Settings::apply_file`].
+    fn from_cli(cli: &Cli, env: &Env) -> Self {
+        Self {
+            size: cli.pg_batch_size,
+            flush_interval: cli.pg_flush_interval,
+            queue_size: cli.pg_queue_size,
+            cache_path: cache_path(cli.pg_cache_path.as_deref(), env),
+            cache_max_mb: cli.pg_cache_max_mb,
+            queue_flush_pct: cli.pg_queue_flush_pct,
+        }
+    }
+}
+
+/// Where the disk cache lives, given whatever was configured.
+///
+/// `$STATE_DIRECTORY` before `$HOME` is a deliberate move: the Python opened
+/// `~/.wiretap-server-cache.db` unconditionally, and the shipped unit sets
+/// `ProtectHome=read-only`, so anyone running that unit with archiving on had
+/// already edited it or was not using it. Under `StateDirectory=` the default
+/// lands somewhere the unit can actually write. An existing `$HOME` cache is
+/// still found when there is no state directory, so a hand-run upgrade does not
+/// strand one.
+fn cache_path(configured: Option<&str>, env: &Env) -> PathBuf {
+    if let Some(p) = configured.or(env.cache_path.as_deref()) {
+        return PathBuf::from(p);
+    }
+    match (&env.state_dir, &env.home) {
+        (Some(state), _) => Path::new(state).join("cache.db"),
+        (None, Some(home)) => Path::new(home).join(LEGACY_CACHE_FILE),
+        // Neither: relative to the working directory, which is at least
+        // somewhere a hand-run server can write.
+        (None, None) => PathBuf::from(LEGACY_CACHE_FILE),
+    }
 }
 
 /// The binary TCP listener that accepts pushed frames from capture devices.
@@ -55,12 +113,13 @@ impl Ingest {
 }
 
 impl Forward {
-    fn from_cli(cli: &Cli) -> Self {
+    fn from_cli(cli: &Cli, env: &Env) -> Self {
         Self {
             host: cli.forward_host.clone(),
             port: cli.forward_port,
             api_key: Secret::new(cli.forward_api_key.clone().unwrap_or_default()),
             database: cli.forward_database.clone(),
+            batching: Batching::from_cli(cli, env),
         }
     }
 }
@@ -214,20 +273,32 @@ pub struct Resolved {
     pub warnings: Vec<Warning>,
 }
 
-/// The credentials the server takes from the environment when the config does
-/// not supply them. Named here so the variables exist in one greppable place.
+/// What the server reads from the environment: credentials the config does not
+/// supply, and the paths systemd hands a unit.
+///
+/// Read once and passed in, so resolving is a pure function of its inputs and a
+/// test never has to mutate the process environment.
 #[derive(Debug, Default)]
-pub struct Secrets {
+pub struct Env {
     pub ingest_token: Option<Secret>,
     pub forward_api_key: Option<Secret>,
+    /// `PG_CACHE_PATH`, kept under its Python name because deployed units set
+    /// it.
+    pub cache_path: Option<String>,
+    /// `StateDirectory=` in the unit; `/var/lib/wiretap-server` in the package.
+    pub state_dir: Option<String>,
+    pub home: Option<String>,
 }
 
-impl Secrets {
+impl Env {
     pub fn from_env() -> Self {
-        let get = |k: &str| std::env::var(k).ok().map(Secret::new);
+        let get = |k: &str| std::env::var(k).ok();
         Self {
-            ingest_token: get("WIRETAP_INGEST_TOKEN"),
-            forward_api_key: get("WIRETAP_FORWARD_TOKEN"),
+            ingest_token: get("WIRETAP_INGEST_TOKEN").map(Secret::new),
+            forward_api_key: get("WIRETAP_FORWARD_TOKEN").map(Secret::new),
+            cache_path: get("PG_CACHE_PATH"),
+            state_dir: get("STATE_DIRECTORY"),
+            home: get("HOME"),
         }
     }
 }
@@ -249,7 +320,7 @@ impl Settings {
     pub fn resolve(
         cli: &Cli,
         file: Option<&FileConfig>,
-        secrets: &Secrets,
+        env: &Env,
     ) -> Result<Resolved, SettingsError> {
         // Refused before anything else: with the retired sink on, no other
         // setting can make the result correct.
@@ -275,12 +346,12 @@ impl Settings {
             log_level: parse_log_level(&cli.log_level)?,
             stats_interval: cli.stats_interval,
             ingest: cli.ingest_enable.then(|| Ingest::from_cli(cli)),
-            forward: cli.forward_enable.then(|| Forward::from_cli(cli)),
+            forward: cli.forward_enable.then(|| Forward::from_cli(cli, env)),
         };
 
         if let Some(f) = file {
             warnings.extend(f.unknown_keys().into_iter().map(Warning::UnknownKey));
-            s.apply_file(cli, f)?;
+            s.apply_file(cli, env, f)?;
         }
 
         // `--pg-dir` last, and so above even the file: the Python resolved
@@ -291,19 +362,19 @@ impl Settings {
             s.default_dir = parse_direction(d)?;
         }
 
-        // Secrets last, and only to fill a gap: an explicitly configured value
+        // Env last, and only to fill a gap: an explicitly configured value
         // beats the environment, so a unit file's EnvironmentFile cannot
         // silently override what an operator wrote down.
         if let Some(i) = s.ingest.as_mut() {
             if i.token.is_empty() {
-                if let Some(t) = &secrets.ingest_token {
+                if let Some(t) = &env.ingest_token {
                     i.token = t.clone();
                 }
             }
         }
         if let Some(fwd) = s.forward.as_mut() {
             if fwd.api_key.is_empty() {
-                if let Some(k) = &secrets.forward_api_key {
+                if let Some(k) = &env.forward_api_key {
                     fwd.api_key = k.clone();
                 }
             }
@@ -325,7 +396,7 @@ impl Settings {
     }
 
     /// File values over flag values, matching `apply_config_overrides`.
-    fn apply_file(&mut self, cli: &Cli, f: &FileConfig) -> Result<(), SettingsError> {
+    fn apply_file(&mut self, cli: &Cli, env: &Env, f: &FileConfig) -> Result<(), SettingsError> {
         let srv = &f.server;
         over(&mut self.ifaces, srv.iface.as_deref().map(parse_ifaces));
         over(&mut self.host, srv.host.clone());
@@ -356,16 +427,31 @@ impl Settings {
         }
 
         if f.forward.enable == Some(true) || self.forward.is_some() {
-            let fwd = self.forward.get_or_insert_with(|| Forward::from_cli(cli));
+            let fwd = self
+                .forward
+                .get_or_insert_with(|| Forward::from_cli(cli, env));
             over(&mut fwd.host, f.forward.host.clone());
             over(&mut fwd.port, f.forward.port);
             over(&mut fwd.api_key, f.forward.api_key.clone().map(Secret::new));
             over(&mut fwd.database, f.forward.database.clone());
+
+            let b = &mut fwd.batching;
+            over(&mut b.size, f.forward.batch_size);
+            over(&mut b.flush_interval, f.forward.flush_interval);
+            over(&mut b.queue_size, f.forward.queue_size);
+            over(&mut b.cache_max_mb, f.forward.cache_max_mb);
+            over(&mut b.queue_flush_pct, f.forward.queue_flush_pct);
+            // Re-resolved rather than assigned: an empty `cache_path = ""` in
+            // the file has to fall back to the default, not name the working
+            // directory.
+            if let Some(p) = f.forward.cache_path.as_deref() {
+                b.cache_path = cache_path(Some(p).filter(|p| !p.is_empty()), env);
+            }
         }
         Ok(())
     }
 
-    /// Label/value pairs for `--check-config`. Secrets render through
+    /// Label/value pairs for `--check-config`. Env render through
     /// [`Secret`]'s redacting `Display`, so this cannot echo one.
     fn rows(&self) -> Vec<(&'static str, String)> {
         let mut r = vec![
@@ -428,6 +514,18 @@ impl Settings {
                         f.api_key.to_string()
                     },
                 ));
+                let b = &f.batching;
+                r.push((
+                    "batching",
+                    format!(
+                        "{} frames or {}s, queue {} (spill at {}%)",
+                        b.size, b.flush_interval, b.queue_size, b.queue_flush_pct
+                    ),
+                ));
+                r.push((
+                    "disk cache",
+                    format!("{} (max {} MB)", b.cache_path.display(), b.cache_max_mb),
+                ));
             }
             None => r.push((
                 "forward to",
@@ -470,7 +568,7 @@ mod tests {
 
     fn resolve(args: &[&str], toml: Option<&str>) -> Result<Resolved, SettingsError> {
         let parsed = toml.map(|t| FileConfig::parse(t).expect("test config parses"));
-        Settings::resolve(&cli(args), parsed.as_ref(), &Secrets::default())
+        Settings::resolve(&cli(args), parsed.as_ref(), &Env::default())
     }
 
     #[test]
@@ -635,9 +733,9 @@ mod tests {
 
     #[test]
     fn secrets_come_from_the_environment_only_when_not_configured() {
-        let env = Secrets {
+        let env = Env {
             forward_api_key: Some(Secret::new("from-env")),
-            ingest_token: None,
+            ..Env::default()
         };
         let r = Settings::resolve(&cli(&["--forward-enable"]), None, &env).unwrap();
         assert_eq!(r.settings.forward.unwrap().api_key.expose(), "from-env");
@@ -647,6 +745,111 @@ mod tests {
         let f = FileConfig::parse("[forward]\nenable = true\napi_key = \"from-file\"\n").unwrap();
         let r = Settings::resolve(&cli(&[]), Some(&f), &env).unwrap();
         assert_eq!(r.settings.forward.unwrap().api_key.expose(), "from-file");
+    }
+
+    /// The settings that used to live under `[postgres]`, where this server
+    /// could never have read them.
+    #[test]
+    fn the_forward_section_configures_the_batcher() {
+        let r = resolve(
+            &["--pg-batch-size", "500"],
+            Some(
+                "[forward]\nenable = true\nbatch_size = 2000\nflush_interval = 2.5\n\
+                 queue_size = 200000\ncache_max_mb = 4096\nqueue_flush_pct = 80\n",
+            ),
+        )
+        .unwrap();
+        let b = r.settings.forward.expect("enabled").batching;
+        assert_eq!(b.size, 2000, "the file wins, as everywhere else");
+        assert_eq!(b.flush_interval, 2.5);
+        assert_eq!(b.queue_size, 200_000);
+        assert_eq!(b.cache_max_mb, 4096);
+        assert_eq!(b.queue_flush_pct, 80);
+
+        // Untouched by the file, the flags stand.
+        let r = resolve(&["--forward-enable", "--pg-queue-size", "9"], None).unwrap();
+        let b = r.settings.forward.unwrap().batching;
+        assert_eq!(b.queue_size, 9);
+        assert_eq!(b.size, 500, "the Python's default");
+    }
+
+    /// A migrated file still carries these under `[postgres]`. They stay
+    /// ignored, exactly as the Python ignored them once the sink was off — the
+    /// section is retired wholesale, and `--check-config` shows what won.
+    #[test]
+    fn the_retired_section_does_not_configure_the_batcher() {
+        let r = resolve(
+            &["--forward-enable"],
+            Some("[postgres]\nenable = false\nbatch_size = 2000\ncache_max_mb = 4096\n"),
+        )
+        .unwrap();
+        let b = r.settings.forward.unwrap().batching;
+        assert_eq!(b.size, 500);
+        assert_eq!(b.cache_max_mb, 1000);
+    }
+
+    /// Where the cache lands, in the order the answer is looked for.
+    #[test]
+    fn the_cache_path_falls_back_through_the_environment() {
+        let systemd = Env {
+            state_dir: Some("/var/lib/wiretap-server".into()),
+            home: Some("/home/pi".into()),
+            ..Env::default()
+        };
+        let by_hand = Env {
+            home: Some("/home/pi".into()),
+            ..Env::default()
+        };
+
+        // A unit with StateDirectory= writes somewhere ProtectHome allows.
+        assert_eq!(
+            cache_path(None, &systemd),
+            Path::new("/var/lib/wiretap-server/cache.db")
+        );
+        // Without one, the Python's path, so an existing cache is still found.
+        assert_eq!(
+            cache_path(None, &by_hand),
+            Path::new("/home/pi/.wiretap-server-cache.db")
+        );
+        // PG_CACHE_PATH is what deployed units set, and it beats both.
+        let env = Env {
+            cache_path: Some("/mnt/usb/cache.db".into()),
+            ..systemd
+        };
+        assert_eq!(cache_path(None, &env), Path::new("/mnt/usb/cache.db"));
+        // And an explicit setting beats the environment.
+        assert_eq!(
+            cache_path(Some("/explicit.db"), &env),
+            Path::new("/explicit.db")
+        );
+    }
+
+    #[test]
+    fn the_cache_path_is_configurable_from_either_source() {
+        let env = Env {
+            state_dir: Some("/var/lib/wiretap-server".into()),
+            ..Env::default()
+        };
+        let file = FileConfig::parse("[forward]\nenable = true\ncache_path = \"/from/file.db\"\n")
+            .unwrap();
+        let r = Settings::resolve(
+            &cli(&["--pg-cache-path", "/from/flag.db"]),
+            Some(&file),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            r.settings.forward.unwrap().batching.cache_path,
+            Path::new("/from/file.db")
+        );
+
+        // An empty value is not a path: it means "wherever the default is".
+        let file = FileConfig::parse("[forward]\nenable = true\ncache_path = \"\"\n").unwrap();
+        let r = Settings::resolve(&cli(&[]), Some(&file), &env).unwrap();
+        assert_eq!(
+            r.settings.forward.unwrap().batching.cache_path,
+            Path::new("/var/lib/wiretap-server/cache.db")
+        );
     }
 
     #[test]
@@ -744,7 +947,7 @@ mod tests {
              [ingest]\nenable = true\ntoken = \"also-secret\"\n",
         )
         .unwrap();
-        let r = Settings::resolve(&cli(&[]), Some(&f), &Secrets::default()).unwrap();
+        let r = Settings::resolve(&cli(&[]), Some(&f), &Env::default()).unwrap();
 
         let shown = r.settings.to_string();
         assert!(!shown.contains("super-secret"), "{shown}");

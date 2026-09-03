@@ -89,6 +89,36 @@ pub struct Cli {
     #[arg(long, default_value = "")]
     pub forward_database: String,
 
+    // --- batching and the disk cache ---
+    //
+    // The `--pg-` names are a compatibility surface rather than a description.
+    // The Python's forward sink subclassed its PostgreSQL writer and inherited
+    // its queue, so `main` handed these to a forward deployment too; a unit
+    // file in the field passes them, and they configure machinery that has not
+    // gone anywhere.
+    /// Frames per batch forwarded to the gateway.
+    #[arg(long, default_value_t = 500)]
+    pub pg_batch_size: usize,
+    /// Seconds to wait for a batch to fill before sending it short.
+    #[arg(long, default_value_t = 0.5)]
+    pub pg_flush_interval: f64,
+    /// Frames held in memory before the queue starts dropping.
+    #[arg(long, default_value_t = 50_000)]
+    pub pg_queue_size: usize,
+    /// Direction tag for captured frames. Overrides --default-dir.
+    #[arg(long)]
+    pub pg_dir: Option<String>,
+    /// Disk cache used through a gateway outage.
+    /// Default: $STATE_DIRECTORY/cache.db, else ~/.wiretap-server-cache.db.
+    #[arg(long)]
+    pub pg_cache_path: Option<String>,
+    /// Cache size limit in MB; frames are dropped once it is reached.
+    #[arg(long, default_value_t = 1000)]
+    pub pg_cache_max_mb: u64,
+    /// Queue occupancy at which frames move to disk pre-emptively.
+    #[arg(long, default_value_t = 50)]
+    pub pg_queue_flush_pct: u8,
+
     // --- retired: the direct-to-PostgreSQL sink ---
     /// Retired. The gateway owns the database; use --forward-enable.
     #[arg(long, hide = true)]
@@ -99,20 +129,6 @@ pub struct Cli {
     pub pg_func: Option<String>,
     #[arg(long, hide = true)]
     pub pg_write_mode: Option<String>,
-    #[arg(long, hide = true)]
-    pub pg_batch_size: Option<usize>,
-    #[arg(long, hide = true)]
-    pub pg_flush_interval: Option<f64>,
-    #[arg(long, hide = true)]
-    pub pg_queue_size: Option<usize>,
-    #[arg(long, hide = true)]
-    pub pg_dir: Option<String>,
-    #[arg(long, hide = true)]
-    pub pg_cache_path: Option<String>,
-    #[arg(long, hide = true)]
-    pub pg_cache_max_mb: Option<u64>,
-    #[arg(long, hide = true)]
-    pub pg_queue_flush_pct: Option<u8>,
 
     /// TOML config file. Note: values in the file OVERRIDE these flags.
     #[arg(short = 'C', long)]
@@ -173,6 +189,12 @@ mod tests {
         assert_eq!(c.forward_host, "127.0.0.1");
         assert_eq!(c.forward_port, 9323);
         assert_eq!(c.forward_database, "");
+        assert_eq!(c.pg_batch_size, 500);
+        assert_eq!(c.pg_flush_interval, 0.5);
+        assert_eq!(c.pg_queue_size, 50_000);
+        assert_eq!(c.pg_cache_max_mb, 1000);
+        assert_eq!(c.pg_queue_flush_pct, 50);
+        assert_eq!(c.pg_cache_path, None, "resolved against the environment");
     }
 
     /// Short forms the Python had; a deployed command line may use them.
@@ -206,7 +228,7 @@ mod tests {
             vec!["--pg-dsn"],
             "the DSN went with the sink; the batch size did not"
         );
-        assert_eq!(c.pg_batch_size, Some(500));
+        assert_eq!(c.pg_batch_size, 500);
     }
 
     #[test]

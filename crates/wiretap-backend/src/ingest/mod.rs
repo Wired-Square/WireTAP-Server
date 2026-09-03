@@ -4,7 +4,11 @@
 //! client is only ACKed once the batch is durably stored (ACK-after-write), so
 //! a DB outage back-pressures the device into its own disk cache.
 
-pub mod proto;
+/// The wire codec, shared with the capture server that speaks the other half
+/// of it. Re-exported under the name it had when it lived here, because the
+/// call sites read better as `proto::encode_ack` than as the crate name.
+pub use wiretap_ingest_proto as proto;
+
 pub mod writer;
 
 use std::collections::HashMap;
