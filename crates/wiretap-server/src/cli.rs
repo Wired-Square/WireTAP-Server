@@ -7,9 +7,7 @@
 //! rejected by [`crate::settings`] if they would change behaviour.
 //!
 //! Defaults here are the Python's `build_parser()` defaults, which differ in
-//! places from the values in the shipped `wiretap-server.toml`. Both are
-//! preserved: the file wins where it speaks, and these apply where it is
-//! silent.
+//! places from the values in the shipped `wiretap-server.toml`.
 
 use clap::Parser;
 
@@ -129,7 +127,7 @@ impl Cli {
     /// Retired `--pg-*` flags the caller actually passed, for warning about.
     /// `--pg-enable` is handled separately: it is refused, not warned.
     pub fn retired_flags_used(&self) -> Vec<&'static str> {
-        let set: [(&str, bool); 10] = [
+        [
             ("--pg-dsn", self.pg_dsn.is_some()),
             ("--pg-func", self.pg_func.is_some()),
             ("--pg-write-mode", self.pg_write_mode.is_some()),
@@ -140,11 +138,10 @@ impl Cli {
             ("--pg-cache-path", self.pg_cache_path.is_some()),
             ("--pg-cache-max-mb", self.pg_cache_max_mb.is_some()),
             ("--pg-queue-flush-pct", self.pg_queue_flush_pct.is_some()),
-        ];
-        set.iter()
-            .filter(|(_, used)| *used)
-            .map(|(n, _)| *n)
-            .collect()
+        ]
+        .into_iter()
+        .filter_map(|(name, used)| used.then_some(name))
+        .collect()
     }
 }
 

@@ -7,7 +7,9 @@
 #[cfg(feature = "config")]
 pub mod config;
 pub mod sample;
+pub mod secret;
 
 #[cfg(feature = "config")]
 pub use config::{parse_ifaces, FileConfig};
 pub use sample::{dlc_to_len, len_to_dlc, payload_dlc, CanSample, Direction, SourceId};
+pub use secret::Secret;

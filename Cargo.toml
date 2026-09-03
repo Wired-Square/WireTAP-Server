@@ -22,7 +22,7 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 
 [workspace.dependencies]
 # --- CLI ---
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", default-features = false }
 
 # --- async runtime and HTTP ---
 axum = "0.8"

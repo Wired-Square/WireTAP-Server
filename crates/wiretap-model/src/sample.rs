@@ -17,6 +17,37 @@ pub enum Direction {
     Tx,
 }
 
+impl Direction {
+    /// The tag the archive stores. Bound to the serde representation by
+    /// `direction_tags_agree_with_serde`, so the two cannot drift.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Direction::Rx => "rx",
+            Direction::Tx => "tx",
+        }
+    }
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Direction {
+    type Err = ();
+
+    /// Case-insensitive on purpose: the Python accepted any `--default-dir`
+    /// string, so `TX` has to keep working.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s.to_ascii_lowercase().as_str() {
+            "rx" => Ok(Direction::Rx),
+            "tx" => Ok(Direction::Tx),
+            _ => Err(()),
+        }
+    }
+}
+
 /// One CAN or CAN FD frame.
 ///
 /// The data length code is **not** stored: it is derivable from `data.len()`
@@ -138,9 +169,24 @@ mod tests {
         }
     }
 
+    /// One tag, three representations — serde, `as_str`, and `FromStr`. They
+    /// are asserted against each other rather than against literals, so adding
+    /// a variant cannot leave one behind.
     #[test]
-    fn direction_serialises_as_the_database_tag() {
-        assert_eq!(serde_json::to_string(&Direction::Rx).unwrap(), "\"rx\"");
-        assert_eq!(serde_json::to_string(&Direction::Tx).unwrap(), "\"tx\"");
+    fn direction_tags_agree_with_serde() {
+        for d in [Direction::Rx, Direction::Tx] {
+            assert_eq!(
+                serde_json::to_string(&d).unwrap(),
+                format!("\"{}\"", d.as_str())
+            );
+            assert_eq!(d.as_str().parse(), Ok(d));
+            assert_eq!(d.to_string(), d.as_str());
+        }
+        assert_eq!(
+            "TX".parse(),
+            Ok(Direction::Tx),
+            "case-insensitive, as the Python was"
+        );
+        assert_eq!("sideways".parse::<Direction>(), Err(()));
     }
 }

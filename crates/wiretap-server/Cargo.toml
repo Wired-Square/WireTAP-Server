@@ -10,4 +10,6 @@ repository.workspace = true
 
 [dependencies]
 wiretap-model = { path = "../wiretap-model" }
-clap.workspace = true
+# No `color` (stdout is a journal pipe) and no `suggestions` (a typo at an
+# interactive shell is one --help away): together they cost 33 KB and 7 crates.
+clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }

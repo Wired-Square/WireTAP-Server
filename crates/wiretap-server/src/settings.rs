@@ -5,39 +5,68 @@
 //! Python did — `apply_config_overrides` writes file values over the parsed
 //! arguments — and deployed units pass both, so reversing it would silently
 //! change what running systems do. The shipped `wiretap-server.toml` header
-//! claims the opposite; the code is what deployments depend on, and
-//! `--check-config` exists so the result is inspectable rather than argued
-//! about.
+//! claims the opposite; `--check-config` exists so the result is inspectable
+//! rather than argued about.
 
-use std::fmt::Write as _;
+use std::fmt;
 
-use wiretap_model::{config::FileConfig, parse_ifaces, Direction};
+use wiretap_model::{config::FileConfig, parse_ifaces, Direction, Secret};
 
 use crate::cli::Cli;
 
+/// Apply a file value over a flag value, where the file speaks.
+fn over<T>(dst: &mut T, src: Option<T>) {
+    if let Some(v) = src {
+        *dst = v;
+    }
+}
+
 /// Where captured frames are sent for archiving.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Forward {
     pub host: String,
     pub port: u16,
-    pub api_key: String,
+    pub api_key: Secret,
     /// Empty means the gateway's default capture database.
     pub database: String,
 }
 
 /// The binary TCP listener that accepts pushed frames from capture devices.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Ingest {
     pub host: String,
     pub port: u16,
-    /// Empty disables authentication.
-    pub token: String,
+    /// Empty disables authentication — the Python's behaviour, kept.
+    pub token: Secret,
     pub keepalive_secs: f64,
     pub max_batch_frames: usize,
 }
 
+impl Ingest {
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            host: cli.ingest_host.clone(),
+            port: cli.ingest_port,
+            token: Secret::new(cli.ingest_token.clone().unwrap_or_default()),
+            keepalive_secs: cli.ingest_keepalive_secs,
+            max_batch_frames: cli.ingest_max_batch_frames,
+        }
+    }
+}
+
+impl Forward {
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            host: cli.forward_host.clone(),
+            port: cli.forward_port,
+            api_key: Secret::new(cli.forward_api_key.clone().unwrap_or_default()),
+            database: cli.forward_database.clone(),
+        }
+    }
+}
+
 /// Everything the server needs to run, with every source already applied.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Settings {
     pub ifaces: Vec<String>,
     pub host: String,
@@ -47,10 +76,46 @@ pub struct Settings {
     pub colour: bool,
     pub default_dir: Direction,
     pub can_fd: bool,
-    pub log_level: String,
+    pub log_level: LogLevel,
     pub stats_interval: f64,
     pub ingest: Option<Ingest>,
     pub forward: Option<Forward>,
+}
+
+/// Python's spellings, because deployed config files use them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
+
+impl LogLevel {
+    pub const NAMES: [&'static str; 4] = ["DEBUG", "INFO", "WARNING", "ERROR"];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "DEBUG",
+            Self::Info => "INFO",
+            Self::Warning => "WARNING",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s.to_ascii_uppercase().as_str() {
+            "DEBUG" => Ok(Self::Debug),
+            "INFO" => Ok(Self::Info),
+            "WARNING" => Ok(Self::Warning),
+            "ERROR" => Ok(Self::Error),
+            _ => Err(()),
+        }
+    }
 }
 
 /// Why the server declined to start.
@@ -58,17 +123,20 @@ pub struct Settings {
 pub enum SettingsError {
     /// `[postgres].enable` or `--pg-enable`.
     RetiredPostgresSink,
-    /// A direction tag that is neither `rx` nor `tx`.
     BadDirection(String),
-    /// The config file could not be read or parsed.
-    Config(String),
+    BadLogLevel(String),
+    /// The config file could not be read.
+    Io {
+        path: String,
+        err: String,
+    },
+    /// The config file is not valid TOML, or a value has the wrong type.
+    Parse(String),
 }
 
-impl std::fmt::Display for SettingsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // Named at length because the alternative — starting anyway — is a
-            // capture that looks healthy and archives nothing.
             Self::RetiredPostgresSink => write!(
                 f,
                 "the direct-to-PostgreSQL sink has been removed: the gateway owns the \
@@ -77,42 +145,122 @@ impl std::fmt::Display for SettingsError {
                  gateway. To move an existing archive, use tools/migrate_to_timescale.py.\n\
                  Refusing to start rather than capturing with no archive."
             ),
-            Self::BadDirection(d) => {
-                write!(f, "direction must be \"rx\" or \"tx\", got {d:?}")
+            Self::BadDirection(d) => write!(f, "direction must be \"rx\" or \"tx\", got {d:?}"),
+            Self::BadLogLevel(l) => {
+                write!(
+                    f,
+                    "log level must be one of {:?}, got {l:?}",
+                    LogLevel::NAMES
+                )
             }
-            Self::Config(e) => write!(f, "{e}"),
+            Self::Io { path, err } => write!(f, "cannot read {path}: {err}"),
+            Self::Parse(e) => write!(f, "{e}"),
         }
     }
 }
 
-/// What resolving produced, including anything the operator should hear about
-/// but which is not fatal.
-#[derive(Debug, Clone)]
+/// Something an operator should hear about that is not fatal.
+///
+/// A value rather than a sentence, so the control socket and the web UI can
+/// surface these structurally — and so tests assert on a condition instead of
+/// on wording.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Warning {
+    /// Flags for the retired sink, accepted and ignored.
+    RetiredFlags(Vec<&'static str>),
+    /// A config key no section defines.
+    UnknownKey(String),
+    /// Neither a CAN interface nor an ingest listener.
+    NoCaptureSource,
+    /// Capturing, but with nowhere to archive to.
+    NoForwardSink,
+    /// Forwarding, but with no credential to authenticate with.
+    ForwardKeyMissing,
+}
+
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RetiredFlags(v) => {
+                write!(
+                    f,
+                    "ignoring flags for the retired PostgreSQL sink: {}",
+                    v.join(", ")
+                )
+            }
+            Self::UnknownKey(k) => write!(f, "unknown config key, ignored: {k}"),
+            Self::NoCaptureSource => write!(
+                f,
+                "no CAN interfaces and no ingest listener: this server will capture nothing"
+            ),
+            Self::NoForwardSink => write!(
+                f,
+                "no [forward] gateway configured: frames will be bridged to GVRET clients \
+                 but not archived"
+            ),
+            Self::ForwardKeyMissing => write!(
+                f,
+                "[forward] has no api_key and WIRETAP_FORWARD_TOKEN is unset: the gateway \
+                 will reject this server"
+            ),
+        }
+    }
+}
+
+/// What resolving produced.
+#[derive(Debug)]
 pub struct Resolved {
     pub settings: Settings,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Warning>,
+}
+
+/// The credentials the server takes from the environment when the config does
+/// not supply them. Named here so the variables exist in one greppable place.
+#[derive(Debug, Default)]
+pub struct Secrets {
+    pub ingest_token: Option<Secret>,
+    pub forward_api_key: Option<Secret>,
+}
+
+impl Secrets {
+    pub fn from_env() -> Self {
+        let get = |k: &str| std::env::var(k).ok().map(Secret::new);
+        Self {
+            ingest_token: get("WIRETAP_INGEST_TOKEN"),
+            forward_api_key: get("WIRETAP_FORWARD_TOKEN"),
+        }
+    }
+}
+
+/// Read and parse a config file.
+///
+/// Lives here rather than in `main` so a future config reload over the control
+/// socket takes the same path, and so the failure modes are testable.
+pub fn load(path: &str) -> Result<FileConfig, SettingsError> {
+    let text = std::fs::read_to_string(path).map_err(|e| SettingsError::Io {
+        path: path.to_string(),
+        err: e.to_string(),
+    })?;
+    FileConfig::parse(&text).map_err(SettingsError::Parse)
 }
 
 impl Settings {
     /// Apply flags, then the file over them, then the environment for secrets.
-    ///
-    /// `file` is the already-parsed config, so this is testable without
-    /// touching a filesystem; `env` is passed in for the same reason.
     pub fn resolve(
         cli: &Cli,
         file: Option<&FileConfig>,
-        env: impl Fn(&str) -> Option<String>,
+        secrets: &Secrets,
     ) -> Result<Resolved, SettingsError> {
-        let mut warnings = Vec::new();
-
-        // The retired sink is refused before anything else: if it is on, no
-        // other setting can make the result correct.
+        // Refused before anything else: with the retired sink on, no other
+        // setting can make the result correct.
         if cli.pg_enable || file.is_some_and(FileConfig::retired_postgres_sink) {
             return Err(SettingsError::RetiredPostgresSink);
         }
+
+        let mut warnings = Vec::new();
         let retired = cli.retired_flags_used();
         if !retired.is_empty() {
-            warnings.push(format!("ignoring retired flags: {}", retired.join(", ")));
+            warnings.push(Warning::RetiredFlags(retired));
         }
 
         let mut s = Settings {
@@ -124,29 +272,14 @@ impl Settings {
             colour: cli.colour,
             default_dir: parse_direction(&cli.default_dir)?,
             can_fd: cli.can_fd,
-            log_level: cli.log_level.to_uppercase(),
+            log_level: parse_log_level(&cli.log_level)?,
             stats_interval: cli.stats_interval,
-            ingest: cli.ingest_enable.then(|| Ingest {
-                host: cli.ingest_host.clone(),
-                port: cli.ingest_port,
-                token: cli.ingest_token.clone().unwrap_or_default(),
-                keepalive_secs: cli.ingest_keepalive_secs,
-                max_batch_frames: cli.ingest_max_batch_frames,
-            }),
-            forward: cli.forward_enable.then(|| Forward {
-                host: cli.forward_host.clone(),
-                port: cli.forward_port,
-                api_key: cli.forward_api_key.clone().unwrap_or_default(),
-                database: cli.forward_database.clone(),
-            }),
+            ingest: cli.ingest_enable.then(|| Ingest::from_cli(cli)),
+            forward: cli.forward_enable.then(|| Forward::from_cli(cli)),
         };
 
         if let Some(f) = file {
-            warnings.extend(
-                f.unknown_keys()
-                    .iter()
-                    .map(|k| format!("unknown config key, ignored: {k}")),
-            );
+            warnings.extend(f.unknown_keys().into_iter().map(Warning::UnknownKey));
             s.apply_file(cli, f)?;
         }
 
@@ -155,26 +288,26 @@ impl Settings {
         // silently override what an operator wrote down.
         if let Some(i) = s.ingest.as_mut() {
             if i.token.is_empty() {
-                i.token = env("WIRETAP_INGEST_TOKEN").unwrap_or_default();
+                if let Some(t) = &secrets.ingest_token {
+                    i.token = t.clone();
+                }
             }
         }
         if let Some(fwd) = s.forward.as_mut() {
             if fwd.api_key.is_empty() {
-                fwd.api_key = env("WIRETAP_FORWARD_TOKEN").unwrap_or_default();
+                if let Some(k) = &secrets.forward_api_key {
+                    fwd.api_key = k.clone();
+                }
             }
         }
 
         if s.ifaces.is_empty() && s.ingest.is_none() {
-            warnings.push(
-                "no CAN interfaces and no ingest listener: this server will capture nothing".into(),
-            );
+            warnings.push(Warning::NoCaptureSource);
         }
-        if s.forward.is_none() {
-            warnings.push(
-                "no [forward] gateway configured: frames will be bridged to GVRET clients \
-                 but not archived"
-                    .into(),
-            );
+        match &s.forward {
+            None => warnings.push(Warning::NoForwardSink),
+            Some(f) if f.api_key.is_empty() => warnings.push(Warning::ForwardKeyMissing),
+            Some(_) => {}
         }
 
         Ok(Resolved {
@@ -186,172 +319,134 @@ impl Settings {
     /// File values over flag values, matching `apply_config_overrides`.
     fn apply_file(&mut self, cli: &Cli, f: &FileConfig) -> Result<(), SettingsError> {
         let srv = &f.server;
-        if let Some(v) = &srv.iface {
-            self.ifaces = parse_ifaces(v);
-        }
-        if let Some(v) = &srv.host {
-            self.host = v.clone();
-        }
-        if let Some(v) = srv.port {
-            self.port = v;
-        }
-        if let Some(v) = srv.bus_offset {
-            self.bus_offset = v;
-        }
-        if let Some(v) = srv.echo_console {
-            self.echo_console = v;
-        }
-        if let Some(v) = srv.colour {
-            self.colour = v;
-        }
+        over(&mut self.ifaces, srv.iface.as_deref().map(parse_ifaces));
+        over(&mut self.host, srv.host.clone());
+        over(&mut self.port, srv.port);
+        over(&mut self.bus_offset, srv.bus_offset);
+        over(&mut self.echo_console, srv.echo_console);
+        over(&mut self.colour, srv.colour);
+        over(&mut self.can_fd, srv.can_fd);
         if let Some(v) = &srv.default_dir {
             self.default_dir = parse_direction(v)?;
         }
-        if let Some(v) = srv.can_fd {
-            self.can_fd = v;
-        }
 
         if let Some(v) = &f.logging.level {
-            self.log_level = v.to_uppercase();
+            self.log_level = parse_log_level(v)?;
         }
-        if let Some(v) = f.logging.stats_interval {
-            self.stats_interval = v;
-        }
+        over(&mut self.stats_interval, f.logging.stats_interval);
 
         // A section turns its listener on, but its other keys apply whether or
         // not it did — so a file can carry settings for a listener the command
         // line enables, which is how the Python behaved.
-        if f.ingest.enable == Some(true) && self.ingest.is_none() {
-            self.ingest = Some(Ingest {
-                host: cli.ingest_host.clone(),
-                port: cli.ingest_port,
-                token: cli.ingest_token.clone().unwrap_or_default(),
-                keepalive_secs: cli.ingest_keepalive_secs,
-                max_batch_frames: cli.ingest_max_batch_frames,
-            });
-        }
-        if let Some(i) = self.ingest.as_mut() {
-            if let Some(v) = &f.ingest.host {
-                i.host = v.clone();
-            }
-            if let Some(v) = f.ingest.port {
-                i.port = v;
-            }
-            if let Some(v) = &f.ingest.token {
-                i.token = v.clone();
-            }
-            if let Some(v) = f.ingest.keepalive_secs {
-                i.keepalive_secs = v;
-            }
-            if let Some(v) = f.ingest.max_batch_frames {
-                i.max_batch_frames = v;
-            }
+        if f.ingest.enable == Some(true) || self.ingest.is_some() {
+            let i = self.ingest.get_or_insert_with(|| Ingest::from_cli(cli));
+            over(&mut i.host, f.ingest.host.clone());
+            over(&mut i.port, f.ingest.port);
+            over(&mut i.token, f.ingest.token.clone().map(Secret::new));
+            over(&mut i.keepalive_secs, f.ingest.keepalive_secs);
+            over(&mut i.max_batch_frames, f.ingest.max_batch_frames);
         }
 
-        if f.forward.enable == Some(true) && self.forward.is_none() {
-            self.forward = Some(Forward {
-                host: cli.forward_host.clone(),
-                port: cli.forward_port,
-                api_key: cli.forward_api_key.clone().unwrap_or_default(),
-                database: cli.forward_database.clone(),
-            });
-        }
-        if let Some(fwd) = self.forward.as_mut() {
-            if let Some(v) = &f.forward.host {
-                fwd.host = v.clone();
-            }
-            if let Some(v) = f.forward.port {
-                fwd.port = v;
-            }
-            if let Some(v) = &f.forward.api_key {
-                fwd.api_key = v.clone();
-            }
-            if let Some(v) = &f.forward.database {
-                fwd.database = v.clone();
-            }
+        if f.forward.enable == Some(true) || self.forward.is_some() {
+            let fwd = self.forward.get_or_insert_with(|| Forward::from_cli(cli));
+            over(&mut fwd.host, f.forward.host.clone());
+            over(&mut fwd.port, f.forward.port);
+            over(&mut fwd.api_key, f.forward.api_key.clone().map(Secret::new));
+            over(&mut fwd.database, f.forward.database.clone());
         }
         Ok(())
     }
 
-    /// What `--check-config` prints. Secrets are shown as set/unset, never
-    /// echoed — the output is meant to be safe to paste into a bug report.
-    pub fn describe(&self) -> String {
-        let mut o = String::new();
-        let ifaces = if self.ifaces.is_empty() {
-            "(none)".to_string()
-        } else {
-            self.ifaces.join(", ")
-        };
-        let _ = writeln!(o, "interfaces      {ifaces}");
-        let _ = writeln!(o, "gvret listen    {}:{}", self.host, self.port);
-        let _ = writeln!(o, "bus offset      {}", self.bus_offset);
-        let _ = writeln!(o, "can fd          {}", self.can_fd);
-        let _ = writeln!(o, "direction       {:?}", self.default_dir);
-        let _ = writeln!(
-            o,
-            "console echo    {} (colour {})",
-            self.echo_console, self.colour
-        );
-        let _ = writeln!(o, "log level       {}", self.log_level);
-        let _ = writeln!(o, "stats interval  {}s", self.stats_interval);
+    /// Label/value pairs for `--check-config`. Secrets render through
+    /// [`Secret`]'s redacting `Display`, so this cannot echo one.
+    fn rows(&self) -> Vec<(&'static str, String)> {
+        let mut r = vec![
+            (
+                "interfaces",
+                if self.ifaces.is_empty() {
+                    "(none)".into()
+                } else {
+                    self.ifaces.join(", ")
+                },
+            ),
+            ("gvret listen", format!("{}:{}", self.host, self.port)),
+            ("bus offset", self.bus_offset.to_string()),
+            ("can fd", self.can_fd.to_string()),
+            ("direction", self.default_dir.to_string()),
+            (
+                "console echo",
+                format!("{} (colour {})", self.echo_console, self.colour),
+            ),
+            ("log level", self.log_level.as_str().into()),
+            ("stats interval", format!("{}s", self.stats_interval)),
+        ];
         match &self.ingest {
             Some(i) => {
-                let _ = writeln!(o, "ingest listen   {}:{}", i.host, i.port);
-                let _ = writeln!(
-                    o,
-                    "ingest auth     {}",
+                r.push(("ingest listen", format!("{}:{}", i.host, i.port)));
+                r.push((
+                    "ingest auth",
                     if i.token.is_empty() {
-                        "disabled"
+                        "disabled".into()
                     } else {
-                        "token set"
-                    }
-                );
-                let _ = writeln!(
-                    o,
-                    "ingest limits   {} frames/batch, keepalive {}s",
-                    i.max_batch_frames, i.keepalive_secs
-                );
+                        i.token.to_string()
+                    },
+                ));
+                r.push((
+                    "ingest limits",
+                    format!(
+                        "{} frames/batch, keepalive {}s",
+                        i.max_batch_frames, i.keepalive_secs
+                    ),
+                ));
             }
-            None => {
-                let _ = writeln!(o, "ingest listen   disabled");
-            }
+            None => r.push(("ingest listen", "disabled".into())),
         }
         match &self.forward {
             Some(f) => {
-                let _ = writeln!(o, "forward to      {}:{}", f.host, f.port);
-                let _ = writeln!(
-                    o,
-                    "forward db      {}",
+                r.push(("forward to", format!("{}:{}", f.host, f.port)));
+                r.push((
+                    "forward db",
                     if f.database.is_empty() {
-                        "(gateway default)"
+                        "(gateway default)".into()
                     } else {
-                        &f.database
-                    }
-                );
-                let _ = writeln!(
-                    o,
-                    "forward auth    {}",
+                        f.database.clone()
+                    },
+                ));
+                r.push((
+                    "forward auth",
                     if f.api_key.is_empty() {
-                        "MISSING"
+                        "MISSING".into()
                     } else {
-                        "key set"
-                    }
-                );
+                        f.api_key.to_string()
+                    },
+                ));
             }
-            None => {
-                let _ = writeln!(o, "forward to      disabled — frames will not be archived");
-            }
+            None => r.push((
+                "forward to",
+                "disabled — frames will not be archived".into(),
+            )),
         }
-        o
+        r
+    }
+}
+
+impl fmt::Display for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (label, value) in self.rows() {
+            writeln!(f, "{label:<16}{value}")?;
+        }
+        Ok(())
     }
 }
 
 fn parse_direction(s: &str) -> Result<Direction, SettingsError> {
-    match s.to_ascii_lowercase().as_str() {
-        "rx" => Ok(Direction::Rx),
-        "tx" => Ok(Direction::Tx),
-        _ => Err(SettingsError::BadDirection(s.to_string())),
-    }
+    s.parse()
+        .map_err(|()| SettingsError::BadDirection(s.to_string()))
+}
+
+fn parse_log_level(s: &str) -> Result<LogLevel, SettingsError> {
+    s.parse()
+        .map_err(|()| SettingsError::BadLogLevel(s.to_string()))
 }
 
 #[cfg(test)]
@@ -365,13 +460,9 @@ mod tests {
         Cli::parse_from(v)
     }
 
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
-
     fn resolve(args: &[&str], toml: Option<&str>) -> Result<Resolved, SettingsError> {
         let parsed = toml.map(|t| FileConfig::parse(t).expect("test config parses"));
-        Settings::resolve(&cli(args), parsed.as_ref(), no_env)
+        Settings::resolve(&cli(args), parsed.as_ref(), &Secrets::default())
     }
 
     #[test]
@@ -382,8 +473,8 @@ mod tests {
         assert_eq!(r.settings.default_dir, Direction::Rx);
     }
 
-    /// The precedence that deployed units depend on, and that the shipped
-    /// config file's own header gets backwards.
+    /// The precedence deployed units depend on, and that the shipped config
+    /// file's own header gets backwards.
     #[test]
     fn the_config_file_overrides_the_command_line() {
         let r = resolve(
@@ -418,7 +509,6 @@ mod tests {
             resolve(&[], Some("[postgres]\nenable = true\n")).unwrap_err(),
             SettingsError::RetiredPostgresSink
         );
-        // The message has to tell an operator what to do instead.
         let msg = SettingsError::RetiredPostgresSink.to_string();
         assert!(msg.contains("[forward]"), "names the replacement");
         assert!(
@@ -437,7 +527,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            r.warnings.iter().all(|w| !w.contains("postgres")),
+            !r.warnings
+                .iter()
+                .any(|w| matches!(w, Warning::UnknownKey(_))),
             "{:?}",
             r.warnings
         );
@@ -447,7 +539,8 @@ mod tests {
     fn retired_flags_warn_without_failing() {
         let r = resolve(&["--pg-batch-size", "500", "--pg-dsn", "x"], None).unwrap();
         assert!(
-            r.warnings.iter().any(|w| w.contains("--pg-dsn")),
+            r.warnings
+                .contains(&Warning::RetiredFlags(vec!["--pg-dsn", "--pg-batch-size"])),
             "{:?}",
             r.warnings
         );
@@ -462,7 +555,7 @@ mod tests {
         .unwrap();
         let f = r.settings.forward.expect("forward enabled by the file");
         assert_eq!(
-            (f.host.as_str(), f.port, f.api_key.as_str()),
+            (f.host.as_str(), f.port, f.api_key.expose()),
             ("gw.local", 9999, "k")
         );
 
@@ -485,25 +578,26 @@ mod tests {
 
     #[test]
     fn secrets_come_from_the_environment_only_when_not_configured() {
-        let env = |k: &str| match k {
-            "WIRETAP_FORWARD_TOKEN" => Some("from-env".to_string()),
-            _ => None,
+        let env = Secrets {
+            forward_api_key: Some(Secret::new("from-env")),
+            ingest_token: None,
         };
-        let r = Settings::resolve(&cli(&["--forward-enable"]), None, env).unwrap();
-        assert_eq!(r.settings.forward.unwrap().api_key, "from-env");
+        let r = Settings::resolve(&cli(&["--forward-enable"]), None, &env).unwrap();
+        assert_eq!(r.settings.forward.unwrap().api_key.expose(), "from-env");
 
         // An explicit value wins: an EnvironmentFile must not quietly replace
         // what an operator wrote in the config.
         let f = FileConfig::parse("[forward]\nenable = true\napi_key = \"from-file\"\n").unwrap();
-        let r = Settings::resolve(&cli(&[]), Some(&f), env).unwrap();
-        assert_eq!(r.settings.forward.unwrap().api_key, "from-file");
+        let r = Settings::resolve(&cli(&[]), Some(&f), &env).unwrap();
+        assert_eq!(r.settings.forward.unwrap().api_key.expose(), "from-file");
     }
 
     #[test]
     fn unknown_config_keys_warn() {
         let r = resolve(&[], Some("[server]\nnonsense = 1\n")).unwrap();
         assert!(
-            r.warnings.iter().any(|w| w.contains("server.nonsense")),
+            r.warnings
+                .contains(&Warning::UnknownKey("server.nonsense".into())),
             "{:?}",
             r.warnings
         );
@@ -513,14 +607,25 @@ mod tests {
     fn capturing_nothing_is_worth_saying_out_loud() {
         let r = resolve(&["-i", ""], None).unwrap();
         assert!(
-            r.warnings.iter().any(|w| w.contains("capture nothing")),
+            r.warnings.contains(&Warning::NoCaptureSource),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn archiving_nowhere_is_worth_saying_out_loud() {
+        let r = resolve(&[], None).unwrap();
+        assert!(
+            r.warnings.contains(&Warning::NoForwardSink),
             "{:?}",
             r.warnings
         );
 
-        let r = resolve(&[], None).unwrap();
+        // Forwarding with no credential fails at the gateway, so say it here.
+        let r = resolve(&["--forward-enable"], None).unwrap();
         assert!(
-            r.warnings.iter().any(|w| w.contains("not archived")),
+            r.warnings.contains(&Warning::ForwardKeyMissing),
             "{:?}",
             r.warnings
         );
@@ -541,14 +646,29 @@ mod tests {
         );
     }
 
+    /// The flag is validated by clap; the file was not validated at all until
+    /// the level became a type.
+    #[test]
+    fn a_bad_log_level_is_refused_from_the_file_too() {
+        assert_eq!(
+            resolve(&[], Some("[logging]\nlevel = \"TRACE\"\n")).unwrap_err(),
+            SettingsError::BadLogLevel("TRACE".into())
+        );
+        assert_eq!(
+            resolve(&[], Some("[logging]\nlevel = \"warning\"\n"))
+                .unwrap()
+                .settings
+                .log_level,
+            LogLevel::Warning
+        );
+    }
+
     /// The shipped reference config must resolve, and land on the values it
     /// documents rather than the flag defaults.
     #[test]
     fn the_shipped_reference_config_resolves() {
         const REFERENCE: &str = include_str!("../../../tools/oracle/wiretap-server.toml");
         let r = resolve(&[], Some(REFERENCE)).unwrap();
-        assert_eq!(r.settings.ifaces, ["can0"]);
-        assert_eq!(r.settings.port, 23);
         assert_eq!(
             r.settings.stats_interval, 60.0,
             "the file's value, not the flag default of 10"
@@ -561,21 +681,31 @@ mod tests {
     }
 
     #[test]
-    fn describe_does_not_echo_secrets() {
+    fn nothing_that_prints_settings_can_echo_a_secret() {
         let f = FileConfig::parse(
             "[forward]\nenable = true\napi_key = \"super-secret\"\n\
              [ingest]\nenable = true\ntoken = \"also-secret\"\n",
         )
         .unwrap();
-        let out = Settings::resolve(&cli(&[]), Some(&f), no_env)
-            .unwrap()
-            .settings
-            .describe();
-        assert!(!out.contains("super-secret"), "{out}");
-        assert!(!out.contains("also-secret"), "{out}");
+        let r = Settings::resolve(&cli(&[]), Some(&f), &Secrets::default()).unwrap();
+
+        let shown = r.settings.to_string();
+        assert!(!shown.contains("super-secret"), "{shown}");
+        assert!(!shown.contains("also-secret"), "{shown}");
+
+        // The one that used to leak: a derived Debug anywhere in the tree.
+        let debugged = format!("{:?}", r);
+        assert!(!debugged.contains("super-secret"), "{debugged}");
+        assert!(!debugged.contains("also-secret"), "{debugged}");
+    }
+
+    #[test]
+    fn a_missing_config_file_names_the_path() {
+        let err = load("/nonexistent/wiretap.toml").unwrap_err();
+        assert!(matches!(err, SettingsError::Io { .. }));
         assert!(
-            out.contains("key set") && out.contains("token set"),
-            "{out}"
+            err.to_string().contains("/nonexistent/wiretap.toml"),
+            "{err}"
         );
     }
 }

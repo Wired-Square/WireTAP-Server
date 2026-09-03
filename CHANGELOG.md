@@ -49,6 +49,14 @@ All notable changes to this project are documented here. Entries go under
   than ignored, because silently ignoring it would drop every frame an operator believes is
   being archived. `tools/migrate_to_timescale.py` remains for moving an existing archive.
 
+### Security
+
+- Credentials are a `Secret` type whose `Debug` and `Display` render `set`/`unset`. The
+  settings structs derive `Debug`, so a single `{:?}` on them — or a `tracing` field during
+  pipeline bring-up — would have printed the gateway API key and the ingest token in
+  plaintext. Only the one function that formatted them deliberately was careful; now the
+  type is, and reaching the value takes an explicit `expose()` that greps cleanly.
+
 ### Fixed
 
 - `.dockerignore`'s secrets patterns were root-anchored and so matched nothing below the
@@ -65,6 +73,9 @@ All notable changes to this project are documented here. Entries go under
 - Six documentation links and paths left dangling by the move. The pass that rewrote them
   originally only matched references that *named* the moved directory, which is why some
   survived.
+- A log level set in the config file was not validated. `--log-level TRACE` was rejected by
+  the argument parser while `level = "TRACE"` in the file sailed through — an invariant
+  enforced at one entry point is a per-entry-point invariant. Both now parse into one type.
 - Two clippy warnings inherited from the gateway crate, and a one-off `rustfmt` pass over
   it — it had never been formatted, having lived in a repo whose CI only built the desktop
   app. `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test` all pass.

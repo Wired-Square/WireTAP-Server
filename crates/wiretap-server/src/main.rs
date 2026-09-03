@@ -7,16 +7,15 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use wiretap_model::FileConfig;
 use wiretap_server::{
     cli::Cli,
-    settings::{Settings, SettingsError},
+    settings::{self, Secrets, Settings},
 };
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let file = match cli.config.as_deref().map(load) {
+    let file = match cli.config.as_deref().map(settings::load) {
         Some(Ok(f)) => Some(f),
         Some(Err(e)) => {
             eprintln!("wiretap-server: {e}");
@@ -25,7 +24,7 @@ fn main() -> ExitCode {
         None => None,
     };
 
-    let resolved = match Settings::resolve(&cli, file.as_ref(), |k| std::env::var(k).ok()) {
+    let resolved = match Settings::resolve(&cli, file.as_ref(), &Secrets::from_env()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("wiretap-server: {e}");
@@ -38,7 +37,7 @@ fn main() -> ExitCode {
     }
 
     if cli.check_config {
-        print!("{}", resolved.settings.describe());
+        print!("{}", resolved.settings);
         return ExitCode::SUCCESS;
     }
 
@@ -48,10 +47,4 @@ fn main() -> ExitCode {
         env!("CARGO_PKG_VERSION")
     );
     ExitCode::FAILURE
-}
-
-fn load(path: &str) -> Result<FileConfig, SettingsError> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| SettingsError::Config(format!("cannot read {path}: {e}")))?;
-    FileConfig::parse(&text).map_err(SettingsError::Config)
 }
