@@ -29,15 +29,10 @@ pub const ID_FD: u32 = 1 << 30;
 pub const ID_TX: u32 = 1 << 31;
 pub const ID_ARB_MASK: u32 = 0x1FFF_FFFF;
 
-/// CAN FD DLC table (DLC 9–15 → 12,16,20,24,32,48,64 bytes).
-const FD_DLC_LEN: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64];
-
-pub fn len_to_dlc(len: usize) -> u8 {
-    if len <= 8 {
-        return len as u8;
-    }
-    FD_DLC_LEN.iter().position(|&l| l >= len).unwrap_or(15) as u8
-}
+// The DLC table and the length→code rule live in `wiretap-model`, shared with
+// the capture server so the code this gateway writes to the `dlc` column and
+// the code the server puts on the GVRET wire cannot drift apart.
+pub use wiretap_model::payload_dlc;
 
 pub fn encode_message(mtype: u8, body: &[u8]) -> Vec<u8> {
     let len = (1 + body.len()) as u16;
@@ -286,9 +281,10 @@ mod tests {
 
     #[test]
     fn fd_dlc_mapping() {
-        assert_eq!(len_to_dlc(8), 8);
-        assert_eq!(len_to_dlc(12), 9);
-        assert_eq!(len_to_dlc(13), 10); // rounds up to 16-byte DLC
-        assert_eq!(len_to_dlc(64), 15);
+        // Thin: the rule itself is tested in wiretap-model. This pins that
+        // the gateway is calling the shared version.
+        assert_eq!(payload_dlc(8, true), 8);
+        assert_eq!(payload_dlc(64, true), 15);
+        assert_eq!(payload_dlc(20, false), 8);
     }
 }

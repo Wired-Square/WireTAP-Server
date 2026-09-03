@@ -30,9 +30,7 @@ entirely, which is what keeps the `.deb` a static musl binary with no libpq.
 
 ## Replicated quirks
 
-These look wrong. They are kept because clients in the field were written
-against them, and because the port's acceptance gate is byte-equality with the
-Python. Each has a test naming it.
+Each is pinned by a test that names it.
 
 ### `E7 E7` inside a payload is swallowed, even in binary mode
 
@@ -42,13 +40,13 @@ including each occurrence. A `F1 00` transmit command whose CAN payload happens
 to contain the bytes `E7 E7` therefore loses them and desynchronises the
 stream.
 
-Replicated in `Decoder::feed`. Test:
+Replicated in `Decoder::scan_for_handshake`. Test:
 `gvret::codec::tests::sync_bytes_are_consumed_even_in_binary_mode`.
 
 Host-to-device transmit is rare, which is presumably why this has never been
-noticed. Worth fixing after cutover by scanning for the handshake only while
-not yet in binary mode — but that is a change to make against a Rust server
-that is already known-good, not one to smuggle into the port.
+noticed. Worth fixing after cutover by scanning only while not yet in binary
+mode — against a Rust server already known-good, rather than smuggled into the
+port.
 
 ### An over-long transmit length consumes what it declared
 
@@ -60,9 +58,10 @@ consumed and contributes an 8-byte frame.
 Replicated in `Decoder::take_transmit`. Test:
 `gvret::codec::tests::an_overlong_declared_length_consumes_all_of_it`.
 
-Clamping the consume instead would be more obviously correct, but the two
-implementations would then desynchronise *differently* on the same malformed
-input, and a parallel run would diverge for reasons unrelated to the port.
+Clamping the consume instead would be more obviously correct — but then the two
+implementations desynchronise *differently* on the same malformed input, and the
+parallel run that is meant to earn the cutover would diverge for reasons that
+have nothing to do with the port.
 
 ## Confirmed identical
 
@@ -72,17 +71,19 @@ Recorded so a future reader does not go looking.
   and keepalive are asserted against golden byte vectors taken from the Python
   (`gvret::codec::tests`). Device info's constants — build 400, EEPROM version
   1 — are advertised values with no derivation; they are what clients parse.
-- **The FD data length code in the low nibble.** `bus_and_dlc` packs the data
-  length *code*, not the byte count, so 32 bytes is 13 and 64 bytes is 15. The
-  desktop's parser depends on this. Test:
+- **The FD data length code in the low nibble.** The byte packing bus and DLC
+  carries the *code*, not the byte count, so 32 bytes is 13 and 64 bytes is 15.
+  The desktop's parser depends on this. Test:
   `fd_frame_packs_the_dlc_code_not_the_length`.
-- **Binary-mode resync.** Leading bytes that cannot start a command are dropped
-  one at a time rather than stalling the connection. Deliberate stream
-  recovery in the original, kept.
-- **Config parsing.** The shipped `wiretap-server.toml` parses unchanged, with
-  no unknown keys, and "absent" stays distinguishable from "defaulted" —
-  `cache_path` is commented out in that file, and the config-over-CLI merge
-  depends on telling those apart. Tests in `wiretap_model::config`.
+- **Binary-mode resync.** Leading bytes that cannot start a command are skipped
+  rather than stalling the connection — deliberate stream recovery in the
+  original, kept. The Rust skips to the next candidate in one step where the
+  Python deletes a byte at a time; same result, and the Python's form is
+  quadratic on a buffer of noise.
+- **Config parsing.** The shipped `wiretap-server.toml` parses unchanged with no
+  unknown keys, and a key the file does not mention arrives as `None` rather
+  than as a default — the distinction the config-over-CLI merge depends on.
+  Tests in `wiretap_model::config`.
 
 ## Planned changes, not yet implemented
 

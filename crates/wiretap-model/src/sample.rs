@@ -1,10 +1,4 @@
 //! What a capture source produces.
-//!
-//! `Sample` is an enum from the outset, with only one variant implemented, so
-//! that adding Modbus register capture later is additive rather than a
-//! refactor of every queue, sink and bridge between here and the database.
-//! The Python implementation this is ported from had CAN frames hard-wired
-//! through the whole pipeline.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,9 +7,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceId(pub u8);
 
-/// Frame direction. Captured frames are `Rx`; `Tx` is used for frames this
-/// server transmitted on behalf of a GVRET client, so an archive can tell
-/// them apart from bus traffic.
+/// Frame direction. Captured frames are `Rx`; `Tx` is a frame this server
+/// transmitted for a GVRET client, so an archive can tell them apart from bus
+/// traffic. The serde representation is the tag the database stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
@@ -23,22 +17,13 @@ pub enum Direction {
     Tx,
 }
 
-impl Direction {
-    /// The tag PostgreSQL's `dir` column stores.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Direction::Rx => "rx",
-            Direction::Tx => "tx",
-        }
-    }
-}
-
 /// One CAN or CAN FD frame.
 ///
-/// `dlc` is the raw data length code, not the byte count: for FD they differ
-/// above 8 (a DLC of 15 means 64 bytes). Both are kept because the GVRET wire
-/// format transmits the code while the database stores the length, and
-/// conflating them is the classic CAN FD bug.
+/// The data length code is **not** stored: it is derivable from `data.len()`
+/// and `is_fd` via [`payload_dlc`], and carrying both invites the two to
+/// disagree. The one case that is not derivable — a classic frame declaring a
+/// code of 9–15 while carrying 8 bytes — has no producer or consumer here, and
+/// the Python this replaces did not preserve it either.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanSample {
     /// Capture time in microseconds since the Unix epoch.
@@ -47,15 +32,12 @@ pub struct CanSample {
     pub arb_id: u32,
     pub extended: bool,
     pub is_fd: bool,
-    /// Data length code, 0–15.
-    pub dlc: u8,
     pub data: Vec<u8>,
     pub bus: SourceId,
     pub dir: Direction,
 }
 
-/// CAN FD data length code → byte count. Codes 9–15 map to 12, 16, 20, 24,
-/// 32, 48, 64; below that the code is the length.
+/// CAN FD data length code → byte count. Below 9 the code *is* the length.
 pub const FD_DLC_LEN: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64];
 
 /// Data length code → payload length in bytes.
@@ -79,19 +61,14 @@ pub fn len_to_dlc(len: usize) -> u8 {
     FD_DLC_LEN.iter().position(|&l| l >= len).unwrap_or(15) as u8
 }
 
-/// Anything a capture source can emit. Only `Can` exists today; the enum is
-/// the seam Modbus register capture drops into.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Sample {
-    Can(CanSample),
-}
-
-impl Sample {
-    pub fn ts_us(&self) -> i64 {
-        match self {
-            Sample::Can(c) => c.ts_us,
-        }
-    }
+/// The code for a payload of `len` bytes, clamped to what the frame type can
+/// actually carry.
+///
+/// This is the CAN FD trap in one place: the wire carries a *code*, the
+/// database stores a *length*, and above 8 bytes they differ. It was written
+/// out separately at three call sites across two crates before this existed.
+pub fn payload_dlc(len: usize, is_fd: bool) -> u8 {
+    len_to_dlc(len.min(if is_fd { 64 } else { 8 }))
 }
 
 #[cfg(test)]
@@ -134,8 +111,36 @@ mod tests {
     }
 
     #[test]
-    fn direction_tags_match_the_database_column() {
-        assert_eq!(Direction::Rx.as_str(), "rx");
-        assert_eq!(Direction::Tx.as_str(), "tx");
+    fn payload_dlc_clamps_by_frame_type() {
+        assert_eq!(payload_dlc(20, false), 8, "classic clamps to 8");
+        assert_eq!(payload_dlc(20, true), 11, "fd keeps 20 as code 11");
+        assert_eq!(payload_dlc(100, true), 15, "fd clamps to 64, code 15");
+        assert_eq!(payload_dlc(3, false), 3);
+        assert_eq!(payload_dlc(3, true), 3);
+    }
+
+    /// The code a payload is given must round-trip back to a length that can
+    /// hold it — the property the three hand-written copies had to preserve
+    /// individually.
+    #[test]
+    fn payload_dlc_round_trips_through_dlc_to_len() {
+        for is_fd in [false, true] {
+            for len in 0..=70usize {
+                let dlc = payload_dlc(len, is_fd);
+                let back = dlc_to_len(dlc, is_fd);
+                let cap = if is_fd { 64 } else { 8 };
+                assert!(
+                    back >= len.min(cap),
+                    "len {len} fd {is_fd}: {back} < {}",
+                    len.min(cap)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direction_serialises_as_the_database_tag() {
+        assert_eq!(serde_json::to_string(&Direction::Rx).unwrap(), "\"rx\"");
+        assert_eq!(serde_json::to_string(&Direction::Tx).unwrap(), "\"tx\"");
     }
 }

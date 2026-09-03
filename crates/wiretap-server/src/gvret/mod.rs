@@ -2,5 +2,3 @@
 //! connect to.
 
 pub mod codec;
-
-pub use wiretap_model::sample::len_to_dlc;

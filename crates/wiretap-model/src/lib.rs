@@ -1,12 +1,13 @@
-//! Types shared across the WireTAP server, its web interface and any future
-//! CLI: what a capture produces, and how the server is configured.
+//! Types shared across the WireTAP server, the gateway, and the web interface:
+//! what a capture produces, and how the server is configured.
 //!
-//! Nothing here pulls in a runtime, a driver or a database client. That is the
-//! point — a terminal or web client needs the wire contract without the
-//! capture stack behind it.
+//! No runtime, no driver, no database client — a client needs the wire
+//! contract without the capture stack behind it.
 
+#[cfg(feature = "config")]
 pub mod config;
 pub mod sample;
 
-pub use config::{parse_ifaces, unknown_keys, FileConfig};
-pub use sample::{dlc_to_len, len_to_dlc, CanSample, Direction, Sample, SourceId};
+#[cfg(feature = "config")]
+pub use config::{parse_ifaces, FileConfig};
+pub use sample::{dlc_to_len, len_to_dlc, payload_dlc, CanSample, Direction, SourceId};

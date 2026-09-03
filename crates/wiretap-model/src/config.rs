@@ -1,14 +1,13 @@
 //! The `wiretap-server.toml` schema.
 //!
-//! **Every field is optional.** A file only says what it wants to change, so
-//! "absent" has to stay distinguishable from "set to the default" — that is
-//! what makes the config-over-CLI merge in the server work at all.
+//! Two properties govern the shape here. **Every field is optional**, so
+//! "absent" stays distinguishable from "set to the default" — the
+//! config-over-CLI merge depends on telling those apart. And **an unknown key
+//! never fails the parse**: deployed files carry stale and commented-out keys,
+//! and refusing to start on one would turn a package upgrade into an outage.
 //!
-//! There is deliberately **no `deny_unknown_fields`**. Deployed files carry
-//! commented-out and stale keys (`cache_path` is commented out in the shipped
-//! reference file), and a hard parse failure on one of those would turn a
-//! package upgrade into an outage. Unknown keys are reported by
-//! [`unknown_keys`] and warned about instead.
+//! Unknown keys are collected by `#[serde(flatten)]` rather than checked
+//! against a hand-maintained list of field names, so the two cannot drift.
 
 use serde::Deserialize;
 
@@ -20,6 +19,9 @@ pub struct FileConfig {
     pub ingest: IngestSection,
     pub forward: ForwardSection,
     pub logging: LoggingSection,
+    /// Top-level tables this schema does not define.
+    #[serde(flatten)]
+    pub unknown: toml::Table,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -35,27 +37,23 @@ pub struct ServerSection {
     pub colour: Option<bool>,
     pub default_dir: Option<String>,
     pub can_fd: Option<bool>,
+    #[serde(flatten)]
+    pub unknown: toml::Table,
 }
 
 /// The retired direct-to-PostgreSQL sink.
 ///
-/// Still parsed, and only so the server can **refuse to start** when it is
-/// enabled. Ignoring it would silently drop every frame an operator believes
-/// is being archived; see [`FileConfig::retired_postgres_sink`].
+/// Only `enable` is modelled, and only so the server can refuse to start.
+/// The remaining ten keys a migrated file still carries are swept into
+/// `unknown` and deliberately not reported — the whole section is retired, so
+/// warning key-by-key would be noise. Deleting this section later is deleting
+/// one struct and one branch.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct PostgresSection {
     pub enable: Option<bool>,
-    pub dsn: Option<String>,
-    pub func: Option<String>,
-    pub write_mode: Option<String>,
-    pub batch_size: Option<usize>,
-    pub flush_interval: Option<f64>,
-    pub queue_size: Option<usize>,
-    pub dir: Option<String>,
-    pub cache_path: Option<String>,
-    pub cache_max_mb: Option<u64>,
-    pub queue_flush_pct: Option<u8>,
+    #[serde(flatten)]
+    pub unknown: toml::Table,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -67,6 +65,8 @@ pub struct IngestSection {
     pub token: Option<String>,
     pub keepalive_secs: Option<f64>,
     pub max_batch_frames: Option<usize>,
+    #[serde(flatten)]
+    pub unknown: toml::Table,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -77,6 +77,8 @@ pub struct ForwardSection {
     pub port: Option<u16>,
     pub api_key: Option<String>,
     pub database: Option<String>,
+    #[serde(flatten)]
+    pub unknown: toml::Table,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -86,105 +88,42 @@ pub struct LoggingSection {
     /// it is Python's spelling and deployed files use it.
     pub level: Option<String>,
     pub stats_interval: Option<f64>,
+    #[serde(flatten)]
+    pub unknown: toml::Table,
 }
 
-/// Section name → the keys it accepts. Used only for the unknown-key warning;
-/// parsing itself ignores anything not listed.
-const KNOWN: &[(&str, &[&str])] = &[
-    (
-        "server",
-        &[
-            "iface",
-            "host",
-            "port",
-            "bus_offset",
-            "echo_console",
-            "colour",
-            "default_dir",
-            "can_fd",
-        ],
-    ),
-    (
-        "postgres",
-        &[
-            "enable",
-            "dsn",
-            "func",
-            "write_mode",
-            "batch_size",
-            "flush_interval",
-            "queue_size",
-            "dir",
-            "cache_path",
-            "cache_max_mb",
-            "queue_flush_pct",
-        ],
-    ),
-    (
-        "ingest",
-        &[
-            "enable",
-            "host",
-            "port",
-            "token",
-            "keepalive_secs",
-            "max_batch_frames",
-        ],
-    ),
-    (
-        "forward",
-        &["enable", "host", "port", "api_key", "database"],
-    ),
-    ("logging", &["level", "stats_interval"]),
-];
-
 impl FileConfig {
-    /// Parse a config file. Unknown keys do not fail; ask [`unknown_keys`] for
-    /// them and warn.
     pub fn parse(text: &str) -> Result<Self, String> {
         toml::from_str(text).map_err(|e| format!("config parse failed: {e}"))
     }
 
+    /// Keys the schema does not define, as `section.key`, for warning about.
+    ///
+    /// `[postgres]` is skipped: the section is retired wholesale, so
+    /// [`Self::retired_postgres_sink`] is the thing worth saying about it.
+    pub fn unknown_keys(&self) -> Vec<String> {
+        let sections: [(&str, &toml::Table); 4] = [
+            ("server", &self.server.unknown),
+            ("ingest", &self.ingest.unknown),
+            ("forward", &self.forward.unknown),
+            ("logging", &self.logging.unknown),
+        ];
+        let mut out: Vec<String> = self.unknown.keys().cloned().collect();
+        for (name, unknown) in sections {
+            out.extend(unknown.keys().map(|k| format!("{name}.{k}")));
+        }
+        out.sort();
+        out
+    }
+
     /// `true` when the file enables the retired direct-PostgreSQL sink.
     ///
-    /// The server refuses to start in that case. It cannot honour the setting
+    /// The server refuses to start in that case: it cannot honour the setting
     /// — the gateway owns the database now — and carrying on without a sink
-    /// would look like a working capture while archiving nothing.
+    /// would present a working capture that archives nothing.
     pub fn retired_postgres_sink(&self) -> bool {
         self.postgres.enable == Some(true)
     }
-
-    /// `true` when both sinks are enabled. The Python implementation
-    /// documented these as mutually exclusive; with `[postgres]` retired this
-    /// can only be reached alongside [`Self::retired_postgres_sink`].
-    pub fn both_sinks_enabled(&self) -> bool {
-        self.postgres.enable == Some(true) && self.forward.enable == Some(true)
-    }
-}
-
-/// Keys present in the file that no section recognises, as `section.key`.
-///
-/// Reported rather than rejected: an operator's stale key should produce a
-/// warning naming it, not a daemon that will not start.
-pub fn unknown_keys(text: &str) -> Result<Vec<String>, String> {
-    let table: toml::Table =
-        toml::from_str(text).map_err(|e| format!("config parse failed: {e}"))?;
-    let mut out = Vec::new();
-    for (section, value) in &table {
-        let Some(known) = KNOWN.iter().find(|(n, _)| n == section).map(|(_, k)| *k) else {
-            out.push(section.clone());
-            continue;
-        };
-        if let Some(t) = value.as_table() {
-            for key in t.keys() {
-                if !known.contains(&key.as_str()) {
-                    out.push(format!("{section}.{key}"));
-                }
-            }
-        }
-    }
-    out.sort();
-    Ok(out)
 }
 
 /// Split a comma-separated interface list, discarding blanks and whitespace.
@@ -216,19 +155,37 @@ mod tests {
         assert_eq!(cfg.logging.level.as_deref(), Some("INFO"));
     }
 
+    /// A migrated file still carries the retired sink's ten other keys. They
+    /// must not produce warnings — the section as a whole is the message.
     #[test]
     fn the_shipped_reference_config_has_no_unknown_keys() {
-        assert_eq!(unknown_keys(REFERENCE).unwrap(), Vec::<String>::new());
+        let cfg = FileConfig::parse(REFERENCE).unwrap();
+        assert_eq!(cfg.unknown_keys(), Vec::<String>::new());
+        assert!(
+            !cfg.postgres.unknown.is_empty(),
+            "its other keys are swept up, not reported"
+        );
     }
 
-    /// `cache_path` is commented out in the shipped file, so "absent" must
-    /// survive parsing as `None` rather than becoming a default that the
-    /// merge would then treat as an explicit setting.
+    /// The property the config-over-CLI merge depends on: a key the file does
+    /// not mention must arrive as `None`, not as a default that the merge
+    /// would then treat as an explicit setting. Tested on a minimal file
+    /// because the shipped reference deliberately sets nearly everything.
     #[test]
     fn absent_is_distinguishable_from_defaulted() {
-        let cfg = FileConfig::parse(REFERENCE).unwrap();
-        assert_eq!(cfg.postgres.cache_path, None);
-        assert_eq!(cfg.postgres.cache_max_mb, Some(1000));
+        let cfg = FileConfig::parse("[server]\niface = \"can0\"\n").unwrap();
+        assert_eq!(cfg.server.iface.as_deref(), Some("can0"), "present");
+        assert_eq!(cfg.server.port, None, "absent, not 0");
+        assert_eq!(cfg.server.can_fd, None, "absent, not false");
+        assert_eq!(
+            cfg.logging.stats_interval, None,
+            "absent section stays empty"
+        );
+
+        // And a value that *is* set arrives as set, including a falsey one.
+        let cfg = FileConfig::parse("[server]\ncan_fd = false\nport = 0\n").unwrap();
+        assert_eq!(cfg.server.can_fd, Some(false));
+        assert_eq!(cfg.server.port, Some(0));
     }
 
     #[test]
@@ -236,18 +193,34 @@ mod tests {
         let text = "[server]\niface = \"can0\"\nnonsense = 1\n\n[bogus]\nx = 2\n";
         let cfg = FileConfig::parse(text).expect("still parses");
         assert_eq!(cfg.server.iface.as_deref(), Some("can0"));
-        assert_eq!(
-            unknown_keys(text).unwrap(),
-            vec!["bogus", "server.nonsense"]
+        assert_eq!(cfg.unknown_keys(), vec!["bogus", "server.nonsense"]);
+    }
+
+    /// Typed fields must keep their coercions with `flatten` in play — a TOML
+    /// integer still has to satisfy an `f64` field.
+    #[test]
+    fn flatten_does_not_disturb_typed_fields() {
+        let cfg = FileConfig::parse("[logging]\nstats_interval = 5\n").unwrap();
+        assert_eq!(cfg.logging.stats_interval, Some(5.0));
+        assert!(cfg.logging.unknown.is_empty());
+
+        assert!(
+            FileConfig::parse("[server]\nport = 99999\n").is_err(),
+            "still range-checked"
+        );
+        assert!(
+            FileConfig::parse("[server]\nport = \"x\"\n").is_err(),
+            "still type-checked"
         );
     }
 
     #[test]
     fn the_retired_sink_is_detected() {
-        let on = FileConfig::parse("[postgres]\nenable = true\n").unwrap();
-        assert!(on.retired_postgres_sink());
+        assert!(FileConfig::parse("[postgres]\nenable = true\n")
+            .unwrap()
+            .retired_postgres_sink());
 
-        // Present but off is fine — that is what every migrated file looks like.
+        // Present but off is what every migrated file looks like.
         let off = FileConfig::parse("[postgres]\nenable = false\ndsn = \"x\"\n").unwrap();
         assert!(!off.retired_postgres_sink());
 

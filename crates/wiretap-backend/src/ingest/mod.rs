@@ -267,11 +267,7 @@ impl IngestServer {
                     ts_us: base_ts_us + rec.delta_us as i64,
                     id: rec.id_flags & ID_ARB_MASK,
                     extended: rec.id_flags & ID_EXTENDED != 0,
-                    dlc: if is_fd {
-                        proto::len_to_dlc(plen)
-                    } else {
-                        plen.min(8) as u8
-                    },
+                    dlc: proto::payload_dlc(plen, is_fd),
                     is_fd,
                     data: rec.payload,
                     bus: rec.bus,

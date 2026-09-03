@@ -16,9 +16,11 @@ All notable changes to this project are documented here. Entries go under
   so two crates cannot end up on different versions of a crate that passes types between
   them.
 - `wiretap-model` — the captured-sample types and the `wiretap-server.toml` schema, with no
-  runtime, driver or database behind them, so a web or terminal client can take the wire
-  contract without the capture stack. `Sample` is an enum with one variant from the outset,
-  which is what makes Modbus additive later rather than a refactor of every queue and sink.
+  runtime, driver or database behind them, so a client can take the wire contract without
+  the capture stack. The config half is behind a default feature, so the gateway takes the
+  sample types without a TOML parser. The gateway now shares its DLC table and length→code
+  rule from here rather than keeping its own copy — the two write the same value onto the
+  GVRET wire and into the `dlc` column, and a drift between them would be invisible.
 - `wiretap-server` — the Rust port begins. The GVRET codec is complete and asserted against
   golden bytes taken from the Python: device info, bus parameters, bus count, timebase,
   keepalive, frame encode, and a decoder covering the handshake, binary-mode resync, split

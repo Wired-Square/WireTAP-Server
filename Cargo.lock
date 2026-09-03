@@ -1743,6 +1743,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "wiretap-model",
 ]
 
 [[package]]
@@ -1750,6 +1751,7 @@ name = "wiretap-model"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -1757,8 +1759,6 @@ dependencies = [
 name = "wiretap-server"
 version = "0.1.0"
 dependencies = [
- "serde",
- "toml",
  "wiretap-model",
 ]
 

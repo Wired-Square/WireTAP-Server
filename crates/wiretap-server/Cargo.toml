@@ -10,5 +10,3 @@ repository.workspace = true
 
 [dependencies]
 wiretap-model = { path = "../wiretap-model" }
-serde.workspace = true
-toml.workspace = true

@@ -520,11 +520,7 @@ async fn import_capture(
                 ts_us,
                 id: id_flags & ID_ARB_MASK,
                 extended: id_flags & ID_EXTENDED != 0,
-                dlc: if is_fd {
-                    crate::ingest::proto::len_to_dlc(plen)
-                } else {
-                    plen.min(8) as u8
-                },
+                dlc: crate::ingest::proto::payload_dlc(plen, is_fd),
                 is_fd,
                 data,
                 bus,
