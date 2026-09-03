@@ -1,0 +1,14 @@
+[package]
+name = "wiretap-server"
+description = "WireTAP capture server: SocketCAN to GVRET bridge with forward-to-gateway archiving"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+wiretap-model = { path = "../wiretap-model" }
+serde.workspace = true
+toml.workspace = true

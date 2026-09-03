@@ -15,6 +15,17 @@ All notable changes to this project are documented here. Entries go under
 - Cargo workspace: dependency versions and package metadata are declared once at the root,
   so two crates cannot end up on different versions of a crate that passes types between
   them.
+- `wiretap-model` — the captured-sample types and the `wiretap-server.toml` schema, with no
+  runtime, driver or database behind them, so a web or terminal client can take the wire
+  contract without the capture stack. `Sample` is an enum with one variant from the outset,
+  which is what makes Modbus additive later rather than a refactor of every queue and sink.
+- `wiretap-server` — the Rust port begins. The GVRET codec is complete and asserted against
+  golden bytes taken from the Python: device info, bus parameters, bus count, timebase,
+  keepalive, frame encode, and a decoder covering the handshake, binary-mode resync, split
+  and over-long commands. Written as a pure state machine with no sockets, so the bytes a
+  desktop client sees can be tested without a bus.
+- `docs/porting-notes.md` — where the Rust deviates from the Python, and the quirks
+  replicated deliberately rather than fixed mid-port.
 
 ### Changed
 
