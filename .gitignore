@@ -10,6 +10,12 @@ CLAUDE.md
 **/dist/
 **/*.tsbuildinfo
 
+# Python bytecode. tools/ holds the test client, the migration script and the
+# oracle the Rust port is checked against, so anyone working on the port runs
+# them and leaves one of these behind.
+__pycache__/
+*.pyc
+
 # A developer's local compose tweaks — the file most likely to hold a published
 # port or a credential.
 **/docker-compose.override.yml

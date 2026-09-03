@@ -36,6 +36,19 @@ impl Bitrates {
     };
 }
 
+/// A frame a GVRET client asked this server to put on a bus.
+///
+/// Carries the client's bus number rather than an interface index: resolving
+/// one to the other is [`index_for_bus`]'s job and belongs with the sockets,
+/// not with the protocol that named the bus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transmit {
+    pub bus: SourceId,
+    pub arb_id: u32,
+    pub extended: bool,
+    pub data: Vec<u8>,
+}
+
 /// The GVRET bus number for the `index`-th configured interface.
 ///
 /// Returns `None` for an index past 255, which no configuration can reach —
@@ -45,6 +58,20 @@ pub fn bus_for_index(index: usize, bus_offset: u8) -> Option<SourceId> {
         .ok()?
         .checked_add(bus_offset)
         .map(SourceId)
+}
+
+/// How many buses to advertise for `iface_count` interfaces: the highest bus
+/// number plus one, so an offset shifts the *count* as well as the numbers.
+///
+/// That is the Python's `bus_offset + len(can_socks)`, and it is not academic:
+/// the count it produced was used to index a list holding one speed per
+/// interface, so an offset made the original advertise buses it had no speed
+/// for and crash the client that asked. See `docs/porting-notes.md`.
+pub fn bus_count(iface_count: usize, bus_offset: u8) -> u8 {
+    // Saturating where the two mappings above refuse, because a count is what
+    // a client is told rather than what a frame is routed by. Unreachable
+    // either way: it needs 256 interfaces.
+    bus_for_index(iface_count, bus_offset).map_or(u8::MAX, |b| b.0)
 }
 
 /// The interface index a GVRET client meant by `bus`, or `None` if it named a
@@ -103,6 +130,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_advertised_bus_count_includes_the_offset() {
+        assert_eq!(bus_count(2, 0), 2);
+        assert_eq!(bus_count(0, 0), 0);
+        // The shape that crashed the Python: three buses advertised, one
+        // interface behind them.
+        assert_eq!(bus_count(1, 2), 3);
+        assert_eq!(bus_count(300, 0), u8::MAX, "saturated, not wrapped");
     }
 
     #[test]

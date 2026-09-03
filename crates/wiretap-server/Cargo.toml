@@ -13,7 +13,11 @@ wiretap-model = { path = "../wiretap-model" }
 # No `color` (stdout is a journal pipe) and no `suggestions` (a typo at an
 # interactive shell is one --help away): together they cost 33 KB and 7 crates.
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tracing.workspace = true
+# No `env-filter`: the level comes from the config file, and RUST_LOG would
+# cost a regex engine in a binary that is shipped over the network.
+tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # netlink answers the bitrate query that replaced pyroute2; dump is its

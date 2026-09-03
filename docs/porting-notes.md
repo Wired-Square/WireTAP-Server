@@ -28,6 +28,41 @@ moves an existing archive.
 This also removes `tokio-postgres` and its TLS surface from the server
 entirely, which is what keeps the `.deb` a static musl binary with no libpq.
 
+### The GVRET fan-out no longer blocks the capture
+
+The Python held a lock and did a blocking `sendall` per connected client
+*inside* the capture loop, so one stalled SavvyCAN back-pressured archiving for
+everyone — a viewer could cost frames that were meant to be recorded.
+
+Each client now owns a task and a `broadcast::Receiver`. A client that stops
+reading lags its own subscription; the frames it missed are counted and logged
+(`Client 10.0.0.4:51000 is not keeping up, dropped 812 frames`) and the capture
+side never waits for it. Losing frames on a live monitor protocol is the right
+trade; losing them from the archive was not.
+
+Two details follow from it rather than being separate decisions. Frames are
+encoded per client, not once and shared, because the timestamp in each one
+counts from that client's connection, exactly as the Python's per-connection
+`t0` did — so the `F1 01` timebase a client reads back stays comparable with the
+frames it is sent. And a burst that arrives while a client is being written to
+leaves as a single `write` rather than one per frame.
+
+**`--echo-console` is a subscriber on the same channel**, for the same reason.
+The Python wrote its console line from inside the capture loop, so a terminal
+over a slow SSH link or a pipe into `less` back-pressured the capture exactly as
+a stalled client did. It can now drop lines, and logs how many.
+
+### A bus offset no longer breaks `F1 06`
+
+`bus_count` is `bus_offset + interfaces`, and `reply_canbus_params` advertised
+two buses whenever that reached 2 — then indexed `bus_speeds`, which only ever
+had one entry per interface. So `--bus-offset 1` with a single interface raised
+`IndexError` inside the client thread, killing the connection of any client that
+asked for bus parameters. Verified by calling the method directly on the oracle.
+
+The Rust reports a speed of zero for a bus it has no interface for. This is a
+place a byte comparison legitimately disagrees: the Python sent nothing at all.
+
 ### Remote-transmission frames are dropped
 
 An RTR frame carries a data length code but no data. The Python passed them
@@ -113,14 +148,26 @@ Recorded so a future reader does not go looking.
   than as a default — the distinction the config-over-CLI merge depends on.
   Tests in `wiretap_model::config`.
 
+### `--echo-console` cannot show BRS or ESI
+
+The Python printed its console line from the raw frame bytes, so it could tag a
+CAN FD frame with `B` for bit rate switch and `E` for error state indicator.
+The Rust prints from a `CanSample`, which carries neither: nothing else in the
+pipeline has anywhere to put them — the ingest protocol has no spare bit and the
+archive has no column — so carrying them would be dead weight everywhere but
+this one diagnostic line.
+
+The `R` and `!` tags are gone for a different reason: remote frames are dropped
+and error frames never arrive, both above.
+
 ## Planned changes, not yet implemented
 
 Listed so they are not mistaken for regressions when they land.
 
-- **GVRET fan-out becomes non-blocking.** The Python holds a lock and does a
-  blocking `sendall` per client inside the capture loop, so one stalled
-  SavvyCAN back-pressures archiving for everyone. The Rust server will use a
-  broadcast channel with one subscriber task per client and log
-  `RecvError::Lagged(n)`. A slow viewer will no longer cost archived frames;
-  it will drop its own instead, which is the right trade for a lossy monitor
-  protocol.
+- **Transmitted frames are not archived.** The Python enqueued a frame it sent
+  for a GVRET client to its writer, tagged `tx`, so the archive could tell a
+  request apart from bus traffic. The Rust puts it on the bus and no more,
+  because it has no sink yet. Stage 3's batcher takes its own channel — the
+  broadcast behind the GVRET clients is deliberately not it, since a lossy
+  channel is right for a live monitor and wrong for a capture — and the
+  transmit path enqueues to it there.

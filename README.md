@@ -20,7 +20,9 @@ appliance.
 **Early.** The gateway is production code and moved here unchanged — run it with Docker as
 described below. The capture server is being ported from the Python implementation that
 lived in the WireTAP repo; that Python is kept at [tools/oracle/](tools/oracle/) as the
-reference the port is tested against, and it still runs.
+reference the port is tested against, and it still runs. What the Rust does today is
+capture from SocketCAN and bridge to GVRET clients — archiving, the disk cache and the
+listener for pushed frames are still to come, so run the Python where you need those.
 
 **Nothing is packaged yet.** The Debian packages — `wiretap-server` and `wiretap-web` as
 static musl binaries for amd64 and arm64, installable on any distribution with systemd —

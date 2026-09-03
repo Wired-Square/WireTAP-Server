@@ -1,15 +1,18 @@
 //! Entry point.
 //!
-//! `--check-config` is fully working; the capture pipeline is still being
-//! ported, so anything else exits non-zero rather than idling and looking to a
-//! supervisor like a daemon that started.
+//! Configuration is resolved and reported before a runtime exists, so
+//! `--check-config` costs nothing and a bad config fails where an operator can
+//! read why. Logs go to stderr, as the Python's did, leaving stdout to the
+//! config dump and to `--echo-console`.
 
 use std::process::ExitCode;
 
 use clap::Parser;
+use tracing::{error, warn};
+use tracing_subscriber::filter::LevelFilter;
 use wiretap_server::{
     cli::Cli,
-    settings::{self, Secrets, Settings},
+    settings::{self, LogLevel, Secrets, Settings},
 };
 
 fn main() -> ExitCode {
@@ -32,8 +35,9 @@ fn main() -> ExitCode {
         }
     };
 
+    init_logging(resolved.settings.log_level);
     for w in &resolved.warnings {
-        eprintln!("wiretap-server: warning: {w}");
+        warn!("{w}");
     }
 
     if cli.check_config {
@@ -41,10 +45,48 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    eprintln!(
-        "wiretap-server: {} — the capture pipeline is still being ported; \
-         only --check-config works today",
-        env!("CARGO_PKG_VERSION")
-    );
+    serve(&resolved.settings)
+}
+
+fn init_logging(level: LogLevel) {
+    tracing_subscriber::fmt()
+        .with_max_level(match level {
+            LogLevel::Debug => LevelFilter::DEBUG,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Warning => LevelFilter::WARN,
+            LogLevel::Error => LevelFilter::ERROR,
+        })
+        .with_writer(std::io::stderr)
+        .init();
+}
+
+#[cfg(target_os = "linux")]
+fn serve(settings: &Settings) -> ExitCode {
+    // Built here rather than with `#[tokio::main]` so that everything above —
+    // parsing, the config merge, `--check-config` — runs without one.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            error!("cannot start the async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(wiretap_server::pipeline::run(settings)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            error!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Capture needs Linux and its SocketCAN stack. A macOS build is a development
+/// and cross-compilation host, and says so rather than pretending to start.
+#[cfg(not(target_os = "linux"))]
+fn serve(_settings: &Settings) -> ExitCode {
+    error!("capturing CAN frames needs Linux; this build runs --check-config only");
     ExitCode::FAILURE
 }

@@ -10,6 +10,10 @@
 //! replaces.
 
 pub mod cli;
+pub mod console;
 pub mod gvret;
+/// Wiring the capture loop together. Linux-only: it starts with a CAN socket.
+#[cfg(target_os = "linux")]
+pub mod pipeline;
 pub mod settings;
 pub mod source;

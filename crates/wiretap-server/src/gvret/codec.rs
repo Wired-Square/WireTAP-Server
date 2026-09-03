@@ -28,7 +28,8 @@ pub const ARB_MASK_STD: u32 = 0x0000_07FF;
 /// contract.
 const GVRET_EFF_BIT: u32 = 0x8000_0000;
 
-const SYNC: [u8; 2] = [0xE7, 0xE7];
+/// The handshake that puts a connection into binary mode.
+pub(crate) const SYNC: [u8; 2] = [0xE7, 0xE7];
 const CMD: u8 = 0xF1;
 
 /// Longest frame this encoder emits: 2 opcode + 4 ts + 4 id + 1 bus/dlc +
@@ -250,7 +251,9 @@ pub fn encode_keepalive() -> Vec<u8> {
 /// Takes a buffer rather than returning one because this runs once per frame
 /// per connected client: a busy 1 Mbit/s bus is ~15k frames/s, so an owned
 /// `Vec` per frame is that many allocations per client per second. The bytes
-/// are client-independent, so a caller should encode once and share.
+/// cannot be encoded once and shared — `ts_us` counts from the connection that
+/// is being written to — so a caller reuses one buffer per client and lets a
+/// burst leave as a single write.
 ///
 /// The byte packing `bus` and `dlc` carries the **data length code** in its
 /// low nibble, not the byte count. Above 8 bytes on CAN FD those differ, and
