@@ -1,0 +1,41 @@
+#!/bin/sh
+# A C cross-compiler for the musl targets, for the one job `cargo zigbuild`
+# cannot do: `cargo clippy --target`.
+#
+# The capture server took a C dependency when it took `rusqlite` with bundled
+# SQLite, and a build script compiles C even for a lint run — so a plain
+# `cargo clippy --target aarch64-unknown-linux-musl` started dying looking for
+# `aarch64-linux-musl-gcc`, which no macOS host has.
+#
+# `.cargo/config.toml` points `CC_<target>` here, so no caller has to know this
+# exists. `cargo zigbuild` sets its own `CC_*` in the environment, and cargo's
+# `[env]` does not override what is already set, so this stays out of its way.
+#
+# Two things have to be fixed up for zig. It does not accept cc-rs's
+# `--target=<rust triple>` (`UnknownOperatingSystem`), and it spells a target
+# without the vendor field — so that argument is dropped and re-passed in zig's
+# own spelling, which is also how the target is discovered.
+
+zig_target=
+
+# Rebuild the argument list without `--target=`. `for` iterates the list as it
+# was on entry, so shifting the original off the front and appending the ones
+# being kept rotates the list exactly once.
+for arg do
+    shift
+    case "$arg" in
+        --target=*)
+            # Rust's <arch>-<vendor>-<os>-<abi> is zig's <arch>-<os>-<abi>.
+            zig_target=$(printf '%s' "${arg#--target=}" | sed 's/-[^-]*-/-/')
+            continue
+            ;;
+    esac
+    set -- "$@" "$arg"
+done
+
+if [ -z "$zig_target" ]; then
+    echo "zigcc: no --target= in arguments; this wrapper is for cross-compiling only" >&2
+    exit 1
+fi
+
+exec zig cc -target "$zig_target" "$@"

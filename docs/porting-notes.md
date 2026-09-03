@@ -67,6 +67,22 @@ The Python wrote its console line from inside the capture loop, so a terminal
 over a slow SSH link or a pipe into `less` back-pressured the capture exactly as
 a stalled client did. It can now drop lines, and logs how many.
 
+### The disk cache counts its write-ahead log
+
+`size_bytes()` stat'd the database file alone. In WAL mode — which the Python
+set — frames land in `cache.db-wal` and stay there until a checkpoint, so during
+an outage, exactly when the limit matters, the cache under-reported its own size
+and sailed past `cache_max_mb`. The three files are added up now.
+
+Everything else about the cache is the Python's: the same table, the same column
+types, the same `journal_mode=WAL` and `synchronous=NORMAL`. That is not
+conservatism, it is the requirement — an existing Pi has a populated cache and
+an upgrade *during* an outage has to drain it. Both directions are tested: a
+database the Python wrote is read back frame for frame
+(`cache::tests::a_cache_the_python_wrote_reads_back_intact`, built from a
+verbatim `sqlite3 .dump`), and the Python was run against a database this wrote
+to confirm it reads and drains it.
+
 ### The batcher is configured under `[forward]`, and the cache moves
 
 Those six settings — batch size, flush interval, queue size, cache path, cache

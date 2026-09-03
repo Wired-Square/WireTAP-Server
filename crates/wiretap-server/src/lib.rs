@@ -9,6 +9,7 @@
 //! socket — which is what lets the port be checked against the Python it
 //! replaces.
 
+pub mod cache;
 pub mod cli;
 pub mod console;
 pub mod gvret;

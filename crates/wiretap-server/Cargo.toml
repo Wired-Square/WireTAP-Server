@@ -14,6 +14,10 @@ wiretap-model = { path = "../wiretap-model" }
 # interactive shell is one --help away): together they cost 33 KB and 7 crates.
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+# `bundled` compiles SQLite in, so the .deb depends on no libsqlite3 and the
+# musl cross-build has nothing to find on the host.
+rusqlite = { workspace = true, features = ["bundled"] }
+wiretap-ingest-proto = { path = "../wiretap-ingest-proto" }
 tracing.workspace = true
 # No `env-filter`: the level comes from the config file, and RUST_LOG would
 # cost a regex engine in a binary that is shipped over the network.

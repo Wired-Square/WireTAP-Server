@@ -66,6 +66,13 @@ All notable changes to this project are documented here. Entries go under
   against literals, so neither can move alone. This codec had been hand-written four times
   across the two repos — a format where one side is a `struct.Struct("<IIBB")` and the
   other is four `to_le_bytes` calls is a format that drifts.
+- The disk cache frames wait in when the gateway is unreachable, on SQLite, behind a
+  `FrameCache` trait. The schema, the column types and the pragmas are the Python's exactly,
+  because an existing Pi has a populated cache and an upgrade *during* an outage has to
+  drain it rather than start an empty one beside it. Both directions are tested: reading a
+  database the Python wrote, from a verbatim `sqlite3 .dump`, and the Python was run against
+  one this wrote to confirm it reads and drains it. Its size now counts the write-ahead log
+  — see Fixed.
 - The batcher and the disk cache are configured under `[forward]`. Those six settings lived
   under `[postgres]` in the Python because its forward sink subclassed the PostgreSQL
   writer, and that section is only read when the retired sink is enabled — which this
@@ -75,6 +82,12 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- `.cargo/config.toml` points the musl targets' C compiler at `packaging/zigcc`, a small
+  `zig cc` wrapper. Bundled SQLite means a build script compiles C, and a build script runs
+  even for `cargo check` — so `cargo clippy --target aarch64-unknown-linux-musl`, which is
+  the only thing that lints the Linux-only modules, started failing on a missing
+  `aarch64-linux-musl-gcc`. The documented gate command is unchanged, and `cargo zigbuild`
+  is untouched: it sets these itself, and an environment value wins over the table.
 - `tracing-subscriber`'s `env-filter` feature moved off the workspace dependency table and
   onto the gateway, the only crate that wants it. A feature named at the root is a floor for
   every member, and `RUST_LOG` filtering costs a regex engine inside a binary that is shipped
@@ -107,6 +120,10 @@ All notable changes to this project are documented here. Entries go under
 
 ### Fixed
 
+- The disk cache under-reported its own size, so `cache_max_mb` did not bound it. It stat'd
+  the database file alone, but in WAL mode a gateway outage's frames sit in `cache.db-wal`
+  until a checkpoint — so the measurement was wrong in exactly the situation the limit
+  exists for. All three files count now.
 - Seven `--pg-*` flags were reported as belonging to the retired PostgreSQL sink when they
   do not. The Python's forward sink subclasses its PostgreSQL writer, so a forward
   deployment is handed `--pg-batch-size`, `--pg-flush-interval`, `--pg-queue-size`,
