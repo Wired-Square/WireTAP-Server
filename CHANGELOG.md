@@ -66,6 +66,15 @@ All notable changes to this project are documented here. Entries go under
   against literals, so neither can move alone. This codec had been hand-written four times
   across the two repos — a format where one side is a `struct.Struct("<IIBB")` and the
   other is four `to_le_bytes` calls is a format that drifts.
+- The batcher: a bounded queue, a worker that batches and writes, and the spill-to-disk and
+  reconnect-backoff behaviour around it. On an outage it caches the batch it was holding,
+  empties the queue behind it and backs off from half a second to ten; when the sink returns
+  it drains the cache **before** the queue, so the archive's order matches the bus's across
+  the boundary. Frames also move to disk *before* the queue fills, so a burst that outruns
+  the gateway costs disk rather than frames. Every log message at `info` and above is the
+  Python's verbatim, because the shipped config file tells operators to grep for them. The
+  outage drill is a test, not a procedure: break the sink, watch the frames land on disk,
+  mend it, and assert they come back out in order and ahead of what was captured since.
 - The disk cache frames wait in when the gateway is unreachable, on SQLite, behind a
   `FrameCache` trait. The schema, the column types and the pragmas are the Python's exactly,
   because an existing Pi has a populated cache and an upgrade *during* an outage has to

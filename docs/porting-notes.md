@@ -67,6 +67,20 @@ The Python wrote its console line from inside the capture loop, so a terminal
 over a slow SSH link or a pipe into `less` back-pressured the capture exactly as
 a stalled client did. It can now drop lines, and logs how many.
 
+### The batcher's log messages are kept, including the word "database"
+
+`PostgresWriter`'s worker said things like `database unavailable, caching
+frames to disk` and `draining 5000 cached frames to database`. With
+forward-to-gateway as the only sink there is no database in the server's world
+any more — but the shipped `wiretap-server.toml` tells operators to grep for
+these lines, so every message at `info` and above is verbatim. A better word
+would cost more than it is worth.
+
+Three `debug` lines are gone, being progress chatter the Rust states once
+(`cache check: …`, `read_batch returned …`, `executing batch insert …`), and
+three are new, all naming a disk-cache failure the Python swallowed: a failed
+read, delete or reset.
+
 ### The disk cache counts its write-ahead log
 
 `size_bytes()` stat'd the database file alone. In WAL mode — which the Python

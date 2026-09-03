@@ -69,8 +69,13 @@ pub trait FrameCache: Send {
     /// Bytes on disk, for comparing against the configured limit.
     fn size_bytes(&self) -> u64;
 
-    /// Drop everything and give the space back.
-    fn clear(&mut self) -> Result<()>;
+    /// Whether the store has reached the size it was given.
+    fn is_full(&self) -> bool;
+
+    /// Empty the store and give its space back to the filesystem, leaving it
+    /// usable. Called once a drain has emptied it, because a gigabyte of
+    /// reclaimed SD card is the point.
+    fn reset(&mut self) -> Result<()>;
 }
 
 /// The Python's cache, and the only implementation of [`FrameCache`].
@@ -117,13 +122,21 @@ impl SqliteCache {
         })
     }
 
-    /// Whether the cache has reached its configured size.
-    pub fn is_full(&self) -> bool {
-        self.size_bytes() >= self.max_bytes
-    }
-
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Remove the database and both of SQLite's sidecar files.
+    fn unlink(&self) -> Result<()> {
+        for suffix in ["", "-wal", "-shm"] {
+            let f = sidecar(&self.path, suffix);
+            match std::fs::remove_file(&f) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(CacheError(format!("cannot remove {}: {e}", f.display()))),
+            }
+        }
+        Ok(())
     }
 
     /// Close the connection and delete the file, with its sidecars.
@@ -132,17 +145,13 @@ impl SqliteCache {
     /// are somewhere durable, and leaving an empty database behind invites the
     /// next version to find it and wonder.
     pub fn delete(self) -> Result<()> {
-        let path = self.path.clone();
-        drop(self.conn);
-        for suffix in ["", "-wal", "-shm"] {
-            let f = sidecar(&path, suffix);
-            if let Err(e) = std::fs::remove_file(&f) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(CacheError(format!("cannot remove {}: {e}", f.display())));
-                }
-            }
-        }
-        Ok(())
+        // Unlinking a file SQLite still has open leaves it writing to an inode
+        // nothing can find, so the connection goes first.
+        let closed = Self {
+            conn: Connection::open_in_memory()?,
+            ..self
+        };
+        closed.unlink()
     }
 }
 
@@ -263,11 +272,25 @@ impl FrameCache for SqliteCache {
             .sum()
     }
 
-    fn clear(&mut self) -> Result<()> {
-        self.conn.execute("DELETE FROM frames", [])?;
-        // Outside a transaction by necessity, and the point of it: the space
-        // is what was wanted back.
-        self.conn.execute_batch("VACUUM")?;
+    fn is_full(&self) -> bool {
+        self.size_bytes() >= self.max_bytes
+    }
+
+    /// Delete the file and open a fresh one, as the Python did rather than
+    /// `VACUUM`.
+    ///
+    /// It matters on the hardware this runs on: after a long outage the cache
+    /// can be a gigabyte, and `VACUUM` rebuilds it in place — needing that much
+    /// free space again on an SD card that has just been filled by the outage.
+    /// Unlinking asks for none.
+    fn reset(&mut self) -> Result<()> {
+        // An in-memory placeholder, so the connection can be closed before the
+        // unlink without making the field an `Option` that every other method
+        // would have to unwrap.
+        self.conn = Connection::open_in_memory()?;
+        self.unlink()?;
+        let fresh = Self::open(&self.path, self.max_bytes / (1024 * 1024))?;
+        self.conn = fresh.conn;
         Ok(())
     }
 }
@@ -405,13 +428,25 @@ mod tests {
     }
 
     #[test]
-    fn clearing_empties_the_cache() {
-        let (_dir, mut c) = temp_cache("clear", 100);
-        c.append(&(0..100).map(|i| sample(i, 1)).collect::<Vec<_>>())
+    /// A reset has to give the space back, not just the rows — that is the
+    /// difference between a drained cache and a gigabyte of SD card an
+    /// appliance never sees again.
+    fn resetting_empties_the_cache_and_the_file() {
+        let (_dir, mut c) = temp_cache("reset", 100);
+        c.append(&(0..20_000).map(|i| sample(i, 1)).collect::<Vec<_>>())
             .unwrap();
-        c.clear().unwrap();
+        let grown = c.size_bytes();
+        assert!(grown > 100_000, "the cache is worth reclaiming: {grown}");
+
+        c.reset().unwrap();
         assert_eq!(c.count().unwrap(), 0);
         assert!(c.oldest(10).unwrap().is_empty());
+        assert!(c.size_bytes() < grown / 2, "{} of {grown}", c.size_bytes());
+
+        // And it is usable afterwards, which is what separates this from
+        // `delete`.
+        c.append(&[sample(1, 0x321)]).unwrap();
+        assert_eq!(c.oldest(1).unwrap()[0].sample.arb_id, 0x321);
     }
 
     /// Reopening is what an upgrade does, and it must find what the last run
