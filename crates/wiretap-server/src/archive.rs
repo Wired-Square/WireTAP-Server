@@ -20,7 +20,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use wiretap_model::CanSample;
 
-use crate::cache::FrameCache;
+use crate::cache::{CacheError, FrameCache, SqliteCache};
+use crate::forward::ForwardSink;
+use crate::settings::Forward;
 
 /// Reconnect backoff: doubling from here, capped below.
 const BACKOFF_START: Duration = Duration::from_millis(500);
@@ -94,9 +96,10 @@ pub struct Counters {
     pub cache_recovered: AtomicU64,
 }
 
-/// Bump a counter. Relaxed throughout: these are reported, never decided on.
-fn add(field: &AtomicU64, n: u64) {
-    field.fetch_add(n, Ordering::Relaxed);
+/// Bump a counter, returning what it held before. Relaxed throughout: these
+/// are reported, never decided on.
+fn add(field: &AtomicU64, n: u64) -> u64 {
+    field.fetch_add(n, Ordering::Relaxed)
 }
 
 fn get(field: &AtomicU64) -> u64 {
@@ -131,10 +134,7 @@ impl Archive {
                 add(&self.counters.enqueued, 1);
                 self.warn_thresholds();
             }
-            Err(_) => {
-                let prior = self.counters.dropped.fetch_add(1, Ordering::Relaxed);
-                self.log_queue_full(prior);
-            }
+            Err(_) => self.log_queue_full(add(&self.counters.dropped, 1)),
         }
     }
 
@@ -229,6 +229,52 @@ pub struct Batcher<S: BatchSink, C: FrameCache> {
     last_stats: Instant,
 }
 
+/// A running archive: the handle a capture enqueues to, and the worker behind
+/// it.
+///
+/// Dropping `frames` is what tells the worker to flush and stop, so it has to
+/// outlive everything that captures.
+pub struct Running {
+    pub frames: Archive,
+    pub worker: tokio::task::JoinHandle<()>,
+}
+
+/// Open the disk cache, adopt anything an older install left behind, and start
+/// forwarding to the gateway.
+///
+/// This is the archive the server actually ships, so it names [`ForwardSink`]
+/// and [`SqliteCache`] where the rest of the module is generic over both. It
+/// lives here rather than in `pipeline` because it touches no CAN socket, and
+/// `pipeline` is Linux-only — which had left the one assembly worth drilling
+/// unreachable from a test, and the drill rebuilding it by hand.
+pub fn start(forward: &Forward, stats_interval: f64) -> Result<Running, CacheError> {
+    let batching = &forward.batching;
+    let mut cache = SqliteCache::open(&batching.cache_path, batching.cache_max_mb)?;
+
+    // Logged rather than fatal: the old cache is left where it is, to be tried
+    // again next start, and refusing to capture because a previous run's
+    // leftovers could not be moved is the worse trade.
+    if let Some(legacy) = &batching.legacy_cache_path {
+        match cache.adopt(legacy) {
+            Ok(0) => {}
+            Ok(moved) => info!(
+                "adopted {moved} frames from the previous cache at {}",
+                legacy.display()
+            ),
+            Err(e) => error!(
+                "cannot adopt the previous cache at {}: {e}; leaving it alone",
+                legacy.display()
+            ),
+        }
+    }
+
+    let (frames, batcher) = channel(ForwardSink::new(forward), cache, batching, stats_interval);
+    Ok(Running {
+        frames,
+        worker: tokio::spawn(batcher.run()),
+    })
+}
+
 /// Build a queue and the two ends that work it.
 ///
 /// `stats_interval` is the `[logging]` setting rather than a batching one, but
@@ -267,10 +313,6 @@ pub fn channel<S: BatchSink, C: FrameCache>(
 }
 
 impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
-    pub fn counters(&self) -> &Counters {
-        &self.counters
-    }
-
     /// Work until the queue closes, then flush what is left.
     ///
     /// **Must run on a multi-threaded runtime.** Cache operations are SQLite,
@@ -428,12 +470,20 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// cache must never stop a capture; frames keep flowing to the gateway
     /// while it is unhappy.
     async fn drain_cache(&mut self) -> Result<bool, SinkError> {
+        // Asked first because it is a field read, where `oldest` is a query, a
+        // `block_in_place` hand-off and a batch-sized allocation — thirty times
+        // a second on a server that has never cached anything.
+        let empty = blocking(|| self.cache.count()).is_ok_and(|n| n == 0);
         let batch_size = self.batch_size;
-        let cached = match blocking(|| self.cache.oldest(batch_size)) {
-            Ok(cached) => cached,
-            Err(e) => {
-                error!("disk cache read error: {e}");
-                return Ok(false);
+        let cached = if empty {
+            Vec::new()
+        } else {
+            match blocking(|| self.cache.oldest(batch_size)) {
+                Ok(cached) => cached,
+                Err(e) => {
+                    error!("disk cache read error: {e}");
+                    return Ok(false);
+                }
             }
         };
 
@@ -504,7 +554,9 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                 .map_err(|e| format!("disk cache write error: {e}"))
         });
         match stored {
-            Ok(written) => add(&self.counters.cached, written as u64),
+            Ok(written) => {
+                add(&self.counters.cached, written as u64);
+            }
             Err(why) => {
                 error!("{why}");
                 add(&self.counters.dropped, batch.len() as u64);

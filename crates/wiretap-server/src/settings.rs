@@ -63,15 +63,16 @@ const LEGACY_CACHE_FILE: &str = ".wiretap-server-cache.db";
 impl Batching {
     /// Flags first; the file overrides them in [`Settings::apply_file`].
     fn from_cli(cli: &Cli, env: &Env) -> Self {
-        let cache_path = cache_path(cli.pg_cache_path.as_deref(), env);
         Self {
             size: cli.pg_batch_size,
             flush_interval: cli.pg_flush_interval,
             queue_size: cli.pg_queue_size,
-            legacy_cache_path: legacy_cache_path(&cache_path, env),
-            cache_path,
+            cache_path: cache_path(cli.pg_cache_path.as_deref(), env),
             cache_max_mb: cli.pg_cache_max_mb,
             queue_flush_pct: cli.pg_queue_flush_pct,
+            // Filled in by `Settings::resolve`, once the file has had its say
+            // about where the cache lives.
+            legacy_cache_path: None,
         }
     }
 }
@@ -399,6 +400,9 @@ impl Settings {
                     fwd.api_key = k.clone();
                 }
             }
+            // Last, because it depends on where the cache ended up, and every
+            // source has now had its say about that.
+            fwd.batching.legacy_cache_path = legacy_cache_path(&fwd.batching.cache_path, env);
         }
 
         if s.ifaces.is_empty() && s.ingest.is_none() {
@@ -467,7 +471,6 @@ impl Settings {
             // directory.
             if let Some(p) = f.forward.cache_path.as_deref() {
                 b.cache_path = cache_path(Some(p).filter(|p| !p.is_empty()), env);
-                b.legacy_cache_path = legacy_cache_path(&b.cache_path, env);
             }
         }
         Ok(())

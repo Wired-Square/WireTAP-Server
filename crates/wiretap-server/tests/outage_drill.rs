@@ -18,15 +18,15 @@
 //! `docker compose stop backend` / `start backend` while it runs. That is
 //! deliberate — a drill that mocks the outage is the drill that already passes.
 
-use std::path::PathBuf;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use wiretap_model::{CanSample, Direction, SourceId};
-use wiretap_server::archive::{self, Counters};
-use wiretap_server::cache::SqliteCache;
-use wiretap_server::forward::ForwardSink;
+use wiretap_model::{CanSample, Direction, Secret, SourceId};
+use wiretap_server::archive;
+use wiretap_server::cache::{FrameCache, SqliteCache};
 use wiretap_server::settings::{Batching, Forward};
+use wiretap_server::source::system_time_to_us;
 
 /// Frames pushed through the drill. Enough that batching, chunking at the
 /// protocol's 256-record cap, and a cache spanning several batches all happen.
@@ -55,9 +55,7 @@ fn sample(seq: u32, base_us: i64) -> Arc<CanSample> {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a running gateway; see the module docs"]
 async fn frames_survive_a_gateway_outage() {
-    let Some(gateway) = env("WIRETAP_GATEWAY") else {
-        panic!("set WIRETAP_GATEWAY=host:port");
-    };
+    let gateway = env("WIRETAP_GATEWAY").expect("set WIRETAP_GATEWAY=host:port");
     let (host, port) = gateway.rsplit_once(':').expect("host:port");
     let token = env("WIRETAP_FORWARD_TOKEN").expect("set WIRETAP_FORWARD_TOKEN");
     let database = env("WIRETAP_DRILL_DB").unwrap_or_default();
@@ -69,31 +67,22 @@ async fn frames_survive_a_gateway_outage() {
     let forward = Forward {
         host: host.to_string(),
         port: port.parse().expect("a port"),
-        api_key: wiretap_model::Secret::new(token),
+        api_key: Secret::new(token),
         database,
         batching: Batching {
             size: 500,
             flush_interval: 0.5,
             queue_size: 50_000,
-            cache_path: PathBuf::from(&cache_path),
+            cache_path: cache_path.clone(),
             cache_max_mb: 1000,
             queue_flush_pct: 50,
             legacy_cache_path: None,
         },
     };
-    let cache = SqliteCache::open(&cache_path, 1000).expect("a cache");
-    let (archive, batcher) =
-        archive::channel(ForwardSink::new(&forward), cache, &forward.batching, 2.0);
-    let counters: Arc<Counters> = archive.counters();
-    let worker = tokio::spawn(batcher.run());
-
-    let base_us = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros(),
-    )
-    .unwrap();
+    let running = archive::start(&forward, 2.0).expect("an archive");
+    let archive = running.frames;
+    let counters = archive.counters();
+    let base_us = system_time_to_us(SystemTime::now());
 
     println!("--- pushing {FRAMES} frames; stop and start the gateway while this runs ---");
     let started = Instant::now();
@@ -114,24 +103,19 @@ async fn frames_survive_a_gateway_outage() {
     // is still down it will stop with frames on disk, which the assertions
     // below then report as the failure it is.
     drop(archive);
-    tokio::time::timeout(Duration::from_secs(300), worker)
+    tokio::time::timeout(Duration::from_secs(300), running.worker)
         .await
         .expect("the batcher finished")
         .unwrap();
 
     let mut cache = SqliteCache::open(&cache_path, 1000).expect("reopen");
-    let left = {
-        use wiretap_server::cache::FrameCache;
-        cache.count().expect("count")
-    };
+    let left = cache.count().expect("count");
+    let dropped = counters.dropped.load(Relaxed);
     println!(
-        "--- {left} left in the cache; wrote={} cached={} recovered={} dropped={} ---",
-        counters.written.load(std::sync::atomic::Ordering::Relaxed),
-        counters.cached.load(std::sync::atomic::Ordering::Relaxed),
-        counters
-            .cache_recovered
-            .load(std::sync::atomic::Ordering::Relaxed),
-        counters.dropped.load(std::sync::atomic::Ordering::Relaxed),
+        "--- {left} left in the cache; wrote={} cached={} recovered={} dropped={dropped} ---",
+        counters.written.load(Relaxed),
+        counters.cached.load(Relaxed),
+        counters.cache_recovered.load(Relaxed),
     );
     println!(
         "Now check the gateway's database: {FRAMES} rows with ts between \
@@ -139,10 +123,6 @@ async fn frames_survive_a_gateway_outage() {
         base_us + i64::from(FRAMES)
     );
     assert_eq!(left, 0, "every cached frame was drained before shutdown");
-    assert_eq!(
-        counters.dropped.load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "nothing was dropped"
-    );
+    assert_eq!(dropped, 0, "nothing was dropped");
     let _ = std::fs::remove_dir_all(&dir);
 }

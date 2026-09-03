@@ -39,11 +39,17 @@ impl std::str::FromStr for Direction {
 
     /// Case-insensitive on purpose: the Python accepted any `--default-dir`
     /// string, so `TX` has to keep working.
+    ///
+    /// Compared rather than lowercased, so this allocates nothing: it is called
+    /// once per row when a disk cache is drained, which after a long outage is
+    /// millions of rows.
     fn from_str(s: &str) -> Result<Self, ()> {
-        match s.to_ascii_lowercase().as_str() {
-            "rx" => Ok(Direction::Rx),
-            "tx" => Ok(Direction::Tx),
-            _ => Err(()),
+        if s.eq_ignore_ascii_case("rx") {
+            Ok(Direction::Rx)
+        } else if s.eq_ignore_ascii_case("tx") {
+            Ok(Direction::Tx)
+        } else {
+            Err(())
         }
     }
 }

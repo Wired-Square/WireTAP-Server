@@ -22,11 +22,9 @@ use tracing::{error, info, warn};
 use wiretap_model::{CanSample, Direction};
 
 use crate::archive;
-use crate::cache::SqliteCache;
 use crate::console;
-use crate::forward::ForwardSink;
 use crate::gvret::server;
-use crate::settings::{Forward, Settings};
+use crate::settings::Settings;
 use crate::source::{
     bus_count, bus_for_index, index_for_bus,
     socketcan::{detect_bitrates, CanReader},
@@ -193,7 +191,12 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
     let archive = settings
         .forward
         .as_ref()
-        .map(|forward| start_archive(forward, settings.stats_interval))
+        .map(|forward| {
+            archive::start(forward, settings.stats_interval).map_err(|e| RunError::Cache {
+                path: forward.batching.cache_path.display().to_string(),
+                err: e.to_string(),
+            })
+        })
         .transpose()?;
 
     for (reader, iface) in readers.iter().cloned().zip(settings.ifaces.clone()) {
@@ -226,49 +229,6 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
         let _ = archive.worker.await;
     }
     Ok(())
-}
-
-/// The queue, the worker task, and the disk cache behind them.
-struct RunningArchive {
-    frames: archive::Archive,
-    worker: tokio::task::JoinHandle<()>,
-}
-
-/// Open the cache, drain anything an older install left in `$HOME`, and start
-/// the batcher.
-fn start_archive(forward: &Forward, stats_interval: f64) -> Result<RunningArchive, RunError> {
-    let batching = &forward.batching;
-    let mut cache =
-        SqliteCache::open(&batching.cache_path, batching.cache_max_mb).map_err(|e| {
-            RunError::Cache {
-                path: batching.cache_path.display().to_string(),
-                err: e.to_string(),
-            }
-        })?;
-
-    // A failure here is logged rather than fatal: the old cache is left where
-    // it is to be tried again next start, and refusing to capture because a
-    // previous run's leftovers could not be moved is the worse trade.
-    if let Some(legacy) = &batching.legacy_cache_path {
-        match cache.adopt(legacy) {
-            Ok(0) => {}
-            Ok(moved) => info!(
-                "adopted {moved} frames from the previous cache at {}",
-                legacy.display()
-            ),
-            Err(e) => error!(
-                "cannot adopt the previous cache at {}: {e}; leaving it alone",
-                legacy.display()
-            ),
-        }
-    }
-
-    let (frames, batcher) =
-        archive::channel(ForwardSink::new(forward), cache, batching, stats_interval);
-    Ok(RunningArchive {
-        frames,
-        worker: tokio::spawn(batcher.run()),
-    })
 }
 
 fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {
