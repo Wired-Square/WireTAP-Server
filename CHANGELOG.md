@@ -92,6 +92,14 @@ All notable changes to this project are documented here. Entries go under
 
 ### Fixed
 
+- Seven `--pg-*` flags were reported as belonging to the retired PostgreSQL sink when they
+  do not. The Python's forward sink subclasses its PostgreSQL writer, so a forward
+  deployment is handed `--pg-batch-size`, `--pg-flush-interval`, `--pg-queue-size`,
+  `--pg-dir`, `--pg-cache-path`, `--pg-cache-max-mb` and `--pg-queue-flush-pct` too — they
+  configure the batcher and the disk cache, which outlive the sink they are named after.
+  Only `--pg-dsn`, `--pg-func` and `--pg-write-mode` went with it. `--pg-dir` was the one
+  with teeth: it sets the direction every captured frame is tagged with, above both
+  `--default-dir` and the config file, and was being ignored.
 - A non-zero `bus_offset` killed any GVRET client that asked for bus parameters. The
   advertised bus count includes the offset, and the reply used that count to index a list of
   speeds holding one entry per interface — so `--bus-offset 1` with a single interface

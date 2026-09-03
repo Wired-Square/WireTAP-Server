@@ -25,6 +25,21 @@ start**. Ignoring the setting would present a working capture that archives
 nothing, which is worse than a daemon that will not run. `tools/migrate_to_timescale.py`
 moves an existing archive.
 
+Three flags went with it — `--pg-dsn`, `--pg-func`, `--pg-write-mode` — and are
+warned about and ignored. **The other seven did not.** `ForwardSink` subclasses
+`PostgresWriter`, so `main` hands a forward deployment `--pg-batch-size`,
+`--pg-flush-interval`, `--pg-queue-size`, `--pg-dir`, `--pg-cache-path`,
+`--pg-cache-max-mb` and `--pg-queue-flush-pct` exactly as it hands them to a
+PostgreSQL one: they configure the batcher and the disk cache, which outlive the
+sink they are named after. Treating them as retired would tell an operator their
+queue size had stopped applying, which is the reverse of the truth.
+
+`--pg-dir` is the one with teeth today. `main` resolves
+`args.pg_dir or args.default_dir` *after* the config merge, so it sets the
+direction every frame is tagged with — above `--default-dir` and above
+`[server].default_dir`. It is now validated, where the Python would have written
+any string it was given straight into the archive's `dir` column.
+
 This also removes `tokio-postgres` and its TLS surface from the server
 entirely, which is what keeps the `.deb` a static musl binary with no libpq.
 

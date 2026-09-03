@@ -125,19 +125,18 @@ pub struct Cli {
 
 impl Cli {
     /// Retired `--pg-*` flags the caller actually passed, for warning about.
-    /// `--pg-enable` is handled separately: it is refused, not warned.
+    ///
+    /// Only three of them are retired. The rest name the *batcher*, which the
+    /// Python's `ForwardSink` inherited from `PostgresWriter` — `main` passes
+    /// `--pg-batch-size`, `--pg-queue-size`, `--pg-cache-path` and their
+    /// siblings into a forward deployment too — so they survive the sink they
+    /// are named after. `--pg-enable` is handled separately: it is refused,
+    /// not warned.
     pub fn retired_flags_used(&self) -> Vec<&'static str> {
         [
             ("--pg-dsn", self.pg_dsn.is_some()),
             ("--pg-func", self.pg_func.is_some()),
             ("--pg-write-mode", self.pg_write_mode.is_some()),
-            ("--pg-batch-size", self.pg_batch_size.is_some()),
-            ("--pg-flush-interval", self.pg_flush_interval.is_some()),
-            ("--pg-queue-size", self.pg_queue_size.is_some()),
-            ("--pg-dir", self.pg_dir.is_some()),
-            ("--pg-cache-path", self.pg_cache_path.is_some()),
-            ("--pg-cache-max-mb", self.pg_cache_max_mb.is_some()),
-            ("--pg-queue-flush-pct", self.pg_queue_flush_pct.is_some()),
         ]
         .into_iter()
         .filter_map(|(name, used)| used.then_some(name))
@@ -202,7 +201,12 @@ mod tests {
             "500",
         ]);
         assert!(c.pg_enable);
-        assert_eq!(c.retired_flags_used(), vec!["--pg-dsn", "--pg-batch-size"]);
+        assert_eq!(
+            c.retired_flags_used(),
+            vec!["--pg-dsn"],
+            "the DSN went with the sink; the batch size did not"
+        );
+        assert_eq!(c.pg_batch_size, Some(500));
     }
 
     #[test]

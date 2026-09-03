@@ -283,6 +283,14 @@ impl Settings {
             s.apply_file(cli, f)?;
         }
 
+        // `--pg-dir` last, and so above even the file: the Python resolved
+        // `args.pg_dir or args.default_dir` in `main`, after the config merge
+        // had already written `[server].default_dir` over the flag. It tags
+        // both the archive and the frames handed to GVRET clients.
+        if let Some(d) = &cli.pg_dir {
+            s.default_dir = parse_direction(d)?;
+        }
+
         // Secrets last, and only to fill a gap: an explicitly configured value
         // beats the environment, so a unit file's EnvironmentFile cannot
         // silently override what an operator wrote down.
@@ -537,12 +545,61 @@ mod tests {
 
     #[test]
     fn retired_flags_warn_without_failing() {
-        let r = resolve(&["--pg-batch-size", "500", "--pg-dsn", "x"], None).unwrap();
+        let r = resolve(&["--pg-write-mode", "copy", "--pg-dsn", "x"], None).unwrap();
         assert!(
             r.warnings
-                .contains(&Warning::RetiredFlags(vec!["--pg-dsn", "--pg-batch-size"])),
+                .contains(&Warning::RetiredFlags(vec!["--pg-dsn", "--pg-write-mode"])),
             "{:?}",
             r.warnings
+        );
+    }
+
+    /// The batcher flags outlived the sink they are named after: the Python's
+    /// `ForwardSink` inherits `PostgresWriter`'s queue and disk cache and is
+    /// handed exactly these. Calling them retired would tell an operator their
+    /// queue size had stopped applying, which is the opposite of true.
+    #[test]
+    fn the_batcher_flags_are_not_retired() {
+        let r = resolve(
+            &[
+                "--pg-batch-size",
+                "500",
+                "--pg-queue-size",
+                "200000",
+                "--pg-cache-path",
+                "/mnt/cache.db",
+            ],
+            None,
+        )
+        .unwrap();
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| matches!(w, Warning::RetiredFlags(_))),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    /// `--pg-dir` sets the direction every frame is tagged with, above both
+    /// `--default-dir` and the config file — the order `main` resolved it in.
+    #[test]
+    fn pg_dir_overrides_the_direction_from_either_source() {
+        let r = resolve(&["--default-dir", "rx", "--pg-dir", "tx"], None).unwrap();
+        assert_eq!(r.settings.default_dir, Direction::Tx);
+
+        let r = resolve(
+            &["--pg-dir", "tx"],
+            Some("[server]\ndefault_dir = \"rx\"\n"),
+        )
+        .unwrap();
+        assert_eq!(r.settings.default_dir, Direction::Tx, "above the file too");
+
+        // And it is validated, where the Python would have written the string
+        // straight into the archive's `dir` column.
+        assert_eq!(
+            resolve(&["--pg-dir", "sideways"], None).unwrap_err(),
+            SettingsError::BadDirection("sideways".into())
         );
     }
 
