@@ -26,6 +26,11 @@ All notable changes to this project are documented here. Entries go under
   keepalive, frame encode, and a decoder covering the handshake, binary-mode resync, split
   and over-long commands. Written as a pure state machine with no sockets, so the bytes a
   desktop client sees can be tested without a bus.
+- `wiretap-server --check-config` — parses the configuration, reports anything it had to
+  ignore, and prints what the settings resolve to, without echoing secrets. It is the
+  answer to "which of the flag, the file and the environment won", a question the Python
+  could only be asked by reading its source: the file overrides the command line, which the
+  shipped config file's own header states backwards.
 - `docs/porting-notes.md` — where the Rust deviates from the Python, and the quirks
   replicated deliberately rather than fixed mid-port.
 

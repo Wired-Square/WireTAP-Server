@@ -5,7 +5,10 @@
 //! them to a gateway for archiving.
 //!
 //! The logic lives in the library and the binary is a thin wrapper, so the
-//! protocol codecs are testable without opening a socket — which is what lets
-//! the port be checked byte-for-byte against the Python it replaces.
+//! protocol codecs and the configuration merge are testable without opening a
+//! socket — which is what lets the port be checked against the Python it
+//! replaces.
 
+pub mod cli;
 pub mod gvret;
+pub mod settings;
