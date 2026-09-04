@@ -4,7 +4,8 @@
 # `source/socketcan.rs` and the CAN half of `pipeline.rs` are Linux-only, and
 # there is no `vcan` on macOS nor in Docker Desktop's kernel — so before this
 # workflow existed, roughly 250 lines of the server had never executed
-# anywhere. GitHub's Ubuntu runners are full VMs with sudo, so `modprobe vcan`
+# anywhere. GitHub's Ubuntu runners are full VMs with sudo, so once the module
+# is installed — it is not in the image; see the step that does it — `vcan`
 # gives real end-to-end loopback with no CAN hardware at all.
 
 name: CI
@@ -31,7 +32,7 @@ jobs:
       # to work under.
       ZIG_VERSION: "0.16.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the toolchain
         run: |
@@ -44,7 +45,7 @@ jobs:
           # and every run rebuilds from cold in silence.
           echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -138,7 +139,7 @@ jobs:
       EXTENDED_ID: "01ABCDEF"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the toolchain
         run: |
@@ -150,7 +151,7 @@ jobs:
       # clippy's `.rmeta` units plus a whole musl target directory, neither of
       # which this job can use; sharing one key would also have both jobs race
       # to save it.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
