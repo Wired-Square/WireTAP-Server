@@ -40,24 +40,32 @@ case "$1" in
         # gateway. Losing those to an apt command is worse than an orphaned
         # directory - and this is exactly the moment somebody is removing a
         # package because something is already wrong.
+        # The account goes with the data or not at all. dpkg reserves no uid,
+        # so deleting the owner while keeping the files is what strands a
+        # capture: the next install is given whatever uid is free and inherits
+        # a cache it cannot write. Since postinst creates the directory on
+        # every configure and the branch above never removes it, that means the
+        # account survives a purge on any host that was ever installed - the
+        # deletion here is for the one that was not.
         if [ -d "$STATE_DIR" ]; then
-            echo "wiretap-server: $STATE_DIR kept. If cache.db is not empty it holds"
-            echo "wiretap-server:   captured frames that never reached the gateway."
-            echo "wiretap-server:   Remove it by hand if you mean to."
+            echo "wiretap-server: $STATE_DIR kept, and the $USER account with it. If"
+            echo "wiretap-server:   cache.db is not empty it holds captured frames that"
+            echo "wiretap-server:   never reached the gateway. Remove both by hand if"
+            echo "wiretap-server:   you mean to."
+        else
+            if getent passwd "$USER" >/dev/null 2>&1; then
+                deluser --quiet --system "$USER" >/dev/null 2>&1 \
+                    || userdel "$USER" >/dev/null 2>&1 || true
+            fi
+            if getent group "$USER" >/dev/null 2>&1; then
+                delgroup --quiet --system "$USER" >/dev/null 2>&1 \
+                    || groupdel "$USER" >/dev/null 2>&1 || true
+            fi
         fi
 
         # /var/log/journal is not removed either: it holds the record of this
         # removal, and of whatever the capture was doing beforehand. Deleting
         # logs as a side effect of removing a package is backwards.
-
-        if getent passwd "$USER" >/dev/null 2>&1; then
-            deluser --quiet --system "$USER" >/dev/null 2>&1 \
-                || userdel "$USER" >/dev/null 2>&1 || true
-        fi
-        if getent group "$USER" >/dev/null 2>&1; then
-            delgroup --quiet --system "$USER" >/dev/null 2>&1 \
-                || groupdel "$USER" >/dev/null 2>&1 || true
-        fi
         ;;
 esac
 

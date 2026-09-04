@@ -150,7 +150,10 @@ same "the staged cache" "${STATE_DIR}/${STAGED_CACHE_FILE}" \
 # postrm removes what postinst writes, and neither would notice the other
 # renaming it - a purged package that leaves the drop-in behind goes on forcing
 # Storage=persistent on a host that no longer runs this.
-for v in CONFIG_DIR STATE_DIR UNIT JOURNALD_DROPIN; do
+# USER is in here for a sharper reason than the rest: one script chowns the
+# state directory to it and the other decides whether to delete it, and a
+# disagreement leaves a kept capture owned by an account nothing recreates.
+for v in USER CONFIG_DIR STATE_DIR UNIT JOURNALD_DROPIN; do
 	same "${v} between postinst and postrm" \
 		"$(maint_var postinst "${v}")" "$(maint_var postrm "${v}")"
 done
@@ -162,6 +165,24 @@ SETTINGS="${ROOT}/crates/wiretap-server/src/settings.rs"
 for name in "${STAGED_CACHE_FILE}" "${LEGACY_CACHE_FILE}"; do
 	grep -qF "\"${name}\"" "${SETTINGS}" \
 		|| die "settings.rs no longer knows ${name}; debian/postinst still stages to it."
+done
+
+# A different coupling to the same file, and a different failure: this is the
+# variable the documented --check-config command is prefixed with. The daemon
+# derives the cache from it, so without it that command reports a path under
+# $HOME the unit never opens and prints no "adopt on start" line.
+grep -qF '"STATE_DIRECTORY"' "${SETTINGS}" \
+	|| die "settings.rs no longer reads STATE_DIRECTORY; the packaging still tells
+     operators to set it before --check-config."
+
+# And the value, which the unit and the reference config hardcode rather than
+# deriving - eight lines from the StateDirectory= they come from. Checked
+# against ${STATE_DIR}, which is itself already checked against that line.
+for f in "${UNIT}" "${CONFIG}"; do
+	grep -qF "STATE_DIRECTORY=${STATE_DIR}" "${f}" \
+		|| die "${f#"${ROOT}"/} does not prefix its --check-config advice with
+     STATE_DIRECTORY=${STATE_DIR}, so it documents a command that reports a
+     cache path the daemon does not use."
 done
 
 # One table rather than a function per column: an architecture is a rust target

@@ -134,13 +134,21 @@ elif [ "$found" -eq 1 ] && [ ! -e "$STAGED_CACHE" ]; then
         # The wal-index is transient and machine-specific; SQLite rebuilds it
         # from the -wal, and a stale one is how a recovery silently truncates.
         rm -f "$legacy-shm"
-        chown "$USER:$USER" "$STAGED_CACHE" 2>/dev/null || true
-        [ -e "$STAGED_CACHE-wal" ] && chown "$USER:$USER" "$STAGED_CACHE-wal" 2>/dev/null || true
         say "moved $legacy to $STAGED_CACHE."
         say "  Those frames never reached a sink. The daemon drains them into its"
         say "  own cache on the next start, once [forward] is configured."
     fi
 fi
+
+# Everything in the state directory, including whatever was just staged there.
+# `postrm purge` keeps this directory on purpose - it holds frames that never
+# reached the gateway - so an install after a purge can be allocated a different
+# uid and inherit a cache it cannot write. postrm keeps the account for that
+# reason too; this repairs a host that is already in the state, which it cannot.
+# Not fatal, per the policy at the bottom of this file.
+chown -R "$USER:$USER" "$STATE_DIR" \
+    || warn "could not give $STATE_DIR to $USER; the daemon will refuse to start
+  on a cache it cannot write, and will say so."
 
 # --- the configuration file ----------------------------------------------
 # The unit names this file explicitly, so it is how the daemon is configured.
@@ -248,7 +256,12 @@ fi
 systemctl daemon-reload || true
 
 how_to_start() {
-    say "      wiretap-server --check-config -C $CONFIG_TOML"
+    # STATE_DIRECTORY is what systemd sets for the unit, and it is where both
+    # the cache and anything staged above live. Without it --check-config
+    # derives the cache from $HOME instead, so it reports a path the unit will
+    # never use and prints no "adopt on start" line - on the very path where
+    # this script has just said an outage's frames are waiting to be adopted.
+    say "      STATE_DIRECTORY=$STATE_DIR wiretap-server --check-config -C $CONFIG_TOML"
     say "      systemctl start wiretap-server"
 }
 

@@ -17,8 +17,12 @@ Type=exec
 # something in it.
 #
 # Note the precedence, which is the Python's and is the opposite of most
-# daemons': the FILE overrides the command line. `wiretap-server --check-config
-# -C /etc/wiretap-server/wiretap-server.toml` prints what actually results.
+# daemons': the FILE overrides the command line. To see what actually results,
+# with the state directory this unit gives it — without which the report names
+# a cache under $HOME that nothing here opens:
+#
+#     STATE_DIRECTORY=/var/lib/wiretap-server \
+#         wiretap-server --check-config -C /etc/wiretap-server/wiretap-server.toml
 ExecStart=/usr/bin/wiretap-server -C /etc/wiretap-server/wiretap-server.toml
 
 User=wiretap

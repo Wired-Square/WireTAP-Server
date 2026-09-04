@@ -12,7 +12,12 @@
 # was kept rather than quietly reversed. To see what a change actually resolves
 # to, without starting anything:
 #
-#     wiretap-server --check-config -C /etc/wiretap-server/wiretap-server.toml
+#     STATE_DIRECTORY=/var/lib/wiretap-server \
+#         wiretap-server --check-config -C /etc/wiretap-server/wiretap-server.toml
+#
+# The variable is what systemd sets for the unit, and it is where the cache
+# lives. Run without it and the report names a cache path under $HOME that the
+# unit never opens, and says nothing about a cache waiting to be adopted.
 #
 # EVERY SETTING IS COMMENTED OUT EXCEPT `iface`, deliberately. A key written
 # here is pinned on this machine forever - this file is never overwritten once

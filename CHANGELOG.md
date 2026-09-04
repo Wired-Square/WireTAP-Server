@@ -242,6 +242,28 @@ All notable changes to this project are documented here. Entries go under
 - Two clippy warnings inherited from the gateway crate, and a one-off `rustfmt` pass over
   it — it had never been formatted, having lived in a repo whose CI only built the desktop
   app. `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test` all pass.
+- A disk cache the daemon could read but not write started normally and then dropped every
+  frame. Opening one proves nothing about writing it: SQLite retries `O_RDONLY` after an
+  `EACCES`, the pragmas return the mode already set, `CREATE TABLE IF NOT EXISTS` writes
+  nothing to a table that exists, and the row count is a read — so the startup check that
+  exists to refuse capturing without an archive passed, and the first frame was what failed.
+  The cache is now refused at open, naming the file, which also covers a state directory
+  restored from a backup or carried between machines on an SD card.
+- A purge followed by an install could leave that cache unreadable, which is how the above
+  was found. `postrm purge` keeps `/var/lib/wiretap-server` because it holds frames that
+  never reached the gateway, but it also deleted the `wiretap` account — and dpkg reserves
+  no uid, so a later install was allocated a different one and inherited files it did not
+  own. The account is now kept whenever the data is kept, and `postinst` re-owns the state
+  directory to repair hosts already in that state.
+- The journal contradicted itself while that was happening: an `error` naming a failed
+  disk-cache write, then an `info` reporting the same frames as drained. Both counts came
+  off the queue rather than out of the cache, which is the Python's behaviour and is carried
+  in `docs/porting-notes.md` as the one deliberate departure from its log strings.
+- `postinst` told operators to run `wiretap-server --check-config` without
+  `STATE_DIRECTORY`, so the report named a cache path under `$HOME` that the unit never
+  opens and omitted the line saying a staged cache was waiting to be adopted — on the one
+  path where it had just said frames were staged. The unit and the reference config printed
+  the same command and are fixed with it.
 
 ### Notes
 
