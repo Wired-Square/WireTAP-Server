@@ -220,6 +220,27 @@ impl SqliteCache {
     /// The connection, with the pragmas and the schema the Python set.
     fn open_conn(path: &Path) -> Result<Connection> {
         let conn = Connection::open(path)?;
+        // Opening proves nothing about writing. SQLite retries O_RDONLY after
+        // an EACCES on O_RDWR and hands back a connection that reads happily,
+        // so a cache this process owns the directory of but not the file — a
+        // purge and a reinstall that were given different uids, a state
+        // directory off a backup, an SD card moved between machines — gets
+        // through every step below: the pragmas return the mode already set,
+        // `CREATE TABLE IF NOT EXISTS` writes nothing to an existing table,
+        // and the row count is a read. The first *frame* is what fails, by
+        // which time the daemon is up, green, and dropping everything it
+        // captures. That is precisely the state `pipeline.rs` refuses to start
+        // in, so it has to be refused here. No I/O: this asks SQLite what it
+        // already decided when it opened the file.
+        // No path in the message: `RunError::Cache` already prints it, and the
+        // one place this surfaces would otherwise name the file twice.
+        if conn.is_readonly(rusqlite::MAIN_DB)? {
+            return Err(CacheError(
+                "opened read-only, so an outage would be dropped rather than cached. \
+                 Check its ownership against the user this runs as"
+                    .into(),
+            ));
+        }
         // WAL so a reader and the appending writer do not block each other;
         // NORMAL because losing the last few frames to a power cut is better
         // than an fsync per batch on an SD card. Both are the Python's.
@@ -585,6 +606,35 @@ mod tests {
         let mut reopened = SqliteCache::open(dir.db(), 100).expect("reopens");
         assert_eq!(reopened.count().unwrap(), 1);
         assert_eq!(reopened.oldest(1).unwrap()[0].sample.arb_id, 0x123);
+    }
+
+    /// Refused at open, rather than at the first frame. [`open_conn`] says why
+    /// every later step succeeds on a read-only cache; this pins that none of
+    /// them is reached.
+    #[test]
+    fn a_cache_that_cannot_be_written_is_refused_at_open() {
+        let dir = TempDir::new("readonly");
+        {
+            let mut c = SqliteCache::open(dir.db(), 100).unwrap();
+            c.append(&[sample(1, 0x123)]).unwrap();
+        }
+        // The sidecars too: a read-only -shm alone is enough to stop writes,
+        // and leaving them writable would test a case that cannot occur.
+        for f in cache_files(&dir.db()).filter(|f| f.exists()) {
+            let mut perms = std::fs::metadata(&f).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&f, perms).unwrap();
+        }
+
+        // Matched rather than `expect_err`, which would want `Debug` on the
+        // cache itself for the sake of one test.
+        let Err(err) = SqliteCache::open(dir.db(), 100) else {
+            panic!("a read-only cache was accepted");
+        };
+        assert!(
+            err.to_string().contains("read-only"),
+            "and says which file and why: {err}"
+        );
     }
 
     #[test]
