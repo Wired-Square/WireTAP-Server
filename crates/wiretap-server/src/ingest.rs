@@ -311,10 +311,14 @@ mod tests {
     use crate::settings::Batching;
     use std::path::PathBuf;
     use std::sync::Mutex;
+    use tokio::sync::watch;
+
+    /// What a test reads back: every frame the archive handed to the sink.
+    type Seen = Arc<Mutex<Vec<Arc<CanSample>>>>;
 
     /// Stands in for the gateway, keeping what it was given so a test can see
     /// what the listener put into the archive.
-    struct RecordingSink(Arc<Mutex<Vec<Arc<CanSample>>>>);
+    struct RecordingSink(Seen);
 
     impl BatchSink for RecordingSink {
         async fn connect(&mut self) -> SinkResult {
@@ -359,7 +363,7 @@ mod tests {
 
     /// A real archive with a recording sink, so what a test observes is what
     /// came out of the queue rather than a shortcut around it.
-    fn archive_capturing(queue_size: usize) -> (Archive, Arc<Mutex<Vec<Arc<CanSample>>>>) {
+    fn archive_capturing(queue_size: usize) -> (Archive, Seen, watch::Sender<bool>) {
         let batching = Batching {
             // One frame per batch, sent almost immediately: a test wants each
             // enqueue visible, not the throughput the defaults are tuned for.
@@ -372,10 +376,13 @@ mod tests {
             legacy_cache_path: None,
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let (archive, batcher) =
+        let (archive, batcher, stop) =
             crate::archive::channel(RecordingSink(seen.clone()), NullCache, &batching, 0.0);
         tokio::spawn(batcher.run());
-        (archive, seen)
+        // The stop signal is handed back rather than dropped here: dropping it
+        // would close the queue immediately and these tests would observe an
+        // archive that takes nothing.
+        (archive, seen, stop)
     }
 
     /// Wait for the archive to have `n` frames, rather than assuming the
@@ -406,17 +413,14 @@ mod tests {
         }
     }
 
-    async fn listener(
-        token: &str,
-        queue_size: usize,
-    ) -> (SocketAddr, Arc<Mutex<Vec<Arc<CanSample>>>>) {
-        let (archive, seen) = archive_capturing(queue_size);
+    async fn listener(token: &str, queue_size: usize) -> (SocketAddr, Seen, watch::Sender<bool>) {
+        let (archive, seen, stop) = archive_capturing(queue_size);
         let server = Server::bind(&ingest_settings(token), archive)
             .await
             .expect("bind");
         let addr = server.local_addr().expect("bound");
         tokio::spawn(server.run());
-        (addr, seen)
+        (addr, seen, stop)
     }
 
     /// Read one framed reply.
@@ -451,7 +455,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_device_hands_over_frames() {
-        let (addr, seen) = listener("sekrit", 100).await;
+        let (addr, seen, _stop) = listener("sekrit", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
 
         c.write_all(&proto::encode_hello(b"sekrit", "", false))
@@ -480,7 +484,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bad_token_is_refused_and_the_connection_closed() {
-        let (addr, _) = listener("sekrit", 100).await;
+        let (addr, _, _stop) = listener("sekrit", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
 
         c.write_all(&proto::encode_hello(b"wrong", "", false))
@@ -497,7 +501,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn an_empty_token_disables_authentication() {
-        let (addr, _) = listener("", 100).await;
+        let (addr, _, _stop) = listener("", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
         c.write_all(&proto::encode_hello(b"anything at all", "", false))
             .await
@@ -508,7 +512,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_batch_before_hello_drops_the_connection() {
-        let (addr, seen) = listener("sekrit", 100).await;
+        let (addr, seen, _stop) = listener("sekrit", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
         c.write_all(&proto::encode_batch(1, 0, 1, &one_record(0, 0x1)))
             .await
@@ -524,7 +528,7 @@ mod tests {
     /// device resend it rather than wait for an acknowledgement forever.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_corrupt_batch_is_nacked_then_resent() {
-        let (addr, seen) = listener("sekrit", 100).await;
+        let (addr, seen, _stop) = listener("sekrit", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
         c.write_all(&proto::encode_hello(b"sekrit", "", false))
             .await
@@ -548,7 +552,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_batch_claiming_more_than_the_limit_is_nacked() {
-        let (addr, _) = listener("sekrit", 100).await;
+        let (addr, _, _stop) = listener("sekrit", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
         c.write_all(&proto::encode_hello(b"sekrit", "", false))
             .await
@@ -570,7 +574,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn an_older_protocol_is_refused_by_version() {
-        let (addr, _) = listener("", 100).await;
+        let (addr, _, _stop) = listener("", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
 
         // A HELLO announcing version 99, built by hand: the codec only ever
@@ -592,7 +596,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_quiet_device_holds_the_connection_with_pings() {
-        let (addr, _) = listener("", 100).await;
+        let (addr, _, _stop) = listener("", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
         c.write_all(&proto::encode_message(proto::MSG_PING, b""))
             .await
@@ -604,7 +608,7 @@ mod tests {
     /// record is stamped with its arrival and the rest are back-dated.
     #[tokio::test(flavor = "multi_thread")]
     async fn relative_timestamps_are_back_dated_from_arrival() {
-        let (addr, seen) = listener("", 100).await;
+        let (addr, seen, _stop) = listener("", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
         c.write_all(&proto::encode_hello(b"", "", true))
             .await

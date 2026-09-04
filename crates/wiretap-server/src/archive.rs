@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 use wiretap_model::CanSample;
 
@@ -223,6 +223,10 @@ impl Archive {
 /// The worker: batches from the queue, writes to the sink, spills to the cache.
 pub struct Batcher<S: BatchSink, C: FrameCache> {
     rx: mpsc::Receiver<Arc<CanSample>>,
+    /// Set once, by [`Running::shutdown`]. Level-triggered on purpose: a
+    /// signal that arrives while this is mid-write or mid-backoff is still
+    /// there when it next looks, which an edge-triggered notify would lose.
+    stop: watch::Receiver<bool>,
     sink: S,
     cache: C,
     counters: Arc<Counters>,
@@ -241,22 +245,29 @@ pub struct Batcher<S: BatchSink, C: FrameCache> {
 
 /// A running archive: the handle a capture enqueues to, and the worker behind
 /// it.
-///
-/// Dropping `frames` is what tells the worker to flush and stop, so it has to
-/// outlive everything that captures.
 pub struct Running {
     pub frames: Archive,
+    stop: watch::Sender<bool>,
     pub worker: tokio::task::JoinHandle<()>,
 }
 
 impl Running {
     /// Stop the archive and wait for it to flush what it still holds.
     ///
-    /// A method rather than two lines at each call site, because the order is
-    /// the whole of it: dropping the producer is what tells the batcher to
-    /// finish, so it has to happen before the await or this waits forever.
+    /// The signal is explicit rather than "drop the last `Archive`", which is
+    /// what this used to be. That contract could not be honoured by any
+    /// caller: the sender is cloned into every reader, into the transmit loop,
+    /// and into every connected ingest session — and a session is spawned at
+    /// accept time, so the set is not even known at startup. The one caller
+    /// that tried held the flush open waiting for clones that only dropped
+    /// when *it* returned, so every `SIGTERM` hung until systemd's
+    /// `TimeoutStopSec` turned into `SIGKILL` and the flush never ran.
+    ///
+    /// Closing the queue is still what stops the worker; this just makes the
+    /// receiver do it, where it takes no cooperation from anyone holding a
+    /// sender. Callers may now hold as many clones as they like.
     pub async fn shutdown(self) -> Result<(), tokio::task::JoinError> {
-        drop(self.frames);
+        let _ = self.stop.send(true);
         self.worker.await
     }
 }
@@ -290,9 +301,11 @@ pub fn start(forward: &Forward, stats_interval: f64) -> Result<Running, CacheErr
         }
     }
 
-    let (frames, batcher) = channel(ForwardSink::new(forward), cache, batching, stats_interval);
+    let (frames, batcher, stop) =
+        channel(ForwardSink::new(forward), cache, batching, stats_interval);
     Ok(Running {
         frames,
+        stop,
         worker: tokio::spawn(batcher.run()),
     })
 }
@@ -307,9 +320,10 @@ pub fn channel<S: BatchSink, C: FrameCache>(
     cache: C,
     batching: &crate::settings::Batching,
     stats_interval: f64,
-) -> (Archive, Batcher<S, C>) {
+) -> (Archive, Batcher<S, C>, watch::Sender<bool>) {
     let counters = Arc::new(Counters::default());
     let (tx, rx) = mpsc::channel(batching.queue_size.max(1));
+    let (stop_tx, stop) = watch::channel(false);
     (
         Archive {
             tx,
@@ -319,6 +333,7 @@ pub fn channel<S: BatchSink, C: FrameCache>(
         },
         Batcher {
             rx,
+            stop,
             sink,
             cache,
             counters,
@@ -331,6 +346,7 @@ pub fn channel<S: BatchSink, C: FrameCache>(
             stats_interval: Duration::from_secs_f64(stats_interval.max(0.0)),
             last_stats: Instant::now(),
         },
+        stop_tx,
     )
 }
 
@@ -460,7 +476,21 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         if self.queue_finished() {
             return false;
         }
-        tokio::time::sleep(*delay).await;
+        {
+            let Self { rx, stop, .. } = self;
+            tokio::select! {
+                biased;
+                // Without this a stop during an outage waits out the backoff,
+                // which is up to `BACKOFF_MAX`. What is queued is not lost —
+                // `shutdown_flush` still takes it, and with the sink down that
+                // means the disk cache, for the next run to drain.
+                _ = stop.changed() => {
+                    rx.close();
+                    return false;
+                }
+                _ = tokio::time::sleep(*delay) => {}
+            }
+        }
         *delay = (*delay * 2).min(BACKOFF_MAX);
         true
     }
@@ -469,10 +499,35 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// first and taking whatever else is already there.
     async fn next_batch(&mut self) -> Vec<Arc<CanSample>> {
         let mut batch: Vec<Arc<CanSample>> = Vec::with_capacity(self.batch_size);
-        match tokio::time::timeout(self.flush_interval, self.rx.recv()).await {
-            Ok(Some(s)) => batch.push(s),
+        let first = {
+            // Disjoint field borrows, so the queue and the stop signal can be
+            // raced against each other.
+            let Self {
+                rx,
+                stop,
+                flush_interval,
+                ..
+            } = self;
+            tokio::select! {
+                // Stop first: a shutdown arriving on a busy queue should not
+                // wait out another flush interval to be noticed.
+                biased;
+                // Closing the queue *is* the mechanism. `recv` then yields what
+                // is still buffered and finally `None`, so `queue_finished`
+                // and `wait_to_retry` below need no changes and no sender has
+                // to be dropped by anyone. An `Err` here is the sender gone,
+                // which means the archive was abandoned — same treatment.
+                _ = stop.changed() => {
+                    rx.close();
+                    rx.recv().await
+                }
+                r = tokio::time::timeout(*flush_interval, rx.recv()) => r.unwrap_or(None),
+            }
+        };
+        match first {
+            Some(s) => batch.push(s),
             // Closed, or nothing arrived in time.
-            Ok(None) | Err(_) => return batch,
+            None => return batch,
         }
         while batch.len() < self.batch_size {
             match self.rx.try_recv() {
@@ -837,13 +892,14 @@ mod tests {
         archive: Archive,
         sink: SinkState,
         cache: CacheState,
+        stop: watch::Sender<bool>,
         task: tokio::task::JoinHandle<()>,
     }
 
     fn rig(queue_size: usize) -> Rig {
         let sink = SinkState::default();
         let cache = CacheState::default();
-        let (archive, batcher) = channel(
+        let (archive, batcher, stop) = channel(
             FakeSink(sink.clone()),
             FakeCache(cache.clone()),
             &batching(queue_size),
@@ -853,17 +909,29 @@ mod tests {
             archive,
             sink,
             cache,
+            stop,
             task: tokio::spawn(batcher.run()),
         }
     }
 
     impl Rig {
-        /// Close the queue and wait for the worker to finish its flush.
+        /// Close the queue by dropping the last sender, and wait for the flush.
+        /// Kept as the drop path so the tests below still cover it.
         async fn finish(self) {
             drop(self.archive);
-            tokio::time::timeout(Duration::from_secs(10), self.task)
+            Self::joined(self.task, "the batcher stopped when its queue closed").await;
+        }
+
+        /// Stop by signal instead, with `archive` still held.
+        async fn finish_by_signal(self) {
+            let _ = self.stop.send(true);
+            Self::joined(self.task, "the batcher stopped when it was told to").await;
+        }
+
+        async fn joined(task: tokio::task::JoinHandle<()>, what: &str) {
+            tokio::time::timeout(Duration::from_secs(10), task)
                 .await
-                .expect("the batcher stopped when its queue closed")
+                .expect(what)
                 .unwrap();
         }
     }
@@ -932,7 +1000,7 @@ mod tests {
     async fn a_full_queue_drops_and_counts() {
         let sink = SinkState::default();
         sink.fail(Some("gateway down"));
-        let (archive, batcher) = channel(
+        let (archive, batcher, _stop) = channel(
             FakeSink(sink.clone()),
             FakeCache(CacheState::default()),
             &batching(4),
@@ -961,7 +1029,7 @@ mod tests {
         let cache = CacheState::default();
         let mut cfg = batching(20);
         cfg.queue_flush_pct = 50;
-        let (archive, batcher) =
+        let (archive, batcher, _stop) =
             channel(FakeSink(sink.clone()), FakeCache(cache.clone()), &cfg, 0.0);
         let task = tokio::spawn(batcher.run());
 
@@ -1018,6 +1086,28 @@ mod tests {
         let sink = r.sink.clone();
         r.finish().await;
         assert_eq!(sink.written(), [0, 1, 2]);
+    }
+
+    /// The signal finishes the worker even though a producer is still holding
+    /// the queue open — which is every real deployment: a reader, the transmit
+    /// loop, or a connected ingest session. Under the old "drop the last
+    /// sender" contract this hung, and no caller could honour it, because a
+    /// session is spawned at accept time and nobody knows the set.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_finishes_while_a_producer_still_holds_the_queue() {
+        let r = rig(100);
+        for i in 0..3 {
+            r.archive.enqueue(sample(i));
+        }
+        let sink = r.sink.clone();
+        // The clone a reader or an ingest session would be holding. It
+        // deliberately outlives the shutdown.
+        let still_capturing = r.archive.clone();
+
+        r.finish_by_signal().await;
+
+        assert_eq!(sink.written(), [0, 1, 2], "the flush still ran");
+        drop(still_capturing);
     }
 
     /// And if the sink is gone at shutdown, it goes to disk instead.
