@@ -626,6 +626,20 @@ mod tests {
             std::fs::set_permissions(&f, perms).unwrap();
         }
 
+        // Root bypasses the permission bits, so there the file is not actually
+        // read-only and there is nothing to assert. CI runs `cargo test`
+        // unprivileged - deliberately, see ci.yml - but a root container is a
+        // normal way to work on packaging, and failing there would say nothing
+        // about the code. Detected by trying it rather than by asking for the
+        // uid, which would want libc.
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.db())
+            .is_ok()
+        {
+            return;
+        }
+
         // Matched rather than `expect_err`, which would want `Debug` on the
         // cache itself for the sake of one test.
         let Err(err) = SqliteCache::open(dir.db(), 100) else {
