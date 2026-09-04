@@ -160,12 +160,25 @@ jobs:
           key: ${{ runner.os }}-cargo-capture-${{ env.RUSTC_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-capture-${{ env.RUSTC_VERSION }}-
 
-      - name: Install can-utils and psql
-        run: sudo apt-get update && sudo apt-get install -y can-utils postgresql-client
+      # can-utils is the traffic generator; the extras package is what makes
+      # `vcan` exist at all. The runner image does not ship it — the Azure
+      # kernel keeps `vcan` in `linux-modules-extra`, so without this
+      # `modprobe vcan` answers `Module vcan not found in directory
+      # /lib/modules/$(uname -r)` and the whole job is dead on its first
+      # privileged line. It must match the running kernel exactly, which is why
+      # it is `$(uname -r)` and not the `-azure` meta-package: the meta-package
+      # tracks the archive's current kernel, which is not always the one the
+      # runner booted.
+      - name: Install can-utils, psql, and the vcan module
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y can-utils postgresql-client \
+            "linux-modules-extra-$(uname -r)"
 
-      # The whole reason this job exists. An unprivileged process may open an
-      # AF_CAN socket — which is why candump works as a normal user — so this
-      # is the only step here that needs sudo.
+      # The whole reason this job exists. Loading the module and creating the
+      # interface need root; nothing after them does. An unprivileged process
+      # may open an AF_CAN socket — which is why candump works as a normal
+      # user — so `cargo test` below runs without sudo.
       - name: Bring up vcan0
         run: |
           sudo modprobe vcan
