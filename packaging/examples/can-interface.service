@@ -1,0 +1,52 @@
+# EXAMPLE ONLY — not installed, not enabled.
+#
+# Bringing a CAN interface up is the host's job, not this package's, and what a
+# given host needs varies too much to guess: a Pi HAT wants a dtoverlay and a
+# reboot, a USB adapter wants a udev rule, and the bitrate is a property of the
+# vehicle. So this ships as documentation rather than as a unit, and the scope
+# of what the package should eventually own is still open.
+#
+# To use it. Note the rename: a Python deployment of this server already
+# installs a can-interface.service of its own, and copying over it would clobber
+# a working, probably hand-edited interface unit.
+#
+#     cp /usr/share/doc/wiretap-server/examples/can-interface.service \
+#        /etc/systemd/system/wiretap-can0.service
+#     $EDITOR /etc/systemd/system/wiretap-can0.service      # set the bitrate
+#     systemctl daemon-reload
+#     systemctl enable --now wiretap-can0
+#
+# `ip link` needs CAP_NET_ADMIN, so this runs as root. wiretap-server does not:
+# an AF_CAN socket needs no capability once the interface exists.
+
+[Unit]
+Description=Bring up the CAN interface wiretap-server captures from
+# Before, not just After: wiretap-server exits if the interface it was told to
+# open does not exist. It is Restart=always so it would recover, but recovering
+# from an ordering problem on every boot is not a design.
+Before=wiretap-server.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# 500 kbit/s is the common default; the bus decides, and getting it wrong looks
+# like a silent bus rather than an error.
+ExecStart=/sbin/ip link set can0 up type can bitrate 500000
+
+# For CAN FD, instead of the line above:
+# ExecStart=/sbin/ip link set can0 up type can bitrate 500000 dbitrate 2000000 fd on
+
+# A deeper transmit queue than the 10-frame default, which a burst overruns
+# with ENOBUFS.
+# ExecStart=/sbin/ip link set can0 txqueuelen 65536
+
+# For a second bus, add another pair of lines and set [server] iface =
+# "can0,can1" in wiretap-server.toml.
+# ExecStart=/sbin/ip link set can1 up type can bitrate 500000
+
+ExecStop=/sbin/ip link set can0 down
+
+[Install]
+WantedBy=multi-user.target

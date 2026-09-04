@@ -1,0 +1,79 @@
+[Unit]
+Description=WireTAP capture server — SocketCAN to GVRET, archived to a gateway
+Documentation=https://github.com/Wired-Square/WireTAP-Server
+# Not Requires=, and not network-online.target. Capture is the job; the gateway
+# is where frames go afterwards, and a gateway that is unreachable at boot is
+# what the disk cache exists for. Waiting for the network would only delay the
+# one thing that cannot be caught up later.
+After=network.target
+
+[Service]
+Type=exec
+# The config file is named explicitly because the daemon has no default path
+# for one — it reads a config only when passed -C, exactly as the Python did.
+# Everything else stays out of this file: the unit ships inside the package and
+# is replaced on every upgrade, so an edit here is lost silently, where
+# /etc/wiretap-server/wiretap-server.toml is never overwritten once it has
+# something in it.
+#
+# Note the precedence, which is the Python's and is the opposite of most
+# daemons': the FILE overrides the command line. `wiretap-server --check-config
+# -C /etc/wiretap-server/wiretap-server.toml` prints what actually results.
+ExecStart=/usr/bin/wiretap-server -C /etc/wiretap-server/wiretap-server.toml
+
+User=wiretap
+Group=wiretap
+
+# Port 23 is GVRET's default and is privileged. Nothing else here needs a
+# capability: an AF_CAN raw socket does not require CAP_NET_RAW — which is why
+# candump runs as an ordinary user — and the netlink bitrate query needs none
+# either. A deployment on a high port can drop this line entirely.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# systemd creates and owns this, so the daemon never has to mkdir. The disk
+# cache lives here: $STATE_DIRECTORY is what the daemon defaults cache_path
+# from, so the path is declared once rather than here and again in the config.
+StateDirectory=wiretap-server
+StateDirectoryMode=0700
+ConfigurationDirectory=wiretap-server
+
+# The shutdown flush is what empties the batcher into the gateway or the cache,
+# and a full queue at 50 000 frames is not instant. The default 90 s would do;
+# 30 s says the number was chosen.
+TimeoutStopSec=30
+
+# A capture that stops is a capture with a hole in it.
+Restart=always
+RestartSec=5s
+
+# Hardening. The daemon reads CAN sockets, writes one SQLite file, and talks to
+# a gateway over TCP; it has no business doing anything else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# SocketCAN is a network protocol family, not a device node — nothing here
+# opens anything under /dev.
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# AF_CAN is the capture itself. AF_NETLINK is not optional and is the classic
+# omission: the bitrate query that replaced pyroute2 goes through it, and
+# without it every interface reports the 500 kbit/s fallback instead of what it
+# is actually configured for. AF_INET/AF_INET6 are the GVRET listener, the
+# ingest listener and the forward link; AF_UNIX is journald.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_CAN
+
+# Optional, and where the gateway API key and the ingest token belong —
+# WIRETAP_FORWARD_TOKEN and WIRETAP_INGEST_TOKEN — rather than in a config file
+# that is world-readable.
+EnvironmentFile=-/etc/wiretap-server/env
+
+[Install]
+WantedBy=multi-user.target

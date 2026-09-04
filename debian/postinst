@@ -1,0 +1,293 @@
+#!/bin/sh
+# Install or upgrade the WireTAP capture server. Idempotent, and safe to run in
+# a chroot with no PID 1 - which is what an image build is, and is the reason
+# this is a postinst rather than an install script with a new shebang.
+#
+# Everything that talks to a running systemd is behind running_systemd(). What
+# must still happen offline - enabling the unit - goes through
+# deb-systemd-helper, which writes the wants-symlink with no bus.
+
+set -e
+
+USER=wiretap
+CONFIG_DIR=/etc/wiretap-server
+CONFIG_TOML="$CONFIG_DIR/wiretap-server.toml"
+REFERENCE_TOML=/usr/share/wiretap-server/wiretap-server.toml
+STATE_DIR=/var/lib/wiretap-server
+# Must agree with the daemon's own default, which is $STATE_DIRECTORY/cache.db.
+# make-deb.sh asserts that this file and the source still say the same thing.
+CACHE="$STATE_DIR/cache.db"
+LEGACY_CACHE_FILE=.wiretap-server-cache.db
+UNIT=wiretap-server.service
+# The Python deployment installs a unit of THIS NAME here, and /etc outranks
+# /usr/lib.
+LEGACY_UNIT="/etc/systemd/system/$UNIT"
+JOURNALD_DROPIN=/etc/systemd/journald.conf.d/95-wiretap-persistent.conf
+
+running_systemd() { [ -d /run/systemd/system ]; }
+say() { echo "wiretap-server: $*"; }
+warn() { echo "wiretap-server: warning: $*" >&2; }
+
+case "$1" in
+    configure) ;;
+    abort-upgrade|abort-remove|abort-deconfigure) exit 0 ;;
+    *) exit 0 ;;
+esac
+
+# Whether a capture was running before this package touched anything. It is the
+# whole of the start policy at the bottom: restart what was running, never start
+# what was not. That is right for a fresh install (nothing is configured yet),
+# for an upgrade (put it back), for `--reinstall` over a deliberately stopped
+# daemon, and for a reinstall after a remove - none of which `$2` distinguishes.
+was_active=0
+if running_systemd && systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+    was_active=1
+fi
+
+# --- the system user -----------------------------------------------------
+# A system user, not `pi`. The daemon needs no capability to open a CAN socket,
+# so there is nothing here that wants a login or a home directory.
+#
+# Group and user separately, each guarded by its own getent. `adduser --system
+# --group` exits non-zero when a group of that name exists and is not a system
+# group - which a hand-created group, or a previous run that died between the
+# two steps, both produce. Under `set -e` that would abort the whole postinst
+# before the config, the unit or the restart, which is the half-configured
+# package this script goes out of its way to avoid at the bottom.
+if ! getent group "$USER" >/dev/null; then
+    addgroup --system "$USER" 2>/dev/null || groupadd --system "$USER"
+fi
+if ! getent passwd "$USER" >/dev/null; then
+    adduser --system --ingroup "$USER" --no-create-home --home /nonexistent \
+            --gecos "WireTAP capture server" "$USER" 2>/dev/null \
+        || useradd --system --gid "$USER" --no-create-home --home-dir /nonexistent \
+                   --shell /usr/sbin/nologin --comment "WireTAP capture server" "$USER"
+    say "created the system user $USER"
+fi
+
+# --- directories ---------------------------------------------------------
+# systemd's StateDirectory= would create the state directory, but only at first
+# start and only with the mode it had then. Doing it here means the cache
+# migration below has somewhere to land before anything runs.
+install -d -m 0755 "$CONFIG_DIR"
+install -d -m 0700 -o "$USER" -g "$USER" "$STATE_DIR"
+
+# --- displace the Python deployment --------------------------------------
+# The Python's own instructions are `cp wiretap-server.service
+# /etc/systemd/system/`, and it uses this exact unit name. A unit in /etc
+# outranks one in /usr/lib, so without this every systemctl call below would act
+# on the Python's unit: `enable` would enable it, `restart` would restart it,
+# `is-active` would say yes, and the packaged binary would never have run. If it
+# later did start, the Python still holds port 23 and it would crash-loop on
+# RunError::Bind.
+#
+# Stopped before it is moved, so the stop still resolves - and so nothing is
+# writing the disk cache the next block moves.
+displaced=0
+if [ -f "$LEGACY_UNIT" ] && [ ! -L "$LEGACY_UNIT" ]; then
+    if running_systemd; then
+        systemctl stop "$UNIT" >/dev/null 2>&1 || true
+        systemctl disable "$UNIT" >/dev/null 2>&1 || true
+    fi
+    mv "$LEGACY_UNIT" "$LEGACY_UNIT.pre-deb"
+    displaced=1
+    say "moved the previous $LEGACY_UNIT to $LEGACY_UNIT.pre-deb"
+    say "  It ran the Python server and shadowed this package's unit."
+    running_systemd && systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+# --- a cache the old layout left behind ----------------------------------
+# The Python opened ~/.wiretap-server-cache.db as a login user. This unit runs
+# as a system user with ProtectHome=true, so the daemon's own adoption path
+# cannot see a home directory to find one in - which makes this the only place
+# the move can happen, and an upgrade *during* a gateway outage is exactly when
+# it matters. What is in that file is captured data that never reached a sink.
+#
+# Only when the configuration does not name a cache of its own: moving frames to
+# a path the daemon will not open would strand them permanently, and its own
+# $HOME adoption cannot rescue them under this unit.
+configured_cache=0
+grep -qE '^[[:space:]]*cache_path[[:space:]]*=' "$CONFIG_TOML" 2>/dev/null && configured_cache=1
+
+if [ ! -e "$CACHE" ] && [ "$configured_cache" -eq 0 ]; then
+    legacy=""
+    for home in /root /home/*; do
+        [ -f "$home/$LEGACY_CACHE_FILE" ] || continue
+        if [ -n "$legacy" ]; then
+            warn "more than one $LEGACY_CACHE_FILE found; leaving them all alone."
+            warn "  Move the one you want to $CACHE by hand, with its -wal."
+            legacy=""
+            break
+        fi
+        legacy="$home/$LEGACY_CACHE_FILE"
+    done
+
+    if [ -n "$legacy" ]; then
+        # The write-ahead log first, and the database second. In WAL mode the
+        # newest frames are in -wal, so if the second move fails the source is
+        # still a database SQLite can recover - where losing the -wal after
+        # moving the database would leave a file that is missing exactly the
+        # frames this exists to save.
+        #
+        # A failed move is fatal here rather than ignored: a half-moved database
+        # is one the daemon refuses to start on, and it refuses in order to not
+        # capture without an archive.
+        if [ -e "$legacy-wal" ] && ! mv "$legacy-wal" "$CACHE-wal"; then
+            warn "could not move $legacy-wal; leaving the cache where it is"
+        elif ! mv "$legacy" "$CACHE"; then
+            warn "could not move $legacy to $CACHE. Its frames are still there;"
+            warn "  move it and its -wal by hand before starting the daemon."
+        else
+            # The wal-index is deliberately NOT moved. It is transient, and
+            # machine- and build-specific; SQLite rebuilds it from the -wal on
+            # first open, and a stale one is the way a recovery silently
+            # truncates. cache.rs does the same thing for the same reason.
+            rm -f "$legacy-shm"
+            chown "$USER:$USER" "$CACHE" 2>/dev/null || true
+            [ -e "$CACHE-wal" ] && chown "$USER:$USER" "$CACHE-wal" 2>/dev/null || true
+            say "moved $legacy to $CACHE."
+            say "  Those frames never reached a sink. They drain once [forward] is"
+            say "  configured and the daemon starts - not before."
+        fi
+    fi
+fi
+
+# --- the configuration file ----------------------------------------------
+# The unit names this file explicitly, so it is how the daemon is configured.
+#
+# Not a dpkg conffile: a conffile prompts on upgrade, and the answer to "keep
+# yours or take the maintainer's" is always "keep yours" for this. The packaged
+# reference stays at $REFERENCE_TOML to diff against after an upgrade.
+#
+# Written when absent, and also when it exists but sets nothing - a file with
+# no uncommented line in it is not somebody's configuration.
+settings_in() { grep -qE '^[[:space:]]*[^#[:space:]]' "$1" 2>/dev/null; }
+
+wrote_config=0
+if [ ! -e "$CONFIG_TOML" ] || ! settings_in "$CONFIG_TOML"; then
+    [ -e "$CONFIG_TOML" ] && say "replacing $CONFIG_TOML, which set nothing"
+    install -m 0644 "$REFERENCE_TOML" "$CONFIG_TOML"
+    wrote_config=1
+fi
+
+# --- a journal that outlives the capture ---------------------------------
+# A capture server's journal is where "why is there a gap in the archive?" is
+# answered - a bus that went quiet, a gateway outage, a queue that filled. Under
+# journald's default Storage=auto that record lives in /run and does not survive
+# the reboot somebody performs while investigating.
+#
+# The number is the whole of the precedence: journald drop-ins are last-value-
+# wins and merge across /usr/lib, /run and /etc sorted by filename, so 95- sits
+# above the distribution's own files while leaving 99-local.conf to an operator
+# who disagrees. Raspberry Pi OS ships 40-rpi-volatile-storage.conf with
+# Storage=volatile, which is exactly the file this has to beat.
+#
+# `-d /etc/systemd` first, so `install -d` does not create that directory on a
+# host with no systemd at all.
+if [ -d /etc/systemd ] && install -d -m 0755 /etc/systemd/journald.conf.d 2>/dev/null; then
+    cat > "$JOURNALD_DROPIN" <<'EOF'
+# Managed by wiretap-server.
+#
+# The journal is where a gap in the capture archive is explained. With
+# journald's default Storage=auto it lives in /run and is destroyed by the next
+# reboot, which is usually the first thing anybody tries.
+#
+# Drop-ins here are last-value-wins and merge across directories by filename, so
+# the number is the precedence: 95- sits above the distribution's own files. To
+# override this, drop 99-local.conf next to it.
+[Journal]
+Storage=persistent
+SystemMaxUse=64M
+SystemMaxFileSize=8M
+MaxRetentionSec=1month
+EOF
+
+    # Storage=persistent makes journald create this itself, but only at its next
+    # start. Making it now means this boot is already being recorded.
+    install -d -m 2755 /var/log/journal 2>/dev/null || true
+
+    if running_systemd; then
+        # Before the daemon starts, so its own start-up lines land in the
+        # persistent journal rather than the volatile one.
+        systemctl restart systemd-journald >/dev/null 2>&1 || true
+
+        # And the flush, which the restart does not imply: journald will not
+        # move to /var until /run/systemd/journal/flushed exists, the flag
+        # systemd-journal-flush.service writes once at boot. Without this the
+        # change appears to do nothing until the next reboot.
+        journalctl --flush >/dev/null 2>&1 || true
+    fi
+
+    # Verified, not assumed. A higher-numbered drop-in or an operator's own
+    # journald.conf can legitimately beat this; saying so beats a silent no-op.
+    # The LAST Storage= wins, so grepping for our own line proves nothing - that
+    # is exactly how a Pi's volatile default goes unnoticed. Take the effective
+    # value instead.
+    if command -v systemd-analyze >/dev/null 2>&1 \
+       && [ "$(systemd-analyze cat-config systemd/journald.conf 2>/dev/null \
+                | sed -nE 's/^[[:space:]]*Storage=([a-z]+).*/\1/p' \
+                | tail -n 1)" != "persistent" ]; then
+        warn "something else sets journald's Storage=, so this host's record of a"
+        warn "  capture gap may not survive a reboot. Check:"
+        warn "  systemd-analyze cat-config systemd/journald.conf"
+    fi
+else
+    say "no /etc/systemd/journald.conf.d here, so the journal is left as it is"
+fi
+
+# --- the unit ------------------------------------------------------------
+# deb-systemd-helper writes the multi-user.target.wants symlink with no bus, so
+# this half works in an image-build chroot as well as on a real boot.
+if command -v deb-systemd-helper >/dev/null 2>&1; then
+    deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
+    deb-systemd-helper enable "$UNIT" >/dev/null 2>&1 || true
+else
+    warn "deb-systemd-helper not found; enabling the unit by hand"
+    if running_systemd; then
+        systemctl enable "$UNIT" >/dev/null 2>&1 || true
+    fi
+fi
+
+if ! running_systemd; then
+    say "no systemd here (image-build chroot) - unit enabled, not started"
+    exit 0
+fi
+
+systemctl daemon-reload || true
+
+if [ "$displaced" -eq 1 ]; then
+    # Deliberately not started. The Python that was just stopped knew where it
+    # archived to and this package does not: starting now would most likely give
+    # a GVRET bridge quietly archiving nowhere, in place of a capture that was
+    # working. That is a decision for whoever knows the gateway.
+    say "the Python capture has been STOPPED and this daemon has NOT been started."
+    say "  Carry its settings across - the old unit's ExecStart names its config -"
+    say "  into $CONFIG_TOML, then:"
+    say "      wiretap-server --check-config -C $CONFIG_TOML"
+    say "      systemctl start wiretap-server"
+elif [ "$was_active" -eq 1 ]; then
+    # `restart`, not `enable --now`. `--now` only *starts* a stopped unit, so on
+    # an upgrade it installs the new binary and leaves the old one running -
+    # which is how a fix ships and never executes.
+    systemctl restart "$UNIT" || true
+
+    sleep 2
+    if systemctl is-active --quiet "$UNIT"; then
+        say "running"
+    else
+        # Deliberately not fatal. A postinst that exits non-zero leaves the
+        # package half-configured and blocks the next apt run, which is a worse
+        # place to be than a daemon that is down and says why.
+        warn "wiretap-server.service did not start:"
+        journalctl -u "$UNIT" -n 20 --no-pager >&2 2>/dev/null || true
+    fi
+elif [ "$wrote_config" -eq 1 ]; then
+    say "installed and enabled, not started."
+    say "  Edit $CONFIG_TOML - at least [server] iface and [forward] - then:"
+    say "      wiretap-server --check-config -C $CONFIG_TOML"
+    say "      systemctl start wiretap-server"
+else
+    say "installed and enabled. It was not running, so it has not been started."
+fi
+
+exit 0

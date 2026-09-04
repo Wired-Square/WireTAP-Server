@@ -25,9 +25,10 @@ capture, the GVRET bridge, archiving to a gateway, the disk cache that carries a
 and the listener for pushed frames — but it has not been through the field validation that
 earns the switch, so the Python is still what a deployment should run.
 
-**Nothing is packaged yet.** The Debian packages — `wiretap-server` and `wiretap-web` as
-static musl binaries for amd64 and arm64, installable on any distribution with systemd —
-arrive with the first tagged release, along with a multi-architecture gateway image.
+**The capture server is packaged; nothing is published yet.** `packaging/make-deb.sh
+--arch all` builds `wiretap-server` as a static musl `.deb` for arm64 and amd64,
+installable on any distribution with systemd. Published `.deb` files, the `wiretap-web`
+package and a multi-architecture gateway image arrive with the first tagged release.
 
 ## Running the gateway
 
@@ -72,6 +73,18 @@ and CI executes them against a virtual bus. On any Linux host:
 sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && sudo ip link set up vcan0
 cargo test -p wiretap-server --test vcan_loopback -- --ignored --test-threads=1
 ```
+
+## Packaging
+
+```sh
+packaging/make-deb.sh --arch all      # target/deb/wiretap-server_<version>_<arch>.deb
+```
+
+Needs `cargo-zigbuild`, `zig` and `dpkg-deb`, and runs on macOS as well as Linux — nothing
+is compiled by the packaging itself. The script refuses to build a package that could not
+work: it checks the unit's `ExecStart`, the address families the CAN socket and the bitrate
+query need, the ELF architecture, that the musl target actually took, and a size floor that
+catches SQLite being dead-code-eliminated.
 
 ## Licence
 

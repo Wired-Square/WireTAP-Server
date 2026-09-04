@@ -4,9 +4,11 @@
 //! **The file overrides the flags**, not the other way round. That is what the
 //! Python did — `apply_config_overrides` writes file values over the parsed
 //! arguments — and deployed units pass both, so reversing it would silently
-//! change what running systems do. The shipped `wiretap-server.toml` header
-//! claims the opposite; `--check-config` exists so the result is inspectable
-//! rather than argued about.
+//! change what running systems do. The Python's own
+//! `tools/oracle/wiretap-server.toml` header claims the opposite;
+//! `packaging/wiretap-server.toml`, the one this repo ships, states it
+//! correctly. `--check-config` exists so the result is inspectable rather than
+//! argued about either way.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -92,12 +94,16 @@ fn legacy_cache_path(in_use: &Path, env: &Env) -> Option<PathBuf> {
 /// Where the disk cache lives, given whatever was configured.
 ///
 /// `$STATE_DIRECTORY` before `$HOME` is a deliberate move: the Python opened
-/// `~/.wiretap-server-cache.db` unconditionally, and the shipped unit sets
+/// `~/.wiretap-server-cache.db` unconditionally, and its own unit set
 /// `ProtectHome=read-only`, so anyone running that unit with archiving on had
 /// already edited it or was not using it. Under `StateDirectory=` the default
 /// lands somewhere the unit can actually write. An existing `$HOME` cache is
 /// still found when there is no state directory, so a hand-run upgrade does not
 /// strand one.
+///
+/// The packaged unit goes further and sets `ProtectHome=true`, which hides
+/// `$HOME` entirely — so under it the adoption below can never fire, and
+/// `debian/postinst` moves a legacy cache across before the daemon first runs.
 fn cache_path(configured: Option<&str>, env: &Env) -> PathBuf {
     if let Some(p) = configured.or(env.cache_path.as_deref()) {
         return PathBuf::from(p);

@@ -1,0 +1,64 @@
+#!/bin/sh
+set -e
+
+USER=wiretap
+CONFIG_DIR=/etc/wiretap-server
+STATE_DIR=/var/lib/wiretap-server
+UNIT=wiretap-server.service
+JOURNALD_DROPIN=/etc/systemd/journald.conf.d/95-wiretap-persistent.conf
+
+case "$1" in
+    remove)
+        rm -f "$JOURNALD_DROPIN"
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper mask "$UNIT" >/dev/null 2>&1 || true
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl restart systemd-journald >/dev/null 2>&1 || true
+        fi
+        ;;
+
+    purge)
+        rm -f "$JOURNALD_DROPIN"
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper purge "$UNIT" >/dev/null 2>&1 || true
+            deb-systemd-helper unmask "$UNIT" >/dev/null 2>&1 || true
+        fi
+
+        # The configuration, and the environment file with the gateway API key
+        # in it. Purge means purge, so they go.
+        if [ -d "$CONFIG_DIR" ]; then
+            echo "wiretap-server: removing $CONFIG_DIR (configuration, and any"
+            echo "wiretap-server:   environment file holding the gateway API key)"
+            rm -rf "$CONFIG_DIR"
+        fi
+
+        # The state directory is deliberately NOT removed, against Debian
+        # convention. It holds the disk cache, and that cache is only ever
+        # non-empty when it is carrying captured frames that never reached the
+        # gateway. Losing those to an apt command is worse than an orphaned
+        # directory - and this is exactly the moment somebody is removing a
+        # package because something is already wrong.
+        if [ -d "$STATE_DIR" ]; then
+            echo "wiretap-server: $STATE_DIR kept. If cache.db is not empty it holds"
+            echo "wiretap-server:   captured frames that never reached the gateway."
+            echo "wiretap-server:   Remove it by hand if you mean to."
+        fi
+
+        # /var/log/journal is not removed either: it holds the record of this
+        # removal, and of whatever the capture was doing beforehand. Deleting
+        # logs as a side effect of removing a package is backwards.
+
+        if getent passwd "$USER" >/dev/null 2>&1; then
+            deluser --quiet --system "$USER" >/dev/null 2>&1 \
+                || userdel "$USER" >/dev/null 2>&1 || true
+        fi
+        if getent group "$USER" >/dev/null 2>&1; then
+            delgroup --quiet --system "$USER" >/dev/null 2>&1 \
+                || groupdel "$USER" >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0

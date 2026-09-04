@@ -1,0 +1,118 @@
+# WireTAP capture server.
+#
+# The systemd unit runs:
+#
+#     wiretap-server -C /etc/wiretap-server/wiretap-server.toml
+#
+# so this file is where the daemon is configured. Edit it, then
+# `systemctl restart wiretap-server`.
+#
+# PRECEDENCE: this file overrides the command line, which is the opposite of
+# most daemons. It is what the Python did and deployed units pass both, so it
+# was kept rather than quietly reversed. To see what a change actually resolves
+# to, without starting anything:
+#
+#     wiretap-server --check-config -C /etc/wiretap-server/wiretap-server.toml
+#
+# EVERY SETTING IS COMMENTED OUT EXCEPT `iface`, deliberately. A key written
+# here is pinned on this machine forever - this file is never overwritten once
+# it has anything in it, so a value that merely restates today's default would
+# silently keep it across an upgrade that changed it. Uncomment what you mean to
+# control. `--help` documents every setting; the defaults shown here are what
+# you get by saying nothing.
+#
+# Unrecognised keys are warned about and ignored rather than refused, so a file
+# from an older install still starts. The exception is `[postgres].enable =
+# true`, which is refused - the server no longer writes to PostgreSQL, and
+# ignoring it would archive nothing while looking healthy. Set `[forward]`.
+
+[server]
+# SocketCAN interface(s), comma-separated for several buses. The interface must
+# already be up: see
+# /usr/share/doc/wiretap-server/examples/can-interface.service.
+#
+# EMPTY ("") is an ingest-only deployment - a collection host with no CAN
+# hardware of its own, fed by devices that push to [ingest].
+iface = "can0"
+
+# host = "0.0.0.0"       # where the GVRET listener binds
+# port = 23              # privileged; the unit grants CAP_NET_BIND_SERVICE
+# bus_offset = 0         # first interface becomes bus N, for matching an
+#                        # existing numbering across several servers
+# can_fd = false         # the interface must be configured for FD too
+# default_dir = "rx"     # direction recorded for captured frames
+# echo_console = false   # frames to the journal in candump format; loud
+# colour = false         # highlight printable ASCII in that echo
+
+[forward]
+# Where frames are archived: a WireTAP gateway, over the binary ingest
+# protocol. This is the only sink - the gateway owns the database.
+#
+# Without it the server is still a GVRET bridge, it just keeps nothing. It says
+# so at startup rather than looking like it is archiving.
+enable = false
+# host = "backend.example"
+# port = 9323
+
+# An API key with the "ingest" role. PREFER WIRETAP_FORWARD_TOKEN in
+# /etc/wiretap-server/env, which need not be world-readable, over putting it
+# here.
+# api_key = ""
+
+# Target capture database. Empty uses the gateway's default; a name it does not
+# know is created where the gateway permits it, so a new server can provision
+# its own on first connect.
+# database = ""
+
+# --- batching, and the cache that carries a gateway outage ---------------
+# These configure the batcher, not the connection. They are spelled --pg-* on
+# the command line because the Python's forward sink inherited them from its
+# PostgreSQL writer, and deployed units pass them.
+#
+# batch_size = 500       # frames per batch sent to the gateway
+# flush_interval = 0.5   # seconds to wait for a batch to fill
+# queue_size = 50000     # frames held in memory before the queue drops. Watch
+#                        # the journal for "queue high water"
+# cache_max_mb = 1000    # how large the disk cache may grow. Counts the
+#                        # write-ahead log, where an outage's frames actually are
+# queue_flush_pct = 50   # occupancy at which frames spill to disk early, so a
+#                        # recovery draining the cache cannot overflow behind it
+
+# Where frames wait when the gateway is unreachable. The default is
+# $STATE_DIRECTORY/cache.db, which the unit's StateDirectory= puts at
+# /var/lib/wiretap-server/cache.db.
+#
+# MOVING IT NEEDS A UNIT DROP-IN. The unit sets ProtectSystem=strict, so the
+# state directory is the only writable path the daemon has; any other location
+# fails read-only and the daemon refuses to start rather than capture without an
+# archive. To put the cache on other media:
+#
+#     systemctl edit wiretap-server
+#     [Service]
+#     ReadWritePaths=/mnt/capture
+#
+# cache_path = "/mnt/capture/cache.db"
+
+[ingest]
+# A binary TCP listener for capture devices pushing frames to this host. The
+# wire format is /usr/share/doc/wiretap-server/ingest-protocol.md.
+#
+# It requires [forward]: accepting a batch, acknowledging it and then having
+# nowhere to put it is the one thing at-least-once delivery must never do, so
+# the server refuses that combination rather than losing frames a device
+# believes are safe.
+enable = false
+# host = "0.0.0.0"
+# port = 9323
+
+# Shared token clients send in their HELLO; empty disables authentication.
+# PREFER WIRETAP_INGEST_TOKEN in /etc/wiretap-server/env.
+# token = ""
+
+# keepalive_secs = 30      # clients silent for three times this are dropped
+# max_batch_frames = 256   # a full classic-CAN batch is about 4.6 KB, which is
+#                          # the constraint at the device end
+
+[logging]
+# level = "INFO"        # DEBUG is frame-level and very loud on a busy bus
+# stats_interval = 10   # seconds between stats lines; 0 disables them

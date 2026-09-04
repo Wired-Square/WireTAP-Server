@@ -1,0 +1,32 @@
+Source: wiretap-server
+Section: admin
+Priority: optional
+Maintainer: Alex Ferrara <alex@wiredsquare.com>
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/Wired-Square/WireTAP-Server
+
+Package: wiretap-server
+Architecture: any
+Depends: init-system-helpers (>= 1.54), adduser
+Suggests: can-utils
+Description: captures CAN bus traffic and archives it to a WireTAP gateway
+ wiretap-server reads frames from a Linux host's SocketCAN interfaces, bridges
+ them live to GVRET clients - the WireTAP desktop application and SavvyCAN -
+ and forwards them to a WireTAP gateway for archiving. It also accepts frames
+ pushed by microcontroller capture devices over a binary protocol, so a host
+ with no CAN hardware of its own can still be the collection point for several
+ that have.
+ .
+ A gateway outage does not cost frames. They spill to a local SQLite cache and
+ drain in capture order when it comes back, ahead of whatever arrived in the
+ meantime.
+ .
+ The binary is statically linked against musl, so this package declares no
+ library dependencies and installs on any distribution with systemd.
+ init-system-helpers is for deb-systemd-helper, which is how the unit is
+ enabled where dpkg runs and systemd does not - an image-build chroot; adduser
+ is what creates the system account the daemon runs as.
+ can-utils is only suggested: candump and cansend are what the troubleshooting
+ documentation reaches for, but an ingest-only deployment has no local CAN
+ hardware to point them at and should not be made to carry them.

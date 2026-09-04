@@ -116,6 +116,32 @@ All notable changes to this project are documented here. Entries go under
   server refuses to start on, so they could never have taken effect.
 - `docs/porting-notes.md` — where the Rust deviates from the Python, and the quirks
   replicated deliberately rather than fixed mid-port.
+- Debian packaging for `wiretap-server`: `debian/` and `packaging/make-deb.sh`, building a
+  static musl `.deb` for arm64 and amd64 from a macOS or Linux host. The Python it replaces
+  had no packaging at all — it was deployed by copying a script and a unit into a home
+  directory — and two consequences of that shape are what the maintainer scripts spend most
+  of their length on. Its unit lives at `/etc/systemd/system/wiretap-server.service`, the
+  same name this package installs under `/usr/lib`, and `/etc` wins: left alone it would
+  shadow the package entirely, so `systemctl` would keep acting on the Python and report it
+  healthy while the packaged binary never ran. And its disk cache is under `$HOME`, which
+  the new unit's `ProtectHome=true` hides — so the daemon's own adoption path cannot reach
+  it, and the postinst moves it, with its write-ahead log and without its wal-index, before
+  anything starts. A cache is only ever non-empty when it holds frames that never reached a
+  gateway.
+- `make-deb.sh` fails the build rather than shipping a package that cannot work: the unit
+  must name `/usr/bin` and pass `-C`, because the daemon has no default config path and
+  would otherwise never read the file the postinst writes; `RestrictAddressFamilies=` must
+  carry `AF_CAN` and `AF_NETLINK`; the ELF `e_machine` byte must match the architecture
+  asked for, so a stale binary from a previous `--arch` cannot ship; there must be no
+  `ld-linux` interpreter, proving the musl target took; and the binary must clear a size
+  floor, because SQLite compiled, linked and then dead-code-eliminated is a build that looks
+  fine and cannot survive an outage. The install paths are asserted to agree across the
+  unit, the postinst and `settings.rs`, none of which would notice at runtime if they
+  diverged.
+- The shipped `/etc/wiretap-server/wiretap-server.toml` comments out every setting except
+  the interface. A value written there is pinned on that machine forever — the postinst
+  never overwrites a config that sets anything — so restating today's defaults would freeze
+  them silently across an upgrade that changed them.
 - CI, and with it the first execution of the capture path. `source/socketcan.rs` and the
   CAN half of `pipeline.rs` are Linux-only, and there is no `vcan` on macOS nor in Docker
   Desktop's kernel — so around 250 lines of this server had been compiled and reviewed but
@@ -212,9 +238,10 @@ All notable changes to this project are documented here. Entries go under
 
 ### Notes
 
-- Nothing is packaged yet. The `.deb` files and a published multi-architecture gateway
-  image arrive with the first tagged release; until then the gateway is built from source
-  by its own Compose stack, as before.
+- Nothing is published yet. `packaging/make-deb.sh` builds the capture server's `.deb`
+  locally; published `.deb` files and a multi-architecture gateway image arrive with the
+  first tagged release, and until then the gateway is built from source by its own Compose
+  stack, as before.
 - The Docker stack is verified on Apple Silicon (native arm64): image builds in ~46 s,
   both services healthy, `smoke_test.sh` 29/29 and the ingest conformance suite 12/12.
   `smoke_test.sh` needs a seeded database first — see the gateway's README.
