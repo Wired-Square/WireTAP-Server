@@ -239,6 +239,18 @@ pub struct Running {
     pub worker: tokio::task::JoinHandle<()>,
 }
 
+impl Running {
+    /// Stop the archive and wait for it to flush what it still holds.
+    ///
+    /// A method rather than two lines at each call site, because the order is
+    /// the whole of it: dropping the producer is what tells the batcher to
+    /// finish, so it has to happen before the await or this waits forever.
+    pub async fn shutdown(self) -> Result<(), tokio::task::JoinError> {
+        drop(self.frames);
+        self.worker.await
+    }
+}
+
 /// Open the disk cache, adopt anything an older install left behind, and start
 /// forwarding to the gateway.
 ///
@@ -411,7 +423,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
             get(&c.dropped),
             if self.connected { "up" } else { "down" },
         );
-        let pending = blocking(|| self.cache.count()).unwrap_or(0);
+        let pending = self.cache.count().unwrap_or(0);
         if pending > 0 || get(&c.cached) > 0 {
             line.push_str(&format!(
                 " cached={} cache_recovered={} cache_pending={pending}",
@@ -470,20 +482,20 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// cache must never stop a capture; frames keep flowing to the gateway
     /// while it is unhappy.
     async fn drain_cache(&mut self) -> Result<bool, SinkError> {
-        // Asked first because it is a field read, where `oldest` is a query, a
-        // `block_in_place` hand-off and a batch-sized allocation — thirty times
-        // a second on a server that has never cached anything.
-        let empty = blocking(|| self.cache.count()).is_ok_and(|n| n == 0);
+        // A field read, where `oldest` is a query and a batch-sized
+        // allocation — thirty times a second on a server that has never cached
+        // anything. Mid-drain it falls through, so the empty read below still
+        // runs the cleanup that ends the drain.
+        let pending = self.cache.count().unwrap_or(1);
+        if !self.draining_cache && pending == 0 {
+            return Ok(false);
+        }
         let batch_size = self.batch_size;
-        let cached = if empty {
-            Vec::new()
-        } else {
-            match blocking(|| self.cache.oldest(batch_size)) {
-                Ok(cached) => cached,
-                Err(e) => {
-                    error!("disk cache read error: {e}");
-                    return Ok(false);
-                }
+        let cached = match blocking(|| self.cache.oldest(batch_size)) {
+            Ok(cached) => cached,
+            Err(e) => {
+                error!("disk cache read error: {e}");
+                return Ok(false);
             }
         };
 
@@ -499,8 +511,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         }
         if !self.draining_cache {
             self.draining_cache = true;
-            let count = blocking(|| self.cache.count()).unwrap_or(cached.len() as u64);
-            info!("draining {count} cached frames to database");
+            info!("draining {pending} cached frames to database");
         }
 
         let frames: Vec<Arc<CanSample>> = cached.iter().map(|c| Arc::clone(&c.sample)).collect();
@@ -624,7 +635,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         }
         self.sink.close().await;
 
-        let pending = blocking(|| self.cache.count()).unwrap_or(0);
+        let pending = self.cache.count().unwrap_or(0);
         let c = &self.counters;
         info!(
             "closed: wrote={} cached={} recovered={} dropped={} pending_in_cache={pending}",

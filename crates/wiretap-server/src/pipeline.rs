@@ -225,8 +225,7 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
     // this has to outlive the reader tasks — which the runtime drops when this
     // returns. `TimeoutStopSec` in the unit is what gives the flush room.
     if let Some(archive) = archive {
-        drop(archive.frames);
-        let _ = archive.worker.await;
+        let _ = archive.shutdown().await;
     }
     Ok(())
 }

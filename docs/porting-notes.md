@@ -81,15 +81,19 @@ Three `debug` lines are gone, being progress chatter the Rust states once
 three are new, all naming a disk-cache failure the Python swallowed: a failed
 read, delete or reset.
 
-### A cache left in `$HOME` is adopted, then removed
+### A cache left in `$HOME` is taken over, then removed
 
 Because the default moved, an upgrade would otherwise strand whatever an outage
-had put in `~/.wiretap-server-cache.db`. At startup, before a frame is
-enqueued, that file is drained into the configured cache a thousand frames at a
-time — deleting as it goes, so an interrupted transfer resumes rather than
-duplicating — and then removed. Draining it *first* is what keeps the archive's
-order intact: those frames are older than anything this run will capture, and
-the batcher already sends the cache ahead of the queue.
+had put in `~/.wiretap-server-cache.db`. At startup, before a frame is enqueued,
+that file becomes the cache: on the ordinary upgrade — an empty destination
+created moments earlier — it is a `rename`, and otherwise its rows are copied a
+thousand at a time, deleted as they go so an interrupted transfer resumes rather
+than duplicating. Either way the old file is then removed.
+
+Doing it *first* is what keeps the archive's order intact: those frames are
+older than anything this run will capture, and the batcher already sends the
+cache ahead of the queue. `--check-config` reports the file it is about to take
+over, so an upgrade can be inspected before it happens.
 
 ### The disk cache counts its write-ahead log
 

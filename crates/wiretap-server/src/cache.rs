@@ -70,6 +70,11 @@ pub trait FrameCache: Send {
     /// Forget frames that have been written somewhere durable.
     fn remove(&mut self, frames: &[Cached]) -> Result<()>;
 
+    /// How many frames are waiting.
+    ///
+    /// Must be cheap and must not block: the batcher asks on every pass of its
+    /// drain loop, which is tens of times a second, to decide whether to query
+    /// at all.
     fn count(&mut self) -> Result<u64>;
 
     /// Bytes on disk, for comparing against the configured limit.
@@ -147,12 +152,7 @@ impl SqliteCache {
             // then this is a rename rather than every row through Rust and back
             // into SQLite — which on a full cache is minutes of SD card during
             // which nothing is being captured.
-            //
-            // Closing the source first is what checkpoints its write-ahead log
-            // into the database, so the file about to be moved is the whole of
-            // the cache. Opening it at all is load-bearing for that reason.
-            drop(old);
-            if self.take_over(legacy, moved)? {
+            if self.take_over(old)? {
                 return Ok(moved);
             }
             // The rename could not be done — a different mount — so reopen and
@@ -173,29 +173,36 @@ impl SqliteCache {
         Ok(moved)
     }
 
-    /// Replace this cache's file with the one at `source`, which holds `rows`.
+    /// Become the cache `other` holds, by moving its file over this one's.
     ///
     /// Reports whether the rename happened: across filesystems it fails with
     /// `EXDEV` — `$HOME` and `/var/lib` can be different mounts — and the
     /// caller copies instead. An `Err` means something worse, and that this
     /// cache is not usable.
     ///
-    /// The caller must have closed `source` and established that this cache is
-    /// empty, since its contents are about to be discarded.
-    fn take_over(&mut self, source: &Path, rows: u64) -> Result<bool> {
+    /// Taking `other` by value is the precondition, not politeness: the source
+    /// has to be closed before its file is moved, and its row count has to be
+    /// the one that file actually holds. The caller must also have established
+    /// that this cache is empty, since its contents are discarded.
+    fn take_over(&mut self, other: Self) -> Result<bool> {
+        let (source, rows) = (other.path.clone(), other.rows);
+        // Closing the source is what checkpoints its write-ahead log into the
+        // database, so the file about to be moved is the whole of the cache.
+        drop(other);
+
         // Ours closes too, and its sidecars go: they describe a database that
         // is about to be replaced, and SQLite would read them against the new
         // one. The database itself is left for `rename` to replace atomically.
         self.conn = Connection::open_in_memory()?;
-        for suffix in &SIDECARS[1..] {
+        for suffix in SIDECARS {
             let _ = std::fs::remove_file(sidecar(&self.path, suffix));
         }
-        let renamed = std::fs::rename(source, &self.path).is_ok();
+        let renamed = std::fs::rename(&source, &self.path).is_ok();
 
         // Reopened before returning either way, so this cache is usable
         // whichever branch the caller takes. The count is known rather than
-        // measured: `rows` came from the file that was just moved into place,
-        // and a failed rename leaves the empty one the caller started with.
+        // measured: it came from the file that was just moved into place, and a
+        // failed rename leaves the empty one the caller started with.
         self.conn = Self::open_conn(&self.path)?;
         self.rows = if renamed { rows } else { 0 };
         Ok(renamed)
@@ -235,10 +242,15 @@ impl SqliteCache {
     }
 }
 
-/// The database and the two files SQLite keeps beside it. Named once: a caller
-/// that forgets `-wal` reintroduces the size bug `docs/porting-notes.md`
-/// describes.
-const SIDECARS: [&str; 3] = ["", "-wal", "-shm"];
+/// The two files SQLite keeps beside a database in write-ahead-log mode.
+const SIDECARS: [&str; 2] = ["-wal", "-shm"];
+
+/// Every file a cache is made of. Derived from [`SIDECARS`] rather than listing
+/// them again: a caller that forgets `-wal` reintroduces the size bug
+/// `docs/porting-notes.md` describes.
+fn cache_files(path: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    std::iter::once(path.to_path_buf()).chain(SIDECARS.iter().map(|s| sidecar(path, s)))
+}
 
 /// The one full `COUNT(*)`, on opening a file that is empty except on an
 /// upgrade or after an outage.
@@ -249,8 +261,7 @@ fn count_rows(conn: &Connection) -> Result<u64> {
 
 /// Remove the database and its sidecars, tolerating any that are absent.
 fn unlink(path: &Path) -> Result<()> {
-    for suffix in SIDECARS {
-        let f = sidecar(path, suffix);
+    for f in cache_files(path) {
         match std::fs::remove_file(&f) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -379,9 +390,8 @@ impl FrameCache for SqliteCache {
     /// under-reported by however much had not been checkpointed, and
     /// `cache_max_mb` was a number the cache could sail past.
     fn size_bytes(&self) -> u64 {
-        SIDECARS
-            .iter()
-            .filter_map(|s| std::fs::metadata(sidecar(&self.path, s)).ok())
+        cache_files(&self.path)
+            .filter_map(|f| std::fs::metadata(f).ok())
             .map(|m| m.len())
             .sum()
     }
@@ -583,11 +593,8 @@ mod tests {
         let mut c = SqliteCache::open(dir.db(), 100).unwrap();
         c.append(&[sample(1, 1)]).unwrap();
         c.delete().unwrap();
-        for suffix in SIDECARS {
-            assert!(
-                !sidecar(&dir.db(), suffix).exists(),
-                "{suffix:?} was left behind"
-            );
+        for f in cache_files(&dir.db()) {
+            assert!(!f.exists(), "{} was left behind", f.display());
         }
     }
 

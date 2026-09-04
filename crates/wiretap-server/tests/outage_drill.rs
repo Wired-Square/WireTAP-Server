@@ -80,14 +80,13 @@ async fn frames_survive_a_gateway_outage() {
         },
     };
     let running = archive::start(&forward, 2.0).expect("an archive");
-    let archive = running.frames;
-    let counters = archive.counters();
+    let counters = running.frames.counters();
     let base_us = system_time_to_us(SystemTime::now());
 
     println!("--- pushing {FRAMES} frames; stop and start the gateway while this runs ---");
     let started = Instant::now();
     for seq in 0..FRAMES {
-        archive.enqueue(sample(seq, base_us));
+        running.frames.enqueue(sample(seq, base_us));
         // Roughly 500 frames a second, so the run lasts long enough for a
         // gateway to be stopped and started by hand partway through.
         if seq % 50 == 0 {
@@ -99,11 +98,10 @@ async fn frames_survive_a_gateway_outage() {
         started.elapsed()
     );
 
-    // Dropping the producer tells the batcher to flush and stop. If the gateway
-    // is still down it will stop with frames on disk, which the assertions
-    // below then report as the failure it is.
-    drop(archive);
-    tokio::time::timeout(Duration::from_secs(300), running.worker)
+    // Shutting down tells the batcher to flush and stop. If the gateway is
+    // still down it will stop with frames on disk, which the assertions below
+    // then report as the failure it is.
+    tokio::time::timeout(Duration::from_secs(300), running.shutdown())
         .await
         .expect("the batcher finished")
         .unwrap();

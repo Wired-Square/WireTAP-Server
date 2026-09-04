@@ -79,7 +79,8 @@ All notable changes to this project are documented here. Entries go under
   into SQLite; `--check-config` says whether there is one waiting to be adopted.
 - `tests/outage_drill.rs`, ignored by default, runs the drill against a real gateway: push
   ten thousand frames, stop the gateway mid-stream, start it again, and check what landed.
-  Its first real run put 3,700 frames on disk and recovered all of them — ten thousand rows
+  It calls `archive::start` — the same assembly the server runs — so what it proves is what
+  ships. Its real runs put 3,700 frames on disk and recovered all of them: ten thousand rows
   in TimescaleDB, no duplicates, no gaps, and zero inversions in arrival order, which is
   what "the archive's order matches the bus's across the boundary" means when measured.
 - The batcher: a bounded queue, a worker that batches and writes, and the spill-to-disk and
