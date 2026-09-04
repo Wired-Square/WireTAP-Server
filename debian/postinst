@@ -14,9 +14,10 @@ CONFIG_DIR=/etc/wiretap-server
 CONFIG_TOML="$CONFIG_DIR/wiretap-server.toml"
 REFERENCE_TOML=/usr/share/wiretap-server/wiretap-server.toml
 STATE_DIR=/var/lib/wiretap-server
-# Must agree with the daemon's own default, which is $STATE_DIRECTORY/cache.db.
-# make-deb.sh asserts that this file and the source still say the same thing.
-CACHE="$STATE_DIR/cache.db"
+# Where a cache found under a home directory is left for the daemon to adopt.
+# Both names are the daemon's, not this script's; make-deb.sh asserts that this
+# file and settings.rs still agree about them.
+STAGED_CACHE="$STATE_DIR/adopt.db"
 LEGACY_CACHE_FILE=.wiretap-server-cache.db
 UNIT=wiretap-server.service
 # The Python deployment installs a unit of THIS NAME here, and /etc outranks
@@ -35,10 +36,9 @@ case "$1" in
 esac
 
 # Whether a capture was running before this package touched anything. It is the
-# whole of the start policy at the bottom: restart what was running, never start
-# what was not. That is right for a fresh install (nothing is configured yet),
-# for an upgrade (put it back), for `--reinstall` over a deliberately stopped
-# daemon, and for a reinstall after a remove - none of which `$2` distinguishes.
+# whole of the start policy at the bottom - restart what was running, never
+# start what was not - and it is right for every case dpkg's `$2` cannot tell
+# apart, `--reinstall` over a deliberately stopped daemon among them.
 was_active=0
 if running_systemd && systemctl is-active --quiet "$UNIT" 2>/dev/null; then
     was_active=1
@@ -76,10 +76,9 @@ install -d -m 0700 -o "$USER" -g "$USER" "$STATE_DIR"
 # The Python's own instructions are `cp wiretap-server.service
 # /etc/systemd/system/`, and it uses this exact unit name. A unit in /etc
 # outranks one in /usr/lib, so without this every systemctl call below would act
-# on the Python's unit: `enable` would enable it, `restart` would restart it,
-# `is-active` would say yes, and the packaged binary would never have run. If it
-# later did start, the Python still holds port 23 and it would crash-loop on
-# RunError::Bind.
+# on the Python's unit rather than this package's - reporting it healthy while
+# the packaged binary had never run. And if the new daemon later did start, the
+# Python would still hold port 23, so it would crash-loop on RunError::Bind.
 #
 # Stopped before it is moved, so the stop still resolves - and so nothing is
 # writing the disk cache the next block moves.
@@ -93,62 +92,53 @@ if [ -f "$LEGACY_UNIT" ] && [ ! -L "$LEGACY_UNIT" ]; then
     displaced=1
     say "moved the previous $LEGACY_UNIT to $LEGACY_UNIT.pre-deb"
     say "  It ran the Python server and shadowed this package's unit."
-    running_systemd && systemctl daemon-reload >/dev/null 2>&1 || true
+    # No daemon-reload here: nothing between this and the one below needs
+    # systemd to have re-read anything, and on a Pi a full re-parse of every
+    # unit on the system is not free.
 fi
 
 # --- a cache the old layout left behind ----------------------------------
-# The Python opened ~/.wiretap-server-cache.db as a login user. This unit runs
-# as a system user with ProtectHome=true, so the daemon's own adoption path
-# cannot see a home directory to find one in - which makes this the only place
-# the move can happen, and an upgrade *during* a gateway outage is exactly when
-# it matters. What is in that file is captured data that never reached a sink.
+# The Python opened ~/.wiretap-server-cache.db as a login user, and this unit
+# runs as a system user with ProtectHome=true - so the daemon cannot see a home
+# directory to find one in, and an upgrade *during* a gateway outage is exactly
+# when that matters. What is in that file is captured data that never reached a
+# sink.
 #
-# Only when the configuration does not name a cache of its own: moving frames to
-# a path the daemon will not open would strand them permanently, and its own
-# $HOME adoption cannot rescue them under this unit.
-configured_cache=0
-grep -qE '^[[:space:]]*cache_path[[:space:]]*=' "$CONFIG_TOML" 2>/dev/null && configured_cache=1
+# Finding it is this script's job, because only root can look in every home and
+# only a human can be told that two of them is ambiguous. MERGING it is not:
+# cache.rs::adopt already drains one cache into another in order, resumes if it
+# is interrupted, and is tested. So this moves the file to where the daemon
+# looks and stops there.
+legacy=""
+found=0
+for home in /root /home/*; do
+    [ -f "$home/$LEGACY_CACHE_FILE" ] || continue
+    found=$((found + 1))
+    legacy="$home/$LEGACY_CACHE_FILE"
+done
 
-if [ ! -e "$CACHE" ] && [ "$configured_cache" -eq 0 ]; then
-    legacy=""
-    for home in /root /home/*; do
-        [ -f "$home/$LEGACY_CACHE_FILE" ] || continue
-        if [ -n "$legacy" ]; then
-            warn "more than one $LEGACY_CACHE_FILE found; leaving them all alone."
-            warn "  Move the one you want to $CACHE by hand, with its -wal."
-            legacy=""
-            break
-        fi
-        legacy="$home/$LEGACY_CACHE_FILE"
-    done
-
-    if [ -n "$legacy" ]; then
-        # The write-ahead log first, and the database second. In WAL mode the
-        # newest frames are in -wal, so if the second move fails the source is
-        # still a database SQLite can recover - where losing the -wal after
-        # moving the database would leave a file that is missing exactly the
-        # frames this exists to save.
-        #
-        # A failed move is fatal here rather than ignored: a half-moved database
-        # is one the daemon refuses to start on, and it refuses in order to not
-        # capture without an archive.
-        if [ -e "$legacy-wal" ] && ! mv "$legacy-wal" "$CACHE-wal"; then
-            warn "could not move $legacy-wal; leaving the cache where it is"
-        elif ! mv "$legacy" "$CACHE"; then
-            warn "could not move $legacy to $CACHE. Its frames are still there;"
-            warn "  move it and its -wal by hand before starting the daemon."
-        else
-            # The wal-index is deliberately NOT moved. It is transient, and
-            # machine- and build-specific; SQLite rebuilds it from the -wal on
-            # first open, and a stale one is the way a recovery silently
-            # truncates. cache.rs does the same thing for the same reason.
-            rm -f "$legacy-shm"
-            chown "$USER:$USER" "$CACHE" 2>/dev/null || true
-            [ -e "$CACHE-wal" ] && chown "$USER:$USER" "$CACHE-wal" 2>/dev/null || true
-            say "moved $legacy to $CACHE."
-            say "  Those frames never reached a sink. They drain once [forward] is"
-            say "  configured and the daemon starts - not before."
-        fi
+if [ "$found" -gt 1 ]; then
+    warn "more than one $LEGACY_CACHE_FILE found; leaving them all alone."
+    warn "  Move the one you want to $STAGED_CACHE by hand, with its -wal."
+elif [ "$found" -eq 1 ] && [ ! -e "$STAGED_CACHE" ]; then
+    # The write-ahead log first. In WAL mode the newest frames are in -wal, so
+    # if the second move fails the source is still a database SQLite can
+    # recover - where losing the -wal after moving the database would leave a
+    # file missing exactly the frames this exists to save.
+    if [ -e "$legacy-wal" ] && ! mv "$legacy-wal" "$STAGED_CACHE-wal"; then
+        warn "could not move $legacy-wal; leaving the cache where it is"
+    elif ! mv "$legacy" "$STAGED_CACHE"; then
+        warn "could not move $legacy to $STAGED_CACHE. Its frames are still there;"
+        warn "  move it and its -wal by hand before starting the daemon."
+    else
+        # The wal-index is transient and machine-specific; SQLite rebuilds it
+        # from the -wal, and a stale one is how a recovery silently truncates.
+        rm -f "$legacy-shm"
+        chown "$USER:$USER" "$STAGED_CACHE" 2>/dev/null || true
+        [ -e "$STAGED_CACHE-wal" ] && chown "$USER:$USER" "$STAGED_CACHE-wal" 2>/dev/null || true
+        say "moved $legacy to $STAGED_CACHE."
+        say "  Those frames never reached a sink. The daemon drains them into its"
+        say "  own cache on the next start, once [forward] is configured."
     fi
 fi
 
@@ -161,31 +151,23 @@ fi
 #
 # Written when absent, and also when it exists but sets nothing - a file with
 # no uncommented line in it is not somebody's configuration.
-settings_in() { grep -qE '^[[:space:]]*[^#[:space:]]' "$1" 2>/dev/null; }
-
 wrote_config=0
-if [ ! -e "$CONFIG_TOML" ] || ! settings_in "$CONFIG_TOML"; then
+if ! grep -qE '^[[:space:]]*[^#[:space:]]' "$CONFIG_TOML" 2>/dev/null; then
     [ -e "$CONFIG_TOML" ] && say "replacing $CONFIG_TOML, which set nothing"
     install -m 0644 "$REFERENCE_TOML" "$CONFIG_TOML"
     wrote_config=1
 fi
 
 # --- a journal that outlives the capture ---------------------------------
-# A capture server's journal is where "why is there a gap in the archive?" is
-# answered - a bus that went quiet, a gateway outage, a queue that filled. Under
-# journald's default Storage=auto that record lives in /run and does not survive
-# the reboot somebody performs while investigating.
-#
-# The number is the whole of the precedence: journald drop-ins are last-value-
-# wins and merge across /usr/lib, /run and /etc sorted by filename, so 95- sits
-# above the distribution's own files while leaving 99-local.conf to an operator
-# who disagrees. Raspberry Pi OS ships 40-rpi-volatile-storage.conf with
-# Storage=volatile, which is exactly the file this has to beat.
+# Why, and why 95-, are in the drop-in itself, which is the copy that ships. The
+# file it has to beat is Raspberry Pi OS's
+# /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf, which sets
+# Storage=volatile.
 #
 # `-d /etc/systemd` first, so `install -d` does not create that directory on a
 # host with no systemd at all.
 if [ -d /etc/systemd ] && install -d -m 0755 /etc/systemd/journald.conf.d 2>/dev/null; then
-    cat > "$JOURNALD_DROPIN" <<'EOF'
+    cat > "$JOURNALD_DROPIN.dpkg-new" <<'EOF'
 # Managed by wiretap-server.
 #
 # The journal is where a gap in the capture archive is explained. With
@@ -202,11 +184,21 @@ SystemMaxFileSize=8M
 MaxRetentionSec=1month
 EOF
 
+    # Only when something actually changes. journald has no ExecReload, so
+    # applying this means restarting it - which rotates journal files and drops
+    # logging for a moment. Paying that on every upgrade, to write a file that
+    # is already byte-identical, is the one repeated cost in this script.
+    changed=0
+    cmp -s "$JOURNALD_DROPIN.dpkg-new" "$JOURNALD_DROPIN" || changed=1
+    mv "$JOURNALD_DROPIN.dpkg-new" "$JOURNALD_DROPIN"
+
     # Storage=persistent makes journald create this itself, but only at its next
-    # start. Making it now means this boot is already being recorded.
+    # start. Making it now means this boot is already being recorded - and its
+    # absence is the other reason a restart is still owed.
+    [ -d /var/log/journal ] || changed=1
     install -d -m 2755 /var/log/journal 2>/dev/null || true
 
-    if running_systemd; then
+    if running_systemd && [ "$changed" -eq 1 ]; then
         # Before the daemon starts, so its own start-up lines land in the
         # persistent journal rather than the volatile one.
         systemctl restart systemd-journald >/dev/null 2>&1 || true
@@ -255,23 +247,25 @@ fi
 
 systemctl daemon-reload || true
 
-if [ "$displaced" -eq 1 ]; then
-    # Deliberately not started. The Python that was just stopped knew where it
-    # archived to and this package does not: starting now would most likely give
-    # a GVRET bridge quietly archiving nowhere, in place of a capture that was
-    # working. That is a decision for whoever knows the gateway.
-    say "the Python capture has been STOPPED and this daemon has NOT been started."
-    say "  Carry its settings across - the old unit's ExecStart names its config -"
-    say "  into $CONFIG_TOML, then:"
+how_to_start() {
     say "      wiretap-server --check-config -C $CONFIG_TOML"
     say "      systemctl start wiretap-server"
-elif [ "$was_active" -eq 1 ]; then
+}
+
+if [ "$was_active" -eq 1 ] && [ "$displaced" -eq 0 ]; then
     # `restart`, not `enable --now`. `--now` only *starts* a stopped unit, so on
     # an upgrade it installs the new binary and leaves the old one running -
     # which is how a fix ships and never executes.
     systemctl restart "$UNIT" || true
 
-    sleep 2
+    # Type=exec means `restart` returns once the child is exec'd, so an
+    # immediate is-active passes for a daemon that dies 200 ms later. Poll
+    # rather than sleeping the whole bound: a bad config or a held port 23
+    # surfaces almost at once, and only the happy path waits.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        systemctl is-active --quiet "$UNIT" || break
+        sleep 0.1
+    done
     if systemctl is-active --quiet "$UNIT"; then
         say "running"
     else
@@ -281,13 +275,21 @@ elif [ "$was_active" -eq 1 ]; then
         warn "wiretap-server.service did not start:"
         journalctl -u "$UNIT" -n 20 --no-pager >&2 2>/dev/null || true
     fi
-elif [ "$wrote_config" -eq 1 ]; then
-    say "installed and enabled, not started."
-    say "  Edit $CONFIG_TOML - at least [server] iface and [forward] - then:"
-    say "      wiretap-server --check-config -C $CONFIG_TOML"
-    say "      systemctl start wiretap-server"
+elif [ "$displaced" -eq 1 ]; then
+    # Deliberately not started. The Python that was just stopped knew where it
+    # archived to and this package does not: starting now would most likely give
+    # a GVRET bridge quietly archiving nowhere, in place of a capture that was
+    # working. That is a decision for whoever knows the gateway.
+    say "the Python capture has been STOPPED and this daemon has NOT been started."
+    say "  Carry its settings across - the old unit's ExecStart names its config -"
+    say "  into $CONFIG_TOML, then:"
+    how_to_start
 else
-    say "installed and enabled. It was not running, so it has not been started."
+    say "installed and enabled, not started."
+    if [ "$wrote_config" -eq 1 ]; then
+        say "  Edit $CONFIG_TOML - at least [server] iface and [forward] - then:"
+    fi
+    how_to_start
 fi
 
 exit 0

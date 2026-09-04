@@ -46,7 +46,9 @@ while [ $# -gt 0 ]; do
 				*) echo "unknown architecture: $2 (want arm64, amd64 or all)" >&2; exit 2 ;;
 			esac
 			shift ;;
-		-h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+		# The header above, however long it is: a hardcoded line span silently
+		# truncates the day somebody adds a paragraph to it.
+		-h|--help) awk 'NR>1 { if (!/^#/) exit; print }' "$0"; exit 0 ;;
 		*) echo "unknown argument: $1" >&2; exit 2 ;;
 	esac
 	shift
@@ -54,11 +56,9 @@ done
 
 die() { echo "make-deb: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
-field() {  # field <stanza> <key>
-	printf '%s\n' "$1" | awk -v k="$2" '$0 ~ "^"k": " { sub("^"k": ", ""); print; exit }'
-}
 
 command -v dpkg-deb >/dev/null || die "dpkg-deb not found (macOS: brew install dpkg)"
+command -v dpkg-gencontrol >/dev/null || die "dpkg-gencontrol not found (it ships with dpkg)"
 
 if [ -z "${version}" ]; then
 	version="$(awk '/^\[workspace\.package\]/{f=1} f && /^version[[:space:]]*=/{gsub(/[",]/,"",$3); print $3; exit}' \
@@ -79,6 +79,33 @@ for f in "${UNIT}" "${CONFIG}" "${EXAMPLE}" "${PROTOCOL}"; do
 	[ -f "${f}" ] || die "missing ${f#"${ROOT}"/}"
 done
 
+# --- the install layout ---------------------------------------------------
+# The unit, the postinst and the daemon each name some of these paths, and
+# nothing at runtime notices when they stop agreeing - it just quietly does the
+# wrong thing: a config written where the unit does not look, or an outage's
+# frames moved somewhere the daemon will not open. So each is compared against
+# whichever artefact actually owns it, here, where a mismatch is a failed build.
+REF_PATH=/usr/share/${PKG}/${PKG}.toml
+DOC_DIR=/usr/share/doc/${PKG}
+STAGED_CACHE_FILE=adopt.db
+LEGACY_CACHE_FILE=.wiretap-server-cache.db
+
+maint_var() {  # maint_var <script> <name> — the literal it is assigned
+	sed -n "s/^$2=//p" "${DEBIAN}/$1" | head -1 | tr -d '"'
+}
+same() {  # same <what> <wanted> <got>
+	[ "$2" = "$3" ] || die "the packaging disagrees about $1:
+     wanted ${2}
+     got    ${3}"
+}
+
+CONF_TOML="$(maint_var postinst CONFIG_DIR)/wiretap-server.toml"
+
+# The changelog is installed into the package, so an entry naming a version no
+# package ever has is documentation of a release that does not exist.
+same "the changelog version" "${version}" \
+	"$(dpkg-parsechangelog -l "${DEBIAN}/changelog" -S Version)"
+
 if ! grep -qE '^ExecStart=/usr/bin/wiretap-server( |$)' "${UNIT}"; then
 	die "packaging/${PKG}.service does not ExecStart /usr/bin/wiretap-server.
      The package installs to /usr/bin; a unit naming /usr/local/bin would
@@ -88,9 +115,10 @@ fi
 # The unit passes -C because the daemon has NO default config path - it reads a
 # file only when told to. Drop the flag and the package silently installs a
 # configuration file that nothing ever opens, and the daemon runs on built-in
-# defaults instead.
-if ! grep -qE '^ExecStart=.* -C /etc/wiretap-server/wiretap-server.toml( |$)' "${UNIT}"; then
-	die "packaging/${PKG}.service does not pass -C /etc/wiretap-server/wiretap-server.toml.
+# defaults instead. Checked against the postinst's own value, so this asserts
+# the unit reads the file that is actually written rather than a literal.
+if ! grep -qF -- "-C ${CONF_TOML}" "${UNIT}"; then
+	die "packaging/${PKG}.service does not pass -C ${CONF_TOML}.
      The daemon has no default config path, so without that flag the file the
      postinst writes is never read."
 fi
@@ -104,62 +132,76 @@ for family in AF_CAN AF_NETLINK; do
 		|| die "packaging/${PKG}.service restricts address families without ${family}."
 done
 
-# --- the install layout, declared once ------------------------------------
-# The unit's copy of these paths is asserted above. The postinst has its own,
-# and the daemon has a third in Rust - and nothing at runtime notices when they
-# stop agreeing. It just quietly does the wrong thing: a config written where
-# the unit does not look, or an outage's frames moved somewhere the daemon will
-# not open. So they are compared here, where a mismatch is a failed build.
-CONF_DIR=/etc/wiretap-server
-REF_PATH=/usr/share/${PKG}/${PKG}.toml
-DOC_DIR=/usr/share/doc/${PKG}
-STATE_DIR=/var/lib/${PKG}
-CACHE_FILE=cache.db
-LEGACY_CACHE_FILE=.wiretap-server-cache.db
+# The state directory is the unit's to declare - StateDirectory= is what creates
+# it and what the daemon defaults its cache from - so the postinst is checked
+# against the unit rather than against a third copy here.
+STATE_DIR="$(maint_var postinst STATE_DIR)"
+same "the state directory" \
+	"/var/lib/$(grep -E '^StateDirectory=' "${UNIT}" | head -1 | cut -d= -f2)" \
+	"${STATE_DIR}"
 
-postinst_var() {  # postinst_var <name> — the literal it is assigned
-	sed -n "s/^$1=//p" "${DEBIAN}/postinst" | head -1 | tr -d '"'
-}
-same() {  # same <what> <wanted> <got>
-	[ "$2" = "$3" ] || die "debian/postinst disagrees about $1:
-     make-deb.sh says ${2}
-     postinst says   ${3}"
-}
+same "the packaged reference config" "${REF_PATH}" "$(maint_var postinst REFERENCE_TOML)"
+# Resolved rather than compared as text: the postinst spells this
+# "$STATE_DIR/adopt.db", and a check on the string would fail a rewrite that
+# meant exactly the same path.
+same "the staged cache" "${STATE_DIR}/${STAGED_CACHE_FILE}" \
+	"$(maint_var postinst STAGED_CACHE | sed "s|\$STATE_DIR|${STATE_DIR}|")"
 
-same "the config directory" "${CONF_DIR}"  "$(postinst_var CONFIG_DIR)"
-same "the packaged reference config" "${REF_PATH}" "$(postinst_var REFERENCE_TOML)"
-same "the state directory" "${STATE_DIR}" "$(postinst_var STATE_DIR)"
-same "the legacy cache filename" "${LEGACY_CACHE_FILE}" "$(postinst_var LEGACY_CACHE_FILE)"
-same "the cache path" "\$STATE_DIR/${CACHE_FILE}" "$(postinst_var CACHE)"
+# postrm removes what postinst writes, and neither would notice the other
+# renaming it - a purged package that leaves the drop-in behind goes on forcing
+# Storage=persistent on a host that no longer runs this.
+for v in CONFIG_DIR STATE_DIR UNIT JOURNALD_DROPIN; do
+	same "${v} between postinst and postrm" \
+		"$(maint_var postinst "${v}")" "$(maint_var postrm "${v}")"
+done
 
-# The cache filename is the daemon's, not the packaging's: the postinst moves an
-# outage's frames to a path only `settings.rs` decides. Rename it there and the
-# frames land somewhere nothing opens, silently, during an upgrade mid-outage.
+# Both cache names are the daemon's, not the packaging's: the postinst stages an
+# outage's frames at a path only settings.rs looks for. Rename either there and
+# the frames sit where nothing opens them, silently, after an upgrade mid-outage.
 SETTINGS="${ROOT}/crates/wiretap-server/src/settings.rs"
-grep -qF "join(\"${CACHE_FILE}\")" "${SETTINGS}" \
-	|| die "settings.rs no longer defaults the cache to ${CACHE_FILE};
-     debian/postinst moves a legacy cache to that name."
-grep -qF "\"${LEGACY_CACHE_FILE}\"" "${SETTINGS}" \
-	|| die "settings.rs no longer knows ${LEGACY_CACHE_FILE};
-     debian/postinst still migrates from it."
+for name in "${STAGED_CACHE_FILE}" "${LEGACY_CACHE_FILE}"; do
+	grep -qF "\"${name}\"" "${SETTINGS}" \
+		|| die "settings.rs no longer knows ${name}; debian/postinst still stages to it."
+done
+
+# One table rather than a function per column: an architecture is a rust target
+# and the ELF e_machine that proves the target took, and splitting them means
+# adding one edits two places that have to agree. (183 = AArch64, 62 = x86-64.)
+rust_target() {
+	case "$1" in
+		arm64) echo aarch64-unknown-linux-musl ;;
+		amd64) echo x86_64-unknown-linux-musl ;;
+		*) die "no target mapping for architecture $1" ;;
+	esac
+}
+elf_machine() {
+	case "$1" in
+		arm64) echo 183 ;;
+		amd64) echo 62 ;;
+		*) die "no e_machine mapping for architecture $1" ;;
+	esac
+}
+
+# Every requested target, before any of them compiles. The tree-level checks
+# above already follow this rule; a toolchain check inside the per-architecture
+# loop would report a missing amd64 target only after arm64 had built, which is
+# the whole build wasted to say something knowable up front.
+if [ "${skip_build}" -eq 0 ]; then
+	command -v cargo-zigbuild >/dev/null || die "cargo-zigbuild not found (brew install cargo-zigbuild zig)"
+	installed="$(rustup target list --installed 2>/dev/null)"
+	for a in "${arches[@]}"; do
+		t="$(rust_target "${a}")"
+		grep -qx "${t}" <<<"${installed}" \
+			|| die "rust target ${t} not installed - rustup target add ${t}"
+	done
+fi
 
 build_arch() {  # build_arch <arch>
 	local arch="$1" target machine
-	# One table rather than a function per column: an architecture is a rust
-	# target and the ELF e_machine that proves the target took, and splitting
-	# them means adding one edits two places that have to agree.
-	# (183 = AArch64, 62 = x86-64.)
-	case "${arch}" in
-		arm64) target=aarch64-unknown-linux-musl; machine=183 ;;
-		amd64) target=x86_64-unknown-linux-musl;  machine=62 ;;
-		*) die "no target mapping for architecture ${arch}" ;;
-	esac
+	target="$(rust_target "${arch}")"
+	machine="$(elf_machine "${arch}")"
 
 	if [ "${skip_build}" -eq 0 ]; then
-		command -v cargo-zigbuild >/dev/null || die "cargo-zigbuild not found (brew install cargo-zigbuild zig)"
-		rustup target list --installed 2>/dev/null | grep -qx "${target}" \
-			|| die "rust target ${target} not installed - rustup target add ${target}"
-
 		# Per-crate, not as a workspace: cargo unifies features across a
 		# workspace, so a workspace build would resolve shared crates with the
 		# gateway's feature set and link a TLS stack and a Postgres client into
@@ -182,11 +224,11 @@ build_arch() {  # build_arch <arch>
 
 	# Dynamically linked would mean the musl target silently did not take, and
 	# the binary would not run on a host whose glibc does not match. A static
-	# ELF has no PT_INTERP, so there is no interpreter string in it.
-	if command -v strings >/dev/null 2>&1; then
-		if strings -a "${bin}" 2>/dev/null | grep -qE '^/lib.*ld-linux'; then
-			die "[${arch}] ${PKG} looks dynamically linked - the musl target did not take"
-		fi
+	# ELF has no PT_INTERP, so there is no interpreter string in it. `grep -a`
+	# reads the binary directly, where `strings` would rebuild it as text first
+	# to answer the same question.
+	if grep -qa 'ld-linux' "${bin}"; then
+		die "[${arch}] ${PKG} looks dynamically linked - the musl target did not take"
 	fi
 
 	# A size floor, because "it compiled" is not proof a dependency linked. This
@@ -232,28 +274,20 @@ build_arch() {  # build_arch <arch>
 		install -m 0755 "${DEBIAN}/${s}" "${stage}/DEBIAN/${s}"
 	done
 
-	# Control: assembled from debian/control rather than restated here, so the
-	# dependencies and the description have one home. Paragraph 1 is the source
-	# stanza, paragraph 2 the binary one.
-	local src_stanza bin_stanza installed_kb
-	src_stanza="$(awk 'BEGIN{RS=""} NR==1' "${DEBIAN}/control")"
-	bin_stanza="$(awk 'BEGIN{RS=""} NR==2' "${DEBIAN}/control")"
-	installed_kb="$(du -sk "${stage}" | cut -f1)"
-
-	{
-		echo "Package: $(field "${bin_stanza}" Package)"
-		echo "Version: ${version}"
-		echo "Section: $(field "${src_stanza}" Section)"
-		echo "Priority: $(field "${src_stanza}" Priority)"
-		echo "Architecture: ${arch}"
-		echo "Depends: $(field "${bin_stanza}" Depends)"
-		echo "Suggests: $(field "${bin_stanza}" Suggests)"
-		echo "Installed-Size: ${installed_kb}"
-		echo "Maintainer: $(field "${src_stanza}" Maintainer)"
-		echo "Homepage: $(field "${src_stanza}" Homepage)"
-		# Description is a multi-line field and must come last in the stanza.
-		printf '%s\n' "${bin_stanza}" | awk '/^Description: /{f=1} f'
-	} > "${stage}/DEBIAN/control"
+	# Control: generated from debian/control by dpkg's own tool, which merges the
+	# source and binary stanzas, computes Installed-Size from -P, and drops the
+	# source-only fields. Hand-assembling it with a list of `echo`s was a
+	# whitelist, so any field added to debian/control that nobody remembered to
+	# add here would be silently absent from the package - `Suggests:` very
+	# nearly was. -v keeps the version coming from Cargo.toml rather than the
+	# changelog, which is the policy this script has.
+	# -f puts the .changes files list under target/ rather than letting it
+	# default to debian/files: it is for dpkg-buildpackage, which is not how
+	# this builds, and the default drops a stray artefact in the source tree.
+	# (It cannot be /dev/null — dpkg-gencontrol writes `.new` and renames.)
+	dpkg-gencontrol -p"${PKG}" -c"${DEBIAN}/control" -l"${DEBIAN}/changelog" \
+	                -P"${stage}" -v"${version}" -DArchitecture="${arch}" \
+	                -f"${ROOT}/target/deb/${PKG}.files"
 
 	# md5sums is optional; skip it rather than fail when md5sum is absent
 	# (macOS ships `md5`, and coreutils may not be on PATH).

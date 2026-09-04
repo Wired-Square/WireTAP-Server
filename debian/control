@@ -2,10 +2,18 @@ Source: wiretap-server
 Section: admin
 Priority: optional
 Maintainer: Alex Ferrara <alex@wiredsquare.com>
-Standards-Version: 4.6.2
-Rules-Requires-Root: no
 Homepage: https://github.com/Wired-Square/WireTAP-Server
 
+# init-system-helpers is for deb-systemd-helper, which enables the unit where
+# dpkg runs and systemd does not - an image-build chroot. adduser creates the
+# system account the daemon runs as.
+#
+# can-utils is only suggested, not depended on: candump and cansend are what the
+# troubleshooting documentation reaches for, but an ingest-only deployment has
+# no local CAN hardware to point them at and should not be made to carry them.
+#
+# Architecture is `any` here and concrete in the built package; make-deb.sh
+# overrides it per build.
 Package: wiretap-server
 Architecture: any
 Depends: init-system-helpers (>= 1.54), adduser
@@ -24,9 +32,3 @@ Description: captures CAN bus traffic and archives it to a WireTAP gateway
  .
  The binary is statically linked against musl, so this package declares no
  library dependencies and installs on any distribution with systemd.
- init-system-helpers is for deb-systemd-helper, which is how the unit is
- enabled where dpkg runs and systemd does not - an image-build chroot; adduser
- is what creates the system account the daemon runs as.
- can-utils is only suggested: candump and cansend are what the troubleshooting
- documentation reaches for, but an ingest-only deployment has no local CAN
- hardware to point them at and should not be made to carry them.

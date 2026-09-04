@@ -62,6 +62,17 @@ pub struct Batching {
 /// The Python's default, and what an existing Pi has a populated copy of.
 const LEGACY_CACHE_FILE: &str = ".wiretap-server-cache.db";
 
+/// Where `debian/postinst` leaves a cache it found under someone's home
+/// directory, for this process to adopt.
+///
+/// The packaging cannot simply leave it where it was: the unit sets
+/// `ProtectHome=`, so the derivation from `$HOME` below sees nothing at all
+/// under a packaged install. It cannot merge one either — that is
+/// [`crate::cache::SqliteCache::adopt`]'s job, and doing it in shell would be a
+/// second, untested implementation of an ordered drain. So it moves the file
+/// here and stops, and the daemon adopts it exactly as it adopts any other.
+const STAGED_CACHE_FILE: &str = "adopt.db";
+
 impl Batching {
     /// Flags first; the file overrides them in [`Settings::apply_file`].
     fn from_cli(cli: &Cli, env: &Env) -> Self {
@@ -82,13 +93,25 @@ impl Batching {
 /// The cache an older install would have written, if it is not the one in use
 /// and it is actually there.
 ///
+/// Staged before `$HOME`, because a packaged install can only produce the first
+/// and a hand-run one can only produce the second — under the unit `$HOME` is
+/// hidden, and off it nothing stages anything.
+///
 /// `None` once it has been adopted, so the answer changes across a restart —
 /// which is what makes it worth showing in `--check-config`.
 fn legacy_cache_path(in_use: &Path, env: &Env) -> Option<PathBuf> {
-    env.home
+    let staged = env
+        .state_dir
         .as_deref()
-        .map(|home| Path::new(home).join(LEGACY_CACHE_FILE))
-        .filter(|p| p != in_use && p.exists())
+        .map(|dir| Path::new(dir).join(STAGED_CACHE_FILE));
+    let in_home = env
+        .home
+        .as_deref()
+        .map(|home| Path::new(home).join(LEGACY_CACHE_FILE));
+    staged
+        .into_iter()
+        .chain(in_home)
+        .find(|p| p != in_use && p.exists())
 }
 
 /// Where the disk cache lives, given whatever was configured.
@@ -856,6 +879,50 @@ mod tests {
             cache_path(Some("/explicit.db"), &env),
             Path::new("/explicit.db")
         );
+    }
+
+    /// Which cache gets adopted, and the order that matters: a packaged install
+    /// can only ever produce the staged file, because its unit hides `$HOME`
+    /// from the daemon entirely.
+    #[test]
+    fn a_staged_cache_is_adopted_ahead_of_one_in_a_home_directory() {
+        let dir = std::env::temp_dir().join(format!("wt-adopt-{}", std::process::id()));
+        let home = dir.join("home");
+        let state = dir.join("state");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let env = Env {
+            state_dir: Some(state.display().to_string()),
+            home: Some(home.display().to_string()),
+            ..Env::default()
+        };
+        let in_use = state.join("cache.db");
+
+        // Nothing to adopt is the ordinary case, and it must not invent a path.
+        assert_eq!(legacy_cache_path(&in_use, &env), None);
+
+        std::fs::write(home.join(LEGACY_CACHE_FILE), b"").unwrap();
+        assert_eq!(
+            legacy_cache_path(&in_use, &env),
+            Some(home.join(LEGACY_CACHE_FILE)),
+            "a hand-run upgrade still finds the Python's"
+        );
+
+        // What debian/postinst leaves behind wins: it is there precisely
+        // because the daemon could not have seen the one above.
+        std::fs::write(state.join(STAGED_CACHE_FILE), b"").unwrap();
+        assert_eq!(
+            legacy_cache_path(&in_use, &env),
+            Some(state.join(STAGED_CACHE_FILE))
+        );
+
+        // And a cache is never its own legacy: pointed at the staged file, the
+        // answer moves on rather than proposing to adopt what is in use.
+        assert_eq!(
+            legacy_cache_path(&state.join(STAGED_CACHE_FILE), &env),
+            Some(home.join(LEGACY_CACHE_FILE))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

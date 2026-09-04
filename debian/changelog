@@ -1,25 +1,12 @@
 wiretap-server (0.1.0) bookworm; urgency=medium
 
-  * First packaged release. The Python it replaces had no packaging at all: it
-    was deployed by copying a script and a unit into a home directory.
-  * On a host running that Python deployment, its unit at
-    /etc/systemd/system/wiretap-server.service - the same name, and /etc
-    outranks /usr/lib - is stopped and moved aside to .pre-deb. Left in place it
-    would shadow this package's unit entirely: systemctl would keep acting on
-    the Python and report it healthy while the packaged binary never ran. The
-    new daemon is deliberately NOT started in that case; the settings have to be
-    carried across by hand first.
-  * The daemon runs as the system user `wiretap`, not as `pi`. An AF_CAN socket
-    needs no capability, so only port 23 does - CAP_NET_BIND_SERVICE, and
-    nothing else.
-  * The disk cache moves from ~/.wiretap-server-cache.db to
-    /var/lib/wiretap-server/cache.db, with its write-ahead log and without its
-    wal-index, which SQLite rebuilds. The old path cannot work under this unit,
-    which sets ProtectHome=true: the daemon can no longer see a home directory
-    to adopt a cache from, so an upgrade during a gateway outage would otherwise
-    strand captured frames that never reached a sink.
-  * The unit is enabled but started only if it was already running. A fresh
-    install cannot usefully run until an interface and a gateway are configured,
-    and anything else is a crash loop in the journal.
+  * First packaged release; the Python it replaces had no packaging at all.
+  * Upgrading from a Python deployment: its unit at
+    /etc/systemd/system/wiretap-server.service is stopped and moved aside to
+    .pre-deb, because it shares this package's unit name and /etc outranks
+    /usr/lib. The new daemon is deliberately not started - carry the settings
+    across first. Its disk cache is moved to /var/lib/wiretap-server/ for the
+    daemon to adopt, since the unit's ProtectHome= hides the old location.
+  * The daemon runs as the system user `wiretap`, not as `pi`.
 
  -- Alex Ferrara <alex@wiredsquare.com>  Fri, 04 Sep 2026 14:00:00 +1000
