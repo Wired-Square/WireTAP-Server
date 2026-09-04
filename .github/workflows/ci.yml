@@ -1,0 +1,295 @@
+# The four gates the repo already holds itself to, plus the one thing no
+# development machine can do: run the capture path.
+#
+# `source/socketcan.rs` and the CAN half of `pipeline.rs` are Linux-only, and
+# there is no `vcan` on macOS nor in Docker Desktop's kernel — so before this
+# workflow existed, roughly 250 lines of the server had never executed
+# anywhere. GitHub's Ubuntu runners are full VMs with sudo, so `modprobe vcan`
+# gives real end-to-end loopback with no CAN hardware at all.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A fresh checkout cannot reuse incremental output, and it is roughly 40% of
+  # the target directory — so it is cache weight and slower codegen for nothing.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  gates:
+    name: Gates
+    runs-on: ubuntu-latest
+    env:
+      # What packaging/zigcc shells out to. Keep it in step with the version
+      # developers build with, since that is the one the cross-build is known
+      # to work under.
+      ZIG_VERSION: "0.16.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustup target add aarch64-unknown-linux-musl
+          # Every fingerprint under target/ embeds the compiler version, so a
+          # cache key without it serves a wholly invalid tree on the next
+          # stable release — and still counts as a hit, so nothing is re-saved
+          # and every run rebuilds from cold in silence.
+          echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-gates-${{ env.RUSTC_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-gates-${{ env.RUSTC_VERSION }}-
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # After the two cheap gates, so a formatting failure does not pay for a
+      # cross-compiler it never uses. rusqlite's bundled SQLite means a build
+      # script compiles C, and a build script runs even for `cargo check`, so
+      # the musl gate needs a C cross-compiler and not just a cross-linker.
+      - name: Install zig, the musl C cross-compiler
+        run: |
+          dir="zig-x86_64-linux-${ZIG_VERSION}"
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${dir}.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$dir" >> "$GITHUB_PATH"
+
+      # On this runner the host gate above is itself Linux, so it already lints
+      # the `#[cfg(target_os = "linux")]` modules; what this adds here is the
+      # architecture and libc difference, and proof that the cross toolchain
+      # still builds. On a macOS host — where it is actually run day to day —
+      # it is the *only* gate that sees those modules at all, and `--all-targets`
+      # is what extends that to tests/vcan_loopback.rs. Keep the two spellings
+      # identical so the local gate and this one cannot diverge.
+      - name: cargo clippy (aarch64 musl)
+        run: |
+          cargo clippy -p wiretap-server --target aarch64-unknown-linux-musl \
+            --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  capture:
+    name: Capture path (vcan)
+    runs-on: ubuntu-latest
+
+    services:
+      # The gateway's stack, minus the compose file: the backend is built from
+      # this checkout and run on the runner, so the workspace build is shared
+      # with the rest of this job rather than repeated inside an image build.
+      #
+      # NOTE: this duplicates the `timescaledb` service in
+      # crates/wiretap-backend/docker-compose.yml and the two must move
+      # together. It cannot be shared — an Actions service container accepts no
+      # `command:`, so the compose file's
+      # `-c shared_preload_libraries=timescaledb` cannot be passed here, and
+      # this relies on the image's own entrypoint running `timescaledb-tune` at
+      # init. If `CREATE EXTENSION timescaledb` ever fails, that is why.
+      timescaledb:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          # Throwaway, for a container reachable only from this job.
+          POSTGRES_PASSWORD: ci-postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 24
+
+    env:
+      # These mirror the `backend` service's environment in
+      # crates/wiretap-backend/docker-compose.yml. AUTO_CREATE is stated rather
+      # than left to the code default because the capture databases below do
+      # not exist until a forward client asks for one.
+      POSTGRES_PASSWORD: ci-postgres
+      WIRETAP_ADMIN_KEY: ci-admin-key
+      WIRETAP_PG_HOST: 127.0.0.1
+      WIRETAP_DEFAULT_DB: wiretap
+      WIRETAP_AUTO_CREATE: "true"
+      RUST_LOG: wiretap_backend=info
+      # One capture database per phase, so every row count below can be an
+      # exact equality instead of a floor.
+      CAPTURE_DB: vehicle_ci
+      CONFORMANCE_DB: vehicle_ci_conformance
+      PUSHED_DB: vehicle_ci_pushed
+      # cangen's fixed arbitration id, in hex as cangen wants it. The assertions
+      # convert rather than restating it in decimal.
+      CANGEN_ID: "2A0"
+      CANGEN_FRAMES: "1000"
+      # Eight hex digits is how cansend is told an id is 29-bit.
+      EXTENDED_ID: "01ABCDEF"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
+
+      # Deliberately a separate cache from `gates`. That job's tree is mostly
+      # clippy's `.rmeta` units plus a whole musl target directory, neither of
+      # which this job can use; sharing one key would also have both jobs race
+      # to save it.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-capture-${{ env.RUSTC_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-capture-${{ env.RUSTC_VERSION }}-
+
+      - name: Install can-utils and psql
+        run: sudo apt-get update && sudo apt-get install -y can-utils postgresql-client
+
+      # The whole reason this job exists. An unprivileged process may open an
+      # AF_CAN socket — which is why candump works as a normal user — so this
+      # is the only step here that needs sudo.
+      - name: Bring up vcan0
+        run: |
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set up vcan0
+          ip -details link show vcan0
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      # Opening a socket, reading a frame, putting one on the bus, asking the
+      # kernel for a bitrate, and the pipeline that wires them to a GVRET
+      # client. None of it had ever run before this job.
+      - name: Capture drill against vcan0
+        run: |
+          cargo test -p wiretap-server --test vcan_loopback --locked -- \
+            --ignored --test-threads=1 --nocapture
+
+      - name: Start the gateway
+        run: |
+          target/debug/wiretap-backend &
+          echo "GATEWAY_PID=$!" >> "$GITHUB_ENV"
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8423/v1/health | grep -q '"db_ok":true'; then
+              echo "gateway up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "the gateway never reported db_ok" >&2; exit 1
+
+      # The shipped binary, run the way an operator runs it: frames off a real
+      # interface, through the batcher, into TimescaleDB. Port 2323 because 23
+      # would need CAP_NET_BIND_SERVICE, which is the unit's job and not this
+      # job's subject.
+      - name: Capture from vcan0 into TimescaleDB
+        run: |
+          mkdir -p "$RUNNER_TEMP/state"
+          STATE_DIRECTORY="$RUNNER_TEMP/state" target/debug/wiretap-server \
+            -i vcan0 --port 2323 --echo-console \
+            --forward-enable --forward-host 127.0.0.1 --forward-port 9323 \
+            --forward-api-key "$WIRETAP_ADMIN_KEY" --forward-database "$CAPTURE_DB" \
+            --pg-flush-interval 0.2 --stats-interval 0 &
+          server=$!
+          # Waiting on the GVRET port is a proxy for "the CAN socket is open",
+          # which holds because start_capture opens the sockets before it binds
+          # the listener — a deliberate ordering its own doc comment states. It
+          # is what lets the row count below be an exact equality.
+          for _ in $(seq 1 50); do
+            if (exec 3<>/dev/tcp/127.0.0.1/2323) 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+
+          cangen vcan0 -g 1 -n "$CANGEN_FRAMES" -I "$CANGEN_ID" -L 8 -D i
+          cansend "vcan0" "$EXTENDED_ID#0102"
+
+          # SIGTERM, not SIGKILL: the shutdown flush is what empties the
+          # batcher, and skipping it would leave the count short for a reason
+          # that has nothing to do with capture.
+          kill -TERM "$server"
+          wait "$server" || true
+
+      - name: Assert the captured frames landed
+        run: |
+          # Read the archive directly rather than through the gateway's HTTP
+          # API. This step's subject is whether capture reached the table, and
+          # putting the query layer in between would make a capture failure and
+          # a query failure indistinguishable. It is also how the outage drill
+          # is verified by hand.
+          export PGPASSWORD="$POSTGRES_PASSWORD"
+          q() { psql -h 127.0.0.1 -U postgres -d "$1" -tAc "$2"; }
+
+          rx=$(q "$CAPTURE_DB" \
+            "SELECT count(*) FROM public.can_frame WHERE id = $((16#$CANGEN_ID)) AND dir = 'rx';")
+          # No id literal: this also catches a spurious extended flag on any of
+          # the standard frames alongside it.
+          ext=$(q "$CAPTURE_DB" "SELECT count(*) FROM public.can_frame WHERE extended;")
+          echo "rx=$rx extended=$ext"
+          test "$rx" = "$CANGEN_FRAMES" || { echo "expected $CANGEN_FRAMES rows, got $rx" >&2; exit 1; }
+          test "$ext" = "1" || { echo "the extended frame did not survive the round trip" >&2; exit 1; }
+
+      # The listener for frames devices push, which needs [forward] configured
+      # for the same reason the Python did: acknowledging a batch and then
+      # having nowhere to put it is the one thing at-least-once must not do.
+      #
+      # Two phases against two databases, because the conformance suite pushes
+      # frames of its own with the same arbitration ids the push phase uses —
+      # sharing one database would leave the count below unable to tell them
+      # apart, and only a floor could be asserted.
+      - name: Ingest conformance
+        run: |
+          ingest_server() {
+            mkdir -p "$RUNNER_TEMP/ingest-$1"
+            STATE_DIRECTORY="$RUNNER_TEMP/ingest-$1" target/debug/wiretap-server \
+              -i "" --ingest-enable --ingest-port 9400 --ingest-token tok \
+              --forward-enable --forward-host 127.0.0.1 --forward-port 9323 \
+              --forward-api-key "$WIRETAP_ADMIN_KEY" --forward-database "$1" \
+              --pg-flush-interval 0.2 --stats-interval 0 &
+            server=$!
+            for _ in $(seq 1 50); do
+              if (exec 3<>/dev/tcp/127.0.0.1/9400) 2>/dev/null; then return 0; fi
+              sleep 0.2
+            done
+            echo "the ingest listener never came up" >&2; exit 1
+          }
+
+          ingest_server "$CONFORMANCE_DB"
+          python3 tools/test_ingest_client.py \
+            --host 127.0.0.1 --port 9400 --token tok --conformance
+          kill -TERM "$server"; wait "$server" || true
+
+          # And that pushed frames reach the archive, which is what proves the
+          # listener and the forward sink compose rather than each working
+          # alone. 200 batches of 16.
+          ingest_server "$PUSHED_DB"
+          python3 tools/test_ingest_client.py \
+            --host 127.0.0.1 --port 9400 --token tok --count 200
+          kill -TERM "$server"; wait "$server" || true
+
+          export PGPASSWORD="$POSTGRES_PASSWORD"
+          pushed=$(psql -h 127.0.0.1 -U postgres -d "$PUSHED_DB" -tAc \
+            "SELECT count(*) FROM public.can_frame;")
+          echo "pushed=$pushed"
+          test "$pushed" = "3200" || { echo "expected 3200 pushed frames, got $pushed" >&2; exit 1; }
+
+      - name: Stop the gateway
+        if: always()
+        run: kill -TERM "$GATEWAY_PID" || true

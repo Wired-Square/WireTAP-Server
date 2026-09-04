@@ -30,6 +30,7 @@ tracing-subscriber.workspace = true
 socketcan = { workspace = true, features = ["tokio", "netlink", "dump"] }
 
 [dev-dependencies]
-# The outage drill is an integration test, so it links against the crate rather
-# than into it and needs its own runtime.
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# The outage drill and the vcan loopback are integration tests, so they link
+# against the crate rather than into it and need their own runtime. `net` and
+# `io-util` are the vcan drill's: it drives the GVRET listener over a socket.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

@@ -116,6 +116,17 @@ All notable changes to this project are documented here. Entries go under
   server refuses to start on, so they could never have taken effect.
 - `docs/porting-notes.md` — where the Rust deviates from the Python, and the quirks
   replicated deliberately rather than fixed mid-port.
+- CI, and with it the first execution of the capture path. `source/socketcan.rs` and the
+  CAN half of `pipeline.rs` are Linux-only, and there is no `vcan` on macOS nor in Docker
+  Desktop's kernel — so around 250 lines of this server had been compiled and reviewed but
+  never run. `.github/workflows/ci.yml` runs the four gates the repo already held itself
+  to, and then a job that creates a `vcan0` on the runner and uses it: a `vcan_loopback`
+  drill covering opening a socket, reading a frame, transmitting one, the bitrate query and
+  the whole pipeline bridging the bus to a GVRET client and back, followed by the shipped
+  binary capturing `cangen` traffic off that interface into TimescaleDB through a real
+  gateway, and the ingest conformance suite. The drill puts frames on the bus with a plain
+  `socketcan` socket rather than with a second `CanReader`, so nothing it asserts is
+  encoded and decoded by the code under test.
 
 ### Changed
 
@@ -123,8 +134,12 @@ All notable changes to this project are documented here. Entries go under
   `zig cc` wrapper. Bundled SQLite means a build script compiles C, and a build script runs
   even for `cargo check` — so `cargo clippy --target aarch64-unknown-linux-musl`, which is
   the only thing that lints the Linux-only modules, started failing on a missing
-  `aarch64-linux-musl-gcc`. The documented gate command is unchanged, and `cargo zigbuild`
-  is untouched: it sets these itself, and an environment value wins over the table.
+  `aarch64-linux-musl-gcc`. No caller had to change, and `cargo zigbuild` is untouched: it
+  sets these itself, and an environment value wins over the table.
+- The musl clippy gate gained `--all-targets`. It is the only thing that lints the
+  Linux-only modules, and without this it lints only the library and the binary — so the
+  `vcan` drill, which is `#[cfg(target_os = "linux")]` from its first line and is the one
+  test that exercises the capture path, was checked by nothing on any machine.
 - `tracing-subscriber`'s `env-filter` feature moved off the workspace dependency table and
   onto the gateway, the only crate that wants it. A feature named at the root is a floor for
   every member, and `RUST_LOG` filtering costs a regex engine inside a binary that is shipped

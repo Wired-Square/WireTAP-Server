@@ -50,10 +50,27 @@ host that cannot build images, see [crates/wiretap-backend/deploy/](crates/wiret
 
 ## Build
 
+The four gates, in the order [CI](.github/workflows/ci.yml) runs them:
+
 ```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy -p wiretap-server --target aarch64-unknown-linux-musl --all-targets --locked -- -D warnings
+cargo test --workspace
+```
+
+The third is not redundant. The SocketCAN capture modules are
+`#[cfg(target_os = "linux")]`, so on a macOS host nothing else lints them at all. It needs
+`rustup target add aarch64-unknown-linux-musl` and `zig` on `PATH` — bundled SQLite means a
+build script compiles C, and `.cargo/config.toml` points that at
+[packaging/zigcc](packaging/zigcc).
+
+Capturing from a CAN interface can only be *run* on Linux, so those tests are `#[ignore]`d
+and CI executes them against a virtual bus. On any Linux host:
+
+```sh
+sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && sudo ip link set up vcan0
+cargo test -p wiretap-server --test vcan_loopback -- --ignored --test-threads=1
 ```
 
 ## Licence

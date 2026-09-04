@@ -167,6 +167,13 @@ because the rule at the top of this file requires it: replicating the Python
 would mean archiving a frame whose payload is an artefact of a buffer, not of
 the bus.
 
+Pinned by `a_remote_frame_is_skipped_and_does_not_stall_the_reader` in
+`tests/vcan_loopback.rs`, which puts a remote frame on the bus ahead of a data
+frame and requires the data frame to arrive with the remote frame never
+surfacing — so it checks the skip and that skipping did not swallow what
+followed. It needs a real `vcan`, so it runs in CI rather than on a
+development machine.
+
 Error frames are *not* a deviation, despite looking like one in the same match
 arm. Neither implementation sets `CAN_RAW_ERR_FILTER`, and the kernel's default
 error mask is zero, so no error frame is ever delivered to either. If bus-health
