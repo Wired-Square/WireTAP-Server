@@ -60,7 +60,6 @@ fn init_logging(level: LogLevel) {
         .init();
 }
 
-#[cfg(target_os = "linux")]
 fn serve(settings: &Settings) -> ExitCode {
     // Built here rather than with `#[tokio::main]` so that everything above —
     // parsing, the config merge, `--check-config` — runs without one.
@@ -81,12 +80,4 @@ fn serve(settings: &Settings) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Capture needs Linux and its SocketCAN stack. A macOS build is a development
-/// and cross-compilation host, and says so rather than pretending to start.
-#[cfg(not(target_os = "linux"))]
-fn serve(_settings: &Settings) -> ExitCode {
-    error!("capturing CAN frames needs Linux; this build runs --check-config only");
-    ExitCode::FAILURE
 }

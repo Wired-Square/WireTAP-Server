@@ -58,10 +58,13 @@ bytes = "1"
 hex = "0.4"
 
 # --- hashing, checksums, secrets ---
-# crc32fast is the ingest protocol's frame check; sha2 hashes API keys at rest.
+# crc32fast is the ingest protocol's frame check; sha2 hashes API keys at rest;
+# subtle compares an ingest token without leaking its length or contents to a
+# timing attack, which is what the Python used `hmac.compare_digest` for.
 crc32fast = "1"
 sha2 = "0.10"
 rand = "0.8"
+subtle = "2"
 
 # --- logging ---
 tracing = "0.1"

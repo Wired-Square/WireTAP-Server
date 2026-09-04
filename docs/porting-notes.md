@@ -67,6 +67,20 @@ The Python wrote its console line from inside the capture loop, so a terminal
 over a slow SSH link or a pipe into `less` back-pressured the capture exactly as
 a stalled client did. It can now drop lines, and logs how many.
 
+### The ingest listener refuses to run without a gateway
+
+The Python exited rather than start with `--ingest-enable` and no PostgreSQL
+sink, because a device's frames would have had nowhere to go. The same
+requirement now names `[forward]`: accepting a batch, acknowledging it, and
+then dropping it is the one thing at-least-once delivery must never do, and a
+device has no way to tell that happened.
+
+Two smaller things follow the Python exactly. An empty token still disables
+authentication, which is what a closed private network relies on. And the
+`database` a client names in its `HELLO` is logged and not honoured — the
+Python said the same about its single DSN, and here the gateway is what routes
+a database.
+
 ### The batcher's log messages are kept, including the word "database"
 
 `PostgresWriter`'s worker said things like `database unavailable, caching
@@ -243,8 +257,5 @@ and error frames never arrive, both above.
 
 Listed so they are not mistaken for regressions when they land.
 
-- **The binary ingest listener.** Devices that push frames to this server,
-  rather than the server pulling them off a bus, have nowhere to connect yet. A
-  configuration with `[ingest].enable = true` and no CAN interfaces is refused
-  at startup rather than idling as the Python did, because idling would look
-  exactly like working.
+*(Nothing outstanding: the ingest listener was the last of these, and it
+landed.)*

@@ -144,6 +144,16 @@ impl Archive {
         Arc::clone(&self.counters)
     }
 
+    /// How full the queue is, as a percentage.
+    ///
+    /// Every ingest acknowledgement carries this, and it is the only
+    /// back-pressure signal a pushing device gets: a client that sees it
+    /// climbing can slow down before the batch it sends next is refused.
+    pub fn occupancy_pct(&self) -> u8 {
+        let (size, cap) = self.depth();
+        u8::try_from(size * 100 / cap).unwrap_or(100)
+    }
+
     /// Frames in the queue, and the size it was given.
     fn depth(&self) -> (usize, usize) {
         let cap = self.tx.max_capacity();

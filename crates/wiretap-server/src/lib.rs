@@ -15,8 +15,8 @@ pub mod cli;
 pub mod console;
 pub mod forward;
 pub mod gvret;
-/// Wiring the capture loop together. Linux-only: it starts with a CAN socket.
-#[cfg(target_os = "linux")]
+pub mod ingest;
+/// Wiring the server together. Only its CAN half is Linux-only.
 pub mod pipeline;
 pub mod settings;
 pub mod source;

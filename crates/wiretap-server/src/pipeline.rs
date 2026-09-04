@@ -1,10 +1,10 @@
-//! The running server: SocketCAN readers, the GVRET listener, and the fan-out
-//! between them.
+//! The running server: the archive, the SocketCAN readers, the GVRET listener,
+//! and the fan-out between them.
 //!
-//! Linux-only, because everything here begins with a CAN socket. The pieces it
-//! wires together are not — the codec, the console line and the client tasks
-//! are all exercised on any machine — so what is untested until CI puts a
-//! `vcan` interface underneath it is this file's wiring, and nothing below it.
+//! Only the CAN half is Linux-only, and it is marked as such. Everything else —
+//! the archive, the ingest listener, the shutdown — runs anywhere, which is
+//! what lets an ingest-only deployment (a server with no local CAN hardware,
+//! fed by devices that push to it) be started and tested off a Pi.
 //!
 //! The shape is the Python's turned inside out. There, one loop `select`ed
 //! over the CAN sockets and the listening socket and did every client's write
@@ -13,24 +13,37 @@
 //! other way down an mpsc to a task that owns the sockets. No client can delay
 //! a read, and no read can delay a client.
 
-use std::io::{self, Write as _};
+use std::io;
+#[cfg(target_os = "linux")]
+use std::io::Write as _;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(target_os = "linux")]
 use tokio::sync::{broadcast, mpsc};
-use tracing::{error, info, warn};
+#[cfg(target_os = "linux")]
+use tracing::error;
+use tracing::{info, warn};
+#[cfg(target_os = "linux")]
 use wiretap_model::{CanSample, Direction};
 
 use crate::archive;
+#[cfg(target_os = "linux")]
 use crate::console;
+#[cfg(target_os = "linux")]
 use crate::gvret::server;
+use crate::ingest;
 use crate::settings::Settings;
+#[cfg(target_os = "linux")]
 use crate::source::{
     bus_count, bus_for_index, index_for_bus,
     socketcan::{detect_bitrates, CanReader},
     system_time_to_us, Transmit,
 };
 
+#[cfg(target_os = "linux")]
 /// Frames held for a GVRET client that is behind.
 ///
 /// At the ~15k frames a second a busy 1 Mbit/s bus produces, this is about 70
@@ -39,11 +52,13 @@ use crate::source::{
 /// few tens of kilobytes.
 const FRAME_BACKLOG: usize = 1024;
 
+#[cfg(target_os = "linux")]
 /// Transmits queued for the bus. Small on purpose: a GVRET client transmits
 /// occasionally, so a backlog here means the bus or the interface is already
 /// in trouble and the useful answer is to say so.
 const TRANSMIT_QUEUE: usize = 64;
 
+#[cfg(target_os = "linux")]
 /// How long a reader waits after a failed read before trying again.
 const READ_BACKOFF: Duration = Duration::from_secs(1);
 
@@ -64,8 +79,10 @@ pub enum RunError {
     },
     /// No CAN interfaces and no ingest listener.
     NothingToDo,
-    /// An ingest-only deployment, which needs Stage 4.
-    IngestNotPorted,
+    /// The ingest listener is on, but there is nowhere for pushed frames to go.
+    IngestNeedsForward,
+    /// CAN interfaces were configured on a platform that has no SocketCAN.
+    NoCanCapture,
 }
 
 impl std::fmt::Display for RunError {
@@ -102,31 +119,88 @@ impl std::fmt::Display for RunError {
                 f,
                 "no CAN interfaces configured and the ingest listener is disabled; nothing to do"
             ),
-            Self::IngestNotPorted => write!(
+            // The Python refused the same combination, naming its own sink.
+            // Accepting frames from a device and having nowhere to put them
+            // would acknowledge them and then drop them, which is the one
+            // thing at-least-once delivery must never do.
+            Self::NoCanCapture => write!(
                 f,
-                "an ingest-only deployment has nothing to run yet: the binary ingest listener \
-                 is still being ported"
+                "capturing CAN frames needs Linux and its SocketCAN stack; this build can \
+                 still run an ingest-only server, which needs no local CAN hardware"
+            ),
+            Self::IngestNeedsForward => write!(
+                f,
+                "the ingest listener is enabled but [forward] is not: frames pushed by a \
+                 device would be acknowledged and then dropped. Configure a gateway."
             ),
         }
     }
 }
 
-/// Open every interface, start the listener, and run until a signal.
+/// Start whatever this configuration asks for, and run until a signal.
 pub async fn run(settings: &Settings) -> Result<(), RunError> {
-    if settings.ifaces.is_empty() {
-        // The Python idled here when the ingest listener was enabled and
-        // exited otherwise. Both are an early exit until Stage 4 gives the
-        // first case something to do.
-        return Err(if settings.ingest.is_some() {
-            RunError::IngestNotPorted
-        } else {
-            RunError::NothingToDo
-        });
+    if settings.ifaces.is_empty() && settings.ingest.is_none() {
+        return Err(RunError::NothingToDo);
     }
 
-    // Sockets first, then the listener, then the banner — the order the Python
-    // used, so a permission problem is reported before anything claims to be
-    // listening.
+    // The archive first: both a CAN reader and a pushing device feed it, and
+    // neither should start before there is somewhere for frames to go. Its
+    // absence is warned about at startup and is a legitimate deployment — a
+    // GVRET bridge that archives nothing.
+    let archive = settings
+        .forward
+        .as_ref()
+        .map(|forward| {
+            archive::start(forward, settings.stats_interval).map_err(|e| RunError::Cache {
+                path: forward.batching.cache_path.display().to_string(),
+                err: e.to_string(),
+            })
+        })
+        .transpose()?;
+
+    if settings.ifaces.is_empty() {
+        // An ingest-only deployment, as the Python had: no local CAN hardware,
+        // so no sockets and no GVRET listener either.
+        info!("No CAN interfaces configured; running ingest-only");
+    } else {
+        start_capture(settings, archive.as_ref().map(|a| a.frames.clone())).await?;
+    }
+
+    if let Some(ingest) = &settings.ingest {
+        let Some(running) = &archive else {
+            return Err(RunError::IngestNeedsForward);
+        };
+        let server = ingest::Server::bind(ingest, running.frames.clone())
+            .await
+            .map_err(|err| RunError::Bind {
+                addr: format!("{}:{}", ingest.host, ingest.port),
+                err,
+            })?;
+        tokio::spawn(server.run());
+    }
+
+    shutdown().await;
+    info!("Shutting down");
+
+    // Dropping the producer is what tells the batcher to flush, so this has to
+    // outlive the tasks that hold clones of it — which the runtime drops when
+    // this returns. `TimeoutStopSec` in the unit is what gives the flush room.
+    if let Some(archive) = archive {
+        let _ = archive.shutdown().await;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+/// Open the CAN interfaces, bridge them to GVRET clients, and feed the archive.
+///
+/// Sockets first, then the listener, then the banner — the order the Python
+/// used, so a permission problem is reported before anything claims to be
+/// listening.
+async fn start_capture(
+    settings: &Settings,
+    archive: Option<archive::Archive>,
+) -> Result<(), RunError> {
     let mut readers = Vec::with_capacity(settings.ifaces.len());
     let mut buses = Vec::with_capacity(settings.ifaces.len());
     let mut rates = Vec::with_capacity(settings.ifaces.len());
@@ -185,27 +259,8 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
         },
     );
 
-    // The archive, if there is one to send to. Its absence is already warned
-    // about at startup, and the capture runs either way — a GVRET bridge with
-    // no archive is a legitimate deployment.
-    let archive = settings
-        .forward
-        .as_ref()
-        .map(|forward| {
-            archive::start(forward, settings.stats_interval).map_err(|e| RunError::Cache {
-                path: forward.batching.cache_path.display().to_string(),
-                err: e.to_string(),
-            })
-        })
-        .transpose()?;
-
     for (reader, iface) in readers.iter().cloned().zip(settings.ifaces.clone()) {
-        tokio::spawn(read_loop(
-            reader,
-            iface,
-            frames.clone(),
-            archive.as_ref().map(|a| a.frames.clone()),
-        ));
+        tokio::spawn(read_loop(reader, iface, frames.clone(), archive.clone()));
     }
     if settings.echo_console {
         tokio::spawn(echo_loop(frames.subscribe(), settings.colour));
@@ -214,26 +269,28 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
         readers,
         settings.bus_offset,
         transmit_queue,
-        archive.as_ref().map(|a| a.frames.clone()),
+        archive,
     ));
     tokio::spawn(listener.run());
-
-    shutdown().await;
-    info!("Shutting down");
-
-    // Dropping the last sender is what tells the batcher to flush and stop, so
-    // this has to outlive the reader tasks — which the runtime drops when this
-    // returns. `TimeoutStopSec` in the unit is what gives the flush room.
-    if let Some(archive) = archive {
-        let _ = archive.shutdown().await;
-    }
     Ok(())
 }
 
+/// Without SocketCAN there is nothing to capture from, but the rest of the
+/// server still runs — which is what an ingest-only deployment is.
+#[cfg(not(target_os = "linux"))]
+async fn start_capture(
+    _settings: &Settings,
+    _archive: Option<archive::Archive>,
+) -> Result<(), RunError> {
+    Err(RunError::NoCanCapture)
+}
+
+#[cfg(target_os = "linux")]
 fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {
     parts.map(|p| p.to_string()).collect::<Vec<_>>().join(",")
 }
 
+#[cfg(target_os = "linux")]
 /// Publish one interface's frames to everything downstream.
 async fn read_loop(
     reader: Arc<CanReader>,
@@ -263,6 +320,7 @@ async fn read_loop(
     }
 }
 
+#[cfg(target_os = "linux")]
 /// `--echo-console`, as a consumer like any other.
 ///
 /// A subscriber rather than a call inside `read_loop`, for the same reason the
@@ -291,6 +349,7 @@ async fn echo_loop(mut frames: broadcast::Receiver<Arc<CanSample>>, colour: bool
     }
 }
 
+#[cfg(target_os = "linux")]
 /// Put what GVRET clients ask for onto the bus they named.
 async fn transmit_loop(
     readers: Vec<Arc<CanReader>>,

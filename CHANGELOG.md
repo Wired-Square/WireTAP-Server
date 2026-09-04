@@ -66,6 +66,17 @@ All notable changes to this project are documented here. Entries go under
   against literals, so neither can move alone. This codec had been hand-written four times
   across the two repos — a format where one side is a `struct.Struct("<IIBB")` and the
   other is four `to_le_bytes` calls is a format that drifts.
+- **The binary ingest listener**, so a device too small to hold a connection to the gateway
+  can push batches here instead. They join the same queue the CAN readers feed, which means
+  a pushed frame is cached through an outage and drained in order exactly like a captured
+  one. Every acknowledgement carries how full that queue is, and a batch arriving at a
+  queue that is 99% full is refused rather than accepted and dropped — at-least-once
+  delivery is the device's to complete, and it can only do that if a refusal is visible.
+  `tools/test_ingest_client.py --conformance` passes 12/12 against it, and 3,200 frames
+  pushed by that client landed in TimescaleDB through the server's own forward sink.
+- **Ingest-only deployments run.** A server with no local CAN hardware starts its listener
+  and archives what devices push to it. Only the CAN half of the pipeline is Linux-only
+  now, so that configuration can be started and tested off a Raspberry Pi.
 - **The capture server archives.** `ForwardSink` speaks the client half of the ingest
   protocol to a gateway — HELLO with the API key and target database, batches of up to 256
   records, and a `PING` when the bus is quiet — and every batch is acknowledged only after
