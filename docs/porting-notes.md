@@ -95,6 +95,20 @@ Three `debug` lines are gone, being progress chatter the Rust states once
 three are new, all naming a disk-cache failure the Python swallowed: a failed
 read, delete or reset.
 
+Two carry a different number, and are the one deviation from verbatim.
+`drained N frames from queue to disk cache` and `shutdown: flushed N frames to
+disk cache` both took `N` from the queue in the Python — `_write_to_cache`
+returns nothing, so `_drain_queue_to_cache` adds `len(batch)` whether the write
+succeeded or not. When the cache cannot be written that prints an `info` line
+saying frames were drained immediately after the `error` line saying they were
+dropped, and the reassuring one is the one an operator remembers. Here
+`cache_batch` returns what it stored and both lines report that, saying nothing
+when nothing landed. The counters were always right; only these two lines were
+not. `disk cache write error:` now names the count it dropped, as the
+cache-full message beside it already did. Found by installing the `.deb` on a
+Debian host, where a purge and a reinstall left the cache owned by a uid the
+daemon no longer had.
+
 ### A cache left in `$HOME` is taken over, then removed
 
 Because the default moved, an upgrade would otherwise strand whatever an outage

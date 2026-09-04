@@ -11,6 +11,11 @@
 //! `info` and above is the Python's string verbatim — including the ones that
 //! call the gateway "database", where renaming it would break the greps that
 //! are the whole reason anyone reads these lines.
+//!
+//! The two exceptions are the disk cache's own `drained`/`flushed` lines, which
+//! the Python counted off the queue rather than out of the cache and so printed
+//! after a write that had failed. They carry the same words and a truthful
+//! number; `docs/porting-notes.md` has the case that found it.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -612,17 +617,17 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         self.drain_queue_to_cache();
     }
 
-    /// Store a batch on disk, or count it dropped and say why.
-    fn cache_batch(&mut self, batch: &[Arc<CanSample>]) {
+    /// Store a batch on disk, or count it dropped and say why. Returns how
+    /// many were stored.
+    fn cache_batch(&mut self, batch: &[Arc<CanSample>]) -> usize {
         // One region, because `is_full` stats three files and `append` writes:
         // handing the runtime two separate blocking hints for one logical
         // operation buys nothing.
         let stored = blocking(|| {
             if self.cache.is_full() {
                 return Err(format!(
-                    "disk cache full ({} MB), dropping {} frames",
-                    self.cache.size_bytes() / (1024 * 1024),
-                    batch.len()
+                    "disk cache full ({} MB)",
+                    self.cache.size_bytes() / (1024 * 1024)
                 ));
             }
             self.cache
@@ -632,10 +637,16 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         match stored {
             Ok(written) => {
                 add(&self.counters.cached, written as u64);
+                written
             }
             Err(why) => {
-                error!("{why}");
+                // The count belongs to the failure, not to either way of
+                // failing: the Python's cache-full line named it and its
+                // write-error line did not, and the write error is the one an
+                // operator meets when an upgrade leaves the cache unwritable.
+                error!("{why}, dropping {} frames", batch.len());
                 add(&self.counters.dropped, batch.len() as u64);
+                0
             }
         }
     }
@@ -652,11 +663,17 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// Empty the in-memory queue onto disk, in cache-sized batches.
     fn drain_queue_to_cache(&mut self) {
         let queued = self.take_queued();
-        for chunk in queued.chunks(self.batch_size) {
-            self.cache_batch(chunk);
-        }
-        if !queued.is_empty() {
-            info!("drained {} frames from queue to disk cache", queued.len());
+        // What landed, where the Python logged what was taken off the queue. A
+        // cache that is full drops every batch and `cache_batch` says so at
+        // `error`; following that with an `info` line claiming the same frames
+        // were drained is the one reassurance an operator reading the journal
+        // after a gap must not be given.
+        let cached: usize = queued
+            .chunks(self.batch_size)
+            .map(|chunk| self.cache_batch(chunk))
+            .sum();
+        if cached > 0 {
+            info!("drained {cached} frames from queue to disk cache");
         }
     }
 
@@ -694,8 +711,13 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                 add(&self.counters.written, remaining.len() as u64);
                 info!("shutdown: flushed {} frames to database", remaining.len());
             } else {
-                self.cache_batch(&remaining);
-                info!("shutdown: flushed {} frames to disk cache", remaining.len());
+                // Same rule as the drain, and the last line before the process
+                // exits: a flush this reports is a flush nobody goes looking
+                // for afterwards.
+                let cached = self.cache_batch(&remaining);
+                if cached > 0 {
+                    info!("shutdown: flushed {cached} frames to disk cache");
+                }
             }
         }
         self.sink.close().await;
@@ -818,6 +840,10 @@ mod tests {
         frames: Arc<Mutex<Vec<Cached>>>,
         next_id: Arc<AtomicI64>,
         full: Arc<AtomicBool>,
+        /// A cache that opens and then refuses the write, which `full` cannot
+        /// stand in for — it returns before `append` is reached. Spelled like
+        /// [`SinkState`]'s so there is one way to break a double here.
+        fault: Arc<Mutex<Option<String>>>,
         resets: Arc<AtomicUsize>,
     }
 
@@ -830,12 +856,24 @@ mod tests {
                 .map(|c| c.sample.arb_id)
                 .collect()
         }
+
+        fn fail(&self, why: Option<&str>) {
+            *self.fault.lock().unwrap() = why.map(str::to_string);
+        }
+
+        fn check(&self) -> crate::cache::Result<()> {
+            match self.fault.lock().unwrap().clone() {
+                Some(e) => Err(CacheError(e)),
+                None => Ok(()),
+            }
+        }
     }
 
     struct FakeCache(CacheState);
 
     impl FrameCache for FakeCache {
         fn append(&mut self, frames: &[Arc<CanSample>]) -> crate::cache::Result<usize> {
+            self.0.check()?;
             let mut held = self.0.frames.lock().unwrap();
             for f in frames {
                 held.push(Cached {
@@ -1018,6 +1056,35 @@ mod tests {
             "a closed queue takes none"
         );
         assert_eq!(get(&archive.counters.dropped), 10);
+    }
+
+    /// What `cache_batch` reports is what landed, because both `info` lines
+    /// about the disk cache are written from its answer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cache_that_cannot_be_written_reports_nothing_stored() {
+        let cache = CacheState::default();
+        let (_archive, mut batcher, _stop) = channel(
+            FakeSink(SinkState::default()),
+            FakeCache(cache.clone()),
+            &batching(4),
+            0.0,
+        );
+        let frames: Vec<_> = (0..4).map(sample).collect();
+
+        assert_eq!(
+            batcher.cache_batch(&frames),
+            4,
+            "a writable cache takes them"
+        );
+
+        cache.fail(Some("attempt to write a readonly database"));
+        assert_eq!(
+            batcher.cache_batch(&frames),
+            0,
+            "and a read-only one stores none, rather than saying it did"
+        );
+        assert_eq!(get(&batcher.counters.cached), 4, "only the first batch");
+        assert_eq!(get(&batcher.counters.dropped), 4, "the second was lost");
     }
 
     /// Frames move to disk before the queue fills, so a burst that outruns the
