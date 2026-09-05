@@ -7,6 +7,10 @@ STATE_DIR=/var/lib/wiretap-server
 UNIT=wiretap-server.service
 JOURNALD_DROPIN=/etc/systemd/journald.conf.d/95-wiretap-persistent.conf
 
+# Spelled as in the postinst, which make-deb.sh already keeps this script in
+# step with on every path they share.
+say() { echo "wiretap-server: $*"; }
+
 case "$1" in
     remove)
         rm -f "$JOURNALD_DROPIN"
@@ -29,29 +33,32 @@ case "$1" in
         # The configuration, and the environment file with the gateway API key
         # in it. Purge means purge, so they go.
         if [ -d "$CONFIG_DIR" ]; then
-            echo "wiretap-server: removing $CONFIG_DIR (configuration, and any"
-            echo "wiretap-server:   environment file holding the gateway API key)"
+            say "removing $CONFIG_DIR (configuration, and any"
+            say "  environment file holding the gateway API key)"
             rm -rf "$CONFIG_DIR"
         fi
 
-        # The state directory is deliberately NOT removed, against Debian
+        # A state directory with anything in it is NOT removed, against Debian
         # convention. It holds the disk cache, and that cache is only ever
         # non-empty when it is carrying captured frames that never reached the
         # gateway. Losing those to an apt command is worse than an orphaned
         # directory - and this is exactly the moment somebody is removing a
         # package because something is already wrong.
-        # The account goes with the data or not at all. dpkg reserves no uid,
-        # so deleting the owner while keeping the files is what strands a
-        # capture: the next install is given whatever uid is free and inherits
-        # a cache it cannot write. Since postinst creates the directory on
-        # every configure and the branch above never removes it, that means the
-        # account survives a purge on any host that was ever installed - the
-        # deletion here is for the one that was not.
-        if [ -d "$STATE_DIR" ]; then
-            echo "wiretap-server: $STATE_DIR kept, and the $USER account with it. If"
-            echo "wiretap-server:   cache.db is not empty it holds captured frames that"
-            echo "wiretap-server:   never reached the gateway. Remove both by hand if"
-            echo "wiretap-server:   you mean to."
+        #
+        # The account stays with them. dpkg reserves no uid, so deleting the
+        # owner while keeping the files is what strands a capture: the next
+        # install is given whatever uid is free and inherits a cache it cannot
+        # write. Leaving a system account behind is the ordinary Debian answer
+        # anyway - nothing asks a package to delete one, for this exact reason.
+        #
+        # `rmdir` is the test, not `[ -d ]`: the question is whether there is a
+        # capture to keep, and a host that installed this and never ran it has
+        # an empty directory that should simply go. It fails harmlessly when
+        # there is something inside, and succeeds only when there was not.
+        if [ -d "$STATE_DIR" ] && ! rmdir "$STATE_DIR" 2>/dev/null; then
+            say "$STATE_DIR kept, and the $USER account with it: cache.db holds"
+            say "  captured frames that never reached the gateway. To remove both,"
+            say "  rm -rf $STATE_DIR && deluser --system $USER"
         else
             if getent passwd "$USER" >/dev/null 2>&1; then
                 deluser --quiet --system "$USER" >/dev/null 2>&1 \

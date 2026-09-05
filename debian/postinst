@@ -146,6 +146,14 @@ fi
 # uid and inherit a cache it cannot write. postrm keeps the account for that
 # reason too; this repairs a host that is already in the state, which it cannot.
 # Not fatal, per the policy at the bottom of this file.
+#
+# Said out loud when it actually does something. A host in this state has been
+# quietly capturing nothing, and repairing that without a word in the install
+# transcript is how it stays unexplained.
+if [ -n "$(find "$STATE_DIR" ! -user "$USER" -print -quit 2>/dev/null)" ]; then
+    say "re-owning $STATE_DIR to $USER; something here belongs to another uid,"
+    say "  which is what a purge and a reinstall used to leave behind."
+fi
 chown -R "$USER:$USER" "$STATE_DIR" \
     || warn "could not give $STATE_DIR to $USER; the daemon will refuse to start
   on a cache it cannot write, and will say so."

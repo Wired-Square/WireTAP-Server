@@ -18,8 +18,7 @@ Type=exec
 #
 # Note the precedence, which is the Python's and is the opposite of most
 # daemons': the FILE overrides the command line. To see what actually results,
-# with the state directory this unit gives it — without which the report names
-# a cache under $HOME that nothing here opens:
+# with the state directory this unit gives it:
 #
 #     STATE_DIRECTORY=/var/lib/wiretap-server \
 #         wiretap-server --check-config -C /etc/wiretap-server/wiretap-server.toml

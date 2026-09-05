@@ -117,7 +117,12 @@ fi
 # configuration file that nothing ever opens, and the daemon runs on built-in
 # defaults instead. Checked against the postinst's own value, so this asserts
 # the unit reads the file that is actually written rather than a literal.
-if ! grep -qF -- "-C ${CONF_TOML}" "${UNIT}"; then
+#
+# Anchored to ExecStart=, and not a substring search of the whole file: the
+# unit's comments document a --check-config that carries the same flag and the
+# same path, so an unanchored grep is satisfied by the documentation and stops
+# reading the line it is about.
+if ! grep -qE "^ExecStart=.*[[:space:]]-C ${CONF_TOML}([[:space:]]|\$)" "${UNIT}"; then
 	die "packaging/${PKG}.service does not pass -C ${CONF_TOML}.
      The daemon has no default config path, so without that flag the file the
      postinst writes is never read."
@@ -150,9 +155,8 @@ same "the staged cache" "${STATE_DIR}/${STAGED_CACHE_FILE}" \
 # postrm removes what postinst writes, and neither would notice the other
 # renaming it - a purged package that leaves the drop-in behind goes on forcing
 # Storage=persistent on a host that no longer runs this.
-# USER is in here for a sharper reason than the rest: one script chowns the
-# state directory to it and the other decides whether to delete it, and a
-# disagreement leaves a kept capture owned by an account nothing recreates.
+# USER too: postinst chowns the state directory to it and postrm decides
+# whether to delete it.
 for v in USER CONFIG_DIR STATE_DIR UNIT JOURNALD_DROPIN; do
 	same "${v} between postinst and postrm" \
 		"$(maint_var postinst "${v}")" "$(maint_var postrm "${v}")"
@@ -167,17 +171,14 @@ for name in "${STAGED_CACHE_FILE}" "${LEGACY_CACHE_FILE}"; do
 		|| die "settings.rs no longer knows ${name}; debian/postinst still stages to it."
 done
 
-# A different coupling to the same file, and a different failure: this is the
-# variable the documented --check-config command is prefixed with. The daemon
-# derives the cache from it, so without it that command reports a path under
-# $HOME the unit never opens and prints no "adopt on start" line.
+# A different coupling to the same file, and a different failure: the variable
+# the documented --check-config command has to be prefixed with. Guarded from
+# both sides - that the daemon still reads it, and that the two files shipping
+# that command still set it to the path this package uses.
 grep -qF '"STATE_DIRECTORY"' "${SETTINGS}" \
 	|| die "settings.rs no longer reads STATE_DIRECTORY; the packaging still tells
      operators to set it before --check-config."
 
-# And the value, which the unit and the reference config hardcode rather than
-# deriving - eight lines from the StateDirectory= they come from. Checked
-# against ${STATE_DIR}, which is itself already checked against that line.
 for f in "${UNIT}" "${CONFIG}"; do
 	grep -qF "STATE_DIRECTORY=${STATE_DIR}" "${f}" \
 		|| die "${f#"${ROOT}"/} does not prefix its --check-config advice with

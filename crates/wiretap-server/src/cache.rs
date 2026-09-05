@@ -608,9 +608,18 @@ mod tests {
         assert_eq!(reopened.oldest(1).unwrap()[0].sample.arb_id, 0x123);
     }
 
-    /// Refused at open, rather than at the first frame. [`open_conn`] says why
-    /// every later step succeeds on a read-only cache; this pins that none of
-    /// them is reached.
+    /// Refused at open, rather than at the first frame. [`SqliteCache::open_conn`]
+    /// says why every later step succeeds on a read-only cache; this pins that
+    /// none of them is reached.
+    ///
+    /// The read-only-ness comes from a `mode=ro` URI rather than from `chmod`,
+    /// so it holds whatever the uid is — root bypasses the permission bits, and
+    /// a root container is a normal place to work on packaging, which is
+    /// exactly where this guard is most worth having. What the daemon is asked
+    /// is `sqlite3_db_readonly`, which does not care how the connection came to
+    /// be read-only. The permission-bit path is the realistic one and is
+    /// covered end to end, on a Debian host, by
+    /// `packaging/tests/deb-lifecycle.sh`.
     #[test]
     fn a_cache_that_cannot_be_written_is_refused_at_open() {
         let dir = TempDir::new("readonly");
@@ -618,37 +627,16 @@ mod tests {
             let mut c = SqliteCache::open(dir.db(), 100).unwrap();
             c.append(&[sample(1, 0x123)]).unwrap();
         }
-        // The sidecars too: a read-only -shm alone is enough to stop writes,
-        // and leaving them writable would test a case that cannot occur.
-        for f in cache_files(&dir.db()).filter(|f| f.exists()) {
-            let mut perms = std::fs::metadata(&f).unwrap().permissions();
-            perms.set_readonly(true);
-            std::fs::set_permissions(&f, perms).unwrap();
-        }
 
-        // Root bypasses the permission bits, so there the file is not actually
-        // read-only and there is nothing to assert. CI runs `cargo test`
-        // unprivileged - deliberately, see ci.yml - but a root container is a
-        // normal way to work on packaging, and failing there would say nothing
-        // about the code. Detected by trying it rather than by asking for the
-        // uid, which would want libc.
-        if std::fs::OpenOptions::new()
-            .write(true)
-            .open(dir.db())
-            .is_ok()
-        {
-            return;
-        }
-
+        // open_conn rather than open, which would `create_dir_all` the parent
+        // of a path beginning "file:" and leave one in the working tree.
+        let uri = format!("file:{}?mode=ro", dir.db().display());
         // Matched rather than `expect_err`, which would want `Debug` on the
-        // cache itself for the sake of one test.
-        let Err(err) = SqliteCache::open(dir.db(), 100) else {
+        // connection for the sake of one test.
+        let Err(err) = SqliteCache::open_conn(Path::new(&uri)) else {
             panic!("a read-only cache was accepted");
         };
-        assert!(
-            err.to_string().contains("read-only"),
-            "and says which file and why: {err}"
-        );
+        assert!(err.to_string().contains("read-only"), "and says why: {err}");
     }
 
     #[test]
