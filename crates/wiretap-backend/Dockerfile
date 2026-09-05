@@ -18,12 +18,30 @@ COPY Cargo.toml Cargo.lock ./
 # Only what cargo compiles. Copying all of crates/ would put the admin-ui
 # sources, the READMEs and the compose files in the layer that gates
 # `cargo build`, so editing a .tsx would recompile all ~130 crates.
-# A second workspace member needs its manifest here too — cargo resolves every
-# member — but only its manifest.
-COPY crates/wiretap-backend/Cargo.toml crates/wiretap-backend/
-COPY crates/wiretap-backend/src        crates/wiretap-backend/src
-COPY crates/wiretap-backend/schema     crates/wiretap-backend/schema
-RUN cargo build --release -p wiretap-backend
+#
+# Every workspace member, though, and each one's source and not just its
+# manifest. `members = ["crates/*"]` is a glob, so what the workspace contains
+# in here is whatever was copied — and cargo loads every member's manifest, and
+# every path dependency's, before it builds anything. Copying only the backend
+# left `wiretap-model` and `wiretap-ingest-proto` missing, which is a build
+# failure and not a smaller build; the capture server is here so that the
+# workspace matches Cargo.lock and `--locked` can mean something.
+#
+# Nothing here notices when a crate is added, so adding one breaks this build.
+# It is caught by the release workflow building the image, which is the only
+# thing that does.
+COPY crates/wiretap-model/Cargo.toml        crates/wiretap-model/
+COPY crates/wiretap-model/src               crates/wiretap-model/src
+COPY crates/wiretap-ingest-proto/Cargo.toml crates/wiretap-ingest-proto/
+COPY crates/wiretap-ingest-proto/src        crates/wiretap-ingest-proto/src
+COPY crates/wiretap-server/Cargo.toml       crates/wiretap-server/
+COPY crates/wiretap-server/src              crates/wiretap-server/src
+COPY crates/wiretap-backend/Cargo.toml      crates/wiretap-backend/
+COPY crates/wiretap-backend/src             crates/wiretap-backend/src
+COPY crates/wiretap-backend/schema          crates/wiretap-backend/schema
+# --locked for the same reason `npm ci` is used above: a build that may quietly
+# re-resolve is a build that can drift off what was committed and tested.
+RUN cargo build --release --locked -p wiretap-backend
 
 # --- runtime ---
 FROM debian:bookworm-slim
