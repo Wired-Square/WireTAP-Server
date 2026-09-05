@@ -17,6 +17,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only by default; the jobs that need more say so.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # A fresh checkout cannot reuse incremental output, and it is roughly 40% of
@@ -375,10 +379,14 @@ jobs:
             | tar -xJ -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/$czb" >> "$GITHUB_PATH"
 
-      # sqlite3 counts the disk cache; python3 is already here and pushes the
-      # frames that put something in it.
-      - name: Install sqlite3
-        run: sudo apt-get update && sudo apt-get install -y sqlite3
+      # sqlite3 counts the disk cache; python3 pushes the frames that put
+      # something in it. The runner image is reported to carry both, but that
+      # is its business and not a promise, so this asks rather than assuming -
+      # and skips a 20-second `apt-get update` on every leg when it is right.
+      - name: Ensure sqlite3
+        run: |
+          command -v sqlite3 >/dev/null \
+            || { sudo apt-get update && sudo apt-get install -y sqlite3; }
 
       # target/ is cached and make-deb.sh writes into target/deb, so a restored
       # tree can still hold the packages of an older version. The glob below

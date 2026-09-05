@@ -11,6 +11,19 @@
 # CI actually passed for this SHA. A person publishing a draft is a review of
 # the *release*, not a substitute for the gates.
 #
+# The draft covers the .deb files and not the image, and that asymmetry is
+# real: `image` and `manifest` push to GHCR the moment they succeed, so the
+# image is live before anybody looks at the draft. Only a tag can trigger that,
+# and `latest` is held back from pre-releases, which is as far as this goes
+# without an Environment and a required reviewer.
+#
+# ONE-TIME, AFTER THE FIRST RELEASE: a GHCR package created by Actions is
+# PRIVATE by default, and package visibility does not inherit from the repo.
+# crates/wiretap-backend/docker-compose.yml names no tag, so the documented way
+# to run the gateway is an anonymous pull of `:latest` — which fails for
+# everyone until somebody flips the package to Public in its settings once.
+# Nothing here can do it; the token has no scope for it.
+#
 # The .deb files are cross-compiled in ONE job. Both are static musl builds
 # produced by cargo-zigbuild, so an arm64 runner buys nothing here. The image
 # is the opposite case and gets one native runner per architecture: an emulated
@@ -30,6 +43,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Literal rather than derived from github.repository_owner, which is
+  # `Wired-Square` and would need lower-casing at two call sites to say the
+  # same thing. A fork that wants its own image edits one line.
+  IMAGE: ghcr.io/wired-square/wiretap-backend
+  # So `gh` does not depend on the working directory and the git remote; the
+  # upload step runs from target/deb.
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   draft:
@@ -172,12 +192,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # GHCR rejects an upper-case path, and the owner here is `Wired-Square`.
-      - name: Name the image
-        run: |
-          echo "IMAGE=ghcr.io/$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')/wiretap-backend" \
-            >> "$GITHUB_ENV"
-
       - name: Log in to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -223,11 +237,6 @@ jobs:
     permissions:
       packages: write
     steps:
-      - name: Name the image
-        run: |
-          echo "IMAGE=ghcr.io/$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')/wiretap-backend" \
-            >> "$GITHUB_ENV"
-
       - uses: actions/download-artifact@v6
         with:
           pattern: digest-*
@@ -245,8 +254,20 @@ jobs:
       - name: Combine the digests into one manifest
         run: |
           version="${GITHUB_REF_NAME#v}"
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${version}" \
-            --tag "${IMAGE}:latest" \
-            $(printf "${IMAGE}@sha256:%s " $(ls digests))
+          # A loop rather than $(ls) inside printf's *format* string, which
+          # would take a digest containing a % as a conversion.
+          refs=""
+          for d in digests/*; do refs="${refs} ${IMAGE}@sha256:$(basename "$d")"; done
+
+          # `latest` is what crates/wiretap-backend/docker-compose.yml resolves,
+          # since it names no tag - so a pre-release must not move it. The tag
+          # filter is `v*`, which matches v0.2.0-rc1 as happily as v0.2.0.
+          tags="--tag ${IMAGE}:${version}"
+          case "${version}" in
+            *-*) echo "pre-release ${version}: tagging the version only" ;;
+            *)   tags="${tags} --tag ${IMAGE}:latest" ;;
+          esac
+
+          # shellcheck disable=SC2086
+          docker buildx imagetools create ${tags} ${refs}
           docker buildx imagetools inspect "${IMAGE}:${version}"

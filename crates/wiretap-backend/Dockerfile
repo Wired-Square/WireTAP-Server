@@ -34,8 +34,16 @@ COPY crates/wiretap-model/Cargo.toml        crates/wiretap-model/
 COPY crates/wiretap-model/src               crates/wiretap-model/src
 COPY crates/wiretap-ingest-proto/Cargo.toml crates/wiretap-ingest-proto/
 COPY crates/wiretap-ingest-proto/src        crates/wiretap-ingest-proto/src
+# The capture server is a member and not a dependency: cargo has to load its
+# manifest and find *a* target, and never builds it. Its real source is the
+# largest and fastest-moving in the workspace, and putting it here would gate
+# the backend's build on it — every edit to the capture path rebuilding the
+# gateway's whole dependency graph, which is the cost the comment above exists
+# to avoid. A stub satisfies target discovery, and `--locked` still means what
+# it says: resolution reads manifests, not sources.
 COPY crates/wiretap-server/Cargo.toml       crates/wiretap-server/
-COPY crates/wiretap-server/src              crates/wiretap-server/src
+RUN mkdir -p crates/wiretap-server/src \
+    && echo 'fn main() {}' > crates/wiretap-server/src/main.rs
 COPY crates/wiretap-backend/Cargo.toml      crates/wiretap-backend/
 COPY crates/wiretap-backend/src             crates/wiretap-backend/src
 COPY crates/wiretap-backend/schema          crates/wiretap-backend/schema
