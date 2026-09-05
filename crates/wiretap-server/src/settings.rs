@@ -48,6 +48,8 @@ pub struct Batching {
     pub flush_interval: f64,
     pub queue_size: usize,
     pub cache_path: PathBuf,
+    /// How [`cache_path`] was arrived at, when that is worth saying out loud.
+    pub cache_origin: CacheOrigin,
     pub cache_max_mb: u64,
     pub queue_flush_pct: u8,
     /// A cache an older install left in `$HOME`, to be taken over at startup,
@@ -58,6 +60,18 @@ pub struct Batching {
     /// this and [`cache_path`] have to agree on is written once.
     pub legacy_cache_path: Option<PathBuf>,
 }
+
+/// Why [`cache_path`] answered as it did, when that is worth saying out loud,
+/// and `None` when the path speaks for itself.
+///
+/// `--check-config` is documented as being run with `STATE_DIRECTORY` set,
+/// because that is what the packaged unit sets. Run without it the answer
+/// silently becomes a `$HOME` fallback the unit never opens — and no `adopt on
+/// start` row appears either, on exactly the path where an upgrade has just
+/// staged a cache to be adopted. A clause on the end of the line is the
+/// difference between a report that is quietly wrong and one that says which
+/// question it answered.
+type CacheOrigin = Option<&'static str>;
 
 /// The Python's default, and what an existing Pi has a populated copy of.
 const LEGACY_CACHE_FILE: &str = ".wiretap-server-cache.db";
@@ -76,11 +90,13 @@ const STAGED_CACHE_FILE: &str = "adopt.db";
 impl Batching {
     /// Flags first; the file overrides them in [`Settings::apply_file`].
     fn from_cli(cli: &Cli, env: &Env) -> Self {
+        let (cache_path, cache_origin) = cache_path(cli.pg_cache_path.as_deref(), env);
         Self {
             size: cli.pg_batch_size,
             flush_interval: cli.pg_flush_interval,
             queue_size: cli.pg_queue_size,
-            cache_path: cache_path(cli.pg_cache_path.as_deref(), env),
+            cache_path,
+            cache_origin,
             cache_max_mb: cli.pg_cache_max_mb,
             queue_flush_pct: cli.pg_queue_flush_pct,
             // Filled in by `Settings::resolve`, once the file has had its say
@@ -127,16 +143,26 @@ fn legacy_cache_path(in_use: &Path, env: &Env) -> Option<PathBuf> {
 /// The packaged unit goes further and sets `ProtectHome=true`, which hides
 /// `$HOME` entirely — so under it the adoption below can never fire, and
 /// `debian/postinst` moves a legacy cache across before the daemon first runs.
-fn cache_path(configured: Option<&str>, env: &Env) -> PathBuf {
+///
+/// The [`CacheOrigin`] comes back with the path because the path alone does not
+/// say whether it is the one the daemon will use.
+fn cache_path(configured: Option<&str>, env: &Env) -> (PathBuf, CacheOrigin) {
     if let Some(p) = configured.or(env.cache_path.as_deref()) {
-        return PathBuf::from(p);
+        // Nothing to explain: someone named this path.
+        return (PathBuf::from(p), None);
     }
     match (&env.state_dir, &env.home) {
-        (Some(state), _) => Path::new(state).join("cache.db"),
-        (None, Some(home)) => Path::new(home).join(LEGACY_CACHE_FILE),
+        (Some(state), _) => (Path::new(state).join("cache.db"), None),
+        (None, Some(home)) => (
+            Path::new(home).join(LEGACY_CACHE_FILE),
+            Some("from $HOME; the packaged unit sets STATE_DIRECTORY instead"),
+        ),
         // Neither: relative to the working directory, which is at least
         // somewhere a hand-run server can write.
-        (None, None) => PathBuf::from(LEGACY_CACHE_FILE),
+        (None, None) => (
+            PathBuf::from(LEGACY_CACHE_FILE),
+            Some("relative to the working directory; no $STATE_DIRECTORY, no $HOME"),
+        ),
     }
 }
 
@@ -499,7 +525,7 @@ impl Settings {
             // the file has to fall back to the default, not name the working
             // directory.
             if let Some(p) = f.forward.cache_path.as_deref() {
-                b.cache_path = cache_path(Some(p).filter(|p| !p.is_empty()), env);
+                (b.cache_path, b.cache_origin) = cache_path(Some(p).filter(|p| !p.is_empty()), env);
             }
         }
         Ok(())
@@ -578,7 +604,14 @@ impl Settings {
                 ));
                 r.push((
                     "disk cache",
-                    format!("{} (max {} MB)", b.cache_path.display(), b.cache_max_mb),
+                    match b.cache_origin {
+                        Some(origin) => format!(
+                            "{} (max {} MB), {origin}",
+                            b.cache_path.display(),
+                            b.cache_max_mb
+                        ),
+                        None => format!("{} (max {} MB)", b.cache_path.display(), b.cache_max_mb),
+                    },
                 ));
                 if let Some(legacy) = &b.legacy_cache_path {
                     r.push(("adopt on start", legacy.display().to_string()));
@@ -861,23 +894,35 @@ mod tests {
         // A unit with StateDirectory= writes somewhere ProtectHome allows.
         assert_eq!(
             cache_path(None, &systemd),
-            Path::new("/var/lib/wiretap-server/cache.db")
+            (
+                PathBuf::from("/var/lib/wiretap-server/cache.db"),
+                // Nothing to explain: this is the path the unit gives it.
+                None
+            )
         );
         // Without one, the Python's path, so an existing cache is still found.
         assert_eq!(
             cache_path(None, &by_hand),
-            Path::new("/home/pi/.wiretap-server-cache.db")
+            (
+                PathBuf::from("/home/pi/.wiretap-server-cache.db"),
+                // And here it is worth saying so: --check-config run without
+                // STATE_DIRECTORY reports this, and it is not what runs.
+                Some("from $HOME; the packaged unit sets STATE_DIRECTORY instead")
+            )
         );
         // PG_CACHE_PATH is what deployed units set, and it beats both.
         let env = Env {
             cache_path: Some("/mnt/usb/cache.db".into()),
             ..systemd
         };
-        assert_eq!(cache_path(None, &env), Path::new("/mnt/usb/cache.db"));
+        assert_eq!(
+            cache_path(None, &env),
+            (PathBuf::from("/mnt/usb/cache.db"), None)
+        );
         // And an explicit setting beats the environment.
         assert_eq!(
             cache_path(Some("/explicit.db"), &env),
-            Path::new("/explicit.db")
+            (PathBuf::from("/explicit.db"), None)
         );
     }
 

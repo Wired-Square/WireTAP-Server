@@ -74,6 +74,7 @@ async fn frames_survive_a_gateway_outage() {
             flush_interval: 0.5,
             queue_size: 50_000,
             cache_path: cache_path.clone(),
+            cache_origin: None,
             cache_max_mb: 1000,
             queue_flush_pct: 50,
             legacy_cache_path: None,

@@ -711,9 +711,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                 add(&self.counters.written, remaining.len() as u64);
                 info!("shutdown: flushed {} frames to database", remaining.len());
             } else {
-                // Same rule as the drain, and the last line before the process
-                // exits: a flush this reports is a flush nobody goes looking
-                // for afterwards.
+                // Same rule as the drain above.
                 let cached = self.cache_batch(&remaining);
                 if cached > 0 {
                     info!("shutdown: flushed {cached} frames to disk cache");
@@ -776,6 +774,7 @@ mod tests {
             cache_path: PathBuf::from("unused"),
             cache_max_mb: 100,
             queue_flush_pct: 100,
+            cache_origin: None,
             legacy_cache_path: None,
         }
     }
@@ -841,8 +840,10 @@ mod tests {
         next_id: Arc<AtomicI64>,
         full: Arc<AtomicBool>,
         /// A cache that opens and then refuses the write, which `full` cannot
-        /// stand in for — it returns before `append` is reached. Spelled like
-        /// [`SinkState`]'s so there is one way to break a double here.
+        /// stand in for — it returns before `append` is reached. Deliberately
+        /// the same shape and spelling as [`SinkState`]'s, so breaking either
+        /// double reads the same way; they stay separate because the two
+        /// traits return different error types.
         fault: Arc<Mutex<Option<String>>>,
         resets: Arc<AtomicUsize>,
     }

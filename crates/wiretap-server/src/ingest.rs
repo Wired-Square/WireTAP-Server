@@ -373,6 +373,7 @@ mod tests {
             cache_path: PathBuf::from("unused"),
             cache_max_mb: 1,
             queue_flush_pct: 100,
+            cache_origin: None,
             legacy_cache_path: None,
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
