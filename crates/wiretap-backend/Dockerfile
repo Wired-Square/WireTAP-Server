@@ -67,6 +67,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/wiretap-backend /usr/local/bin/wiretap-backend
 COPY --from=admin-ui /ui/dist /usr/share/wiretap-admin
+# What associates the GHCR package with this repository. Without it the package
+# Actions creates stands alone, so the one-time "flip it to Public" that
+# release.yml documents is not reachable from the repository's own page.
+# Last, not next to the FROM: an instruction spliced in above the apt layer
+# changes that layer's cache key, and this label is worth nobody's rebuild.
+LABEL org.opencontainers.image.source=https://github.com/Wired-Square/WireTAP-Server
 EXPOSE 8423 9323
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
     CMD curl -fsS http://localhost:8423/v1/health || exit 1
