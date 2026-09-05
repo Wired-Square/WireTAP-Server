@@ -13,6 +13,27 @@ deliberate change made after cutover, not a silent one made during a port.
 
 ## Deliberate changes
 
+### `--version` exists, and names the commit
+
+The Python had no `--version` — argparse rejects it with a usage error. The Rust
+server reports `wiretap-server 0.1.0 (g4bf526d4489)` and logs the same string as
+the journal's first line, before any complaint about the configuration.
+
+The commit half is there because the version alone cannot identify a build.
+Every `0.1.0` package, file name, `dpkg-query -W` answer and `--version` string
+is the same one, so a report that a binary ran clean for a week names nothing —
+which was found by hashing the binary soaking on the trial box against the one
+in the first release candidate and getting two different answers, both
+`Version: 0.1.0`.
+
+`build.rs` reads the commit from git and marks a tree with uncommitted changes
+`-dirty`. git wins whenever there is a checkout to ask: `WIRETAP_BUILD_ID` is
+the *fallback* for a tree with no `.git`, such as a `git archive` export, and
+does not override a resolvable HEAD — a stray exported variable silently
+outranking ground truth is the failure this exists to prevent, not to add.
+Failing both it reports `unknown`, and `packaging/make-deb.sh` refuses to
+package a binary that says so.
+
 ### The direct-to-PostgreSQL sink is not ported
 
 The Python could write frames to PostgreSQL itself (`[postgres].enable`,

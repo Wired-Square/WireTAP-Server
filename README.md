@@ -87,6 +87,19 @@ sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && sudo ip link set u
 cargo test -p wiretap-server --test vcan_loopback -- --ignored --test-threads=1
 ```
 
+### Which build is this?
+
+```sh
+wiretap-server --version               # wiretap-server 0.1.0 (g4bf526d4489)
+```
+
+The commit is stamped in at build time, because the version alone cannot tell two
+builds apart — every `0.1.0` package and file name is the same one. The daemon logs
+the same string as its first journal line, so a running capture can be identified
+without stopping it. A tree with uncommitted changes is marked `-dirty`; a tree with
+no `.git` reports `unknown` unless `WIRETAP_BUILD_ID` says otherwise, and
+`make-deb.sh` will not package a binary that cannot name its commit.
+
 ## Packaging
 
 ```sh

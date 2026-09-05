@@ -7,6 +7,15 @@ All notable changes to this project are documented here. Entries go under
 
 ### Added
 
+- `wiretap-server --version` reports the commit it was built from —
+  `wiretap-server 0.1.0 (g4bf526d4489)` — and the daemon logs the same string as the
+  journal's first line, so a running capture can be identified without stopping it. The
+  version on its own cannot: every `0.1.0` package, file name and `dpkg-query -W` answer
+  is identical, so "this binary soaked for a week" named nothing. A tree with uncommitted
+  changes is marked `-dirty`; `WIRETAP_BUILD_ID` is the fallback for a tree with no `.git`
+  and never outranks a real checkout; and `make-deb.sh` refuses to package a binary that
+  reports `unknown`.
+
 - Split the capture server and the database gateway out of the WireTAP desktop repo into
   this one, preserving their history back to the original 2026-01-13 `candor-server`
   commit. The desktop repo is unchanged; its copies stay in place until the Rust port is

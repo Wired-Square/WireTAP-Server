@@ -8,7 +8,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::filter::LevelFilter;
 use wiretap_server::{
     cli::Cli,
@@ -36,6 +36,10 @@ fn main() -> ExitCode {
     };
 
     init_logging(resolved.settings.log_level);
+    // The journal's first line, before any complaint about the configuration,
+    // so a report about a long-running daemon can name the build it is about
+    // without stopping it to ask.
+    info!("wiretap-server {}", wiretap_server::VERSION);
     for w in &resolved.warnings {
         warn!("{w}");
     }

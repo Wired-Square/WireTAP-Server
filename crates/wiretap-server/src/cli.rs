@@ -15,7 +15,7 @@ use clap::Parser;
 #[command(
     name = "wiretap-server",
     about = "SocketCAN to TCP GVRET bridge, forwarding captures to a WireTAP gateway",
-    version
+    version = crate::VERSION
 )]
 pub struct Cli {
     /// CAN interface(s), comma-separated. Empty for an ingest-only deployment.

@@ -253,6 +253,18 @@ build_arch() {  # build_arch <arch>
 		die "[${arch}] ${PKG} looks dynamically linked - the musl target did not take"
 	fi
 
+	# The build stamp has to survive into the shipped binary, because the
+	# package version cannot identify a build on its own - two different 0.1.0
+	# binaries is the ambiguity build.rs exists to remove. It degrades to
+	# `unknown` rather than failing, which is right for a `cargo build` and
+	# wrong for something anyone installs. Read from the file for the same
+	# reason as above: a cross-built binary cannot be run here to be asked.
+	if grep -qa ' (unknown)' "${bin}"; then
+		die "[${arch}] ${PKG} cannot name the commit it was built from.
+     build.rs found no git and WIRETAP_BUILD_ID was unset. Build inside a
+     checkout, or pass the commit in WIRETAP_BUILD_ID."
+	fi
+
 	# A size floor, because "it compiled" is not proof a dependency linked. This
 	# binary measured 3.41 MB once the disk cache was actually reachable from
 	# it, and 1.6 MB before that - when SQLite was compiled, linked, and then
