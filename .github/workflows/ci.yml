@@ -31,11 +31,6 @@ jobs:
   gates:
     name: Gates
     runs-on: ubuntu-latest
-    env:
-      # What packaging/zigcc shells out to. Keep it in step with the version
-      # developers build with, since that is the one the cross-build is known
-      # to work under.
-      ZIG_VERSION: "0.16.0"
     steps:
       - uses: actions/checkout@v7
 
@@ -71,11 +66,7 @@ jobs:
       # script compiles C, and a build script runs even for `cargo check`, so
       # the musl gate needs a C cross-compiler and not just a cross-linker.
       - name: Install zig, the musl C cross-compiler
-        run: |
-          dir="zig-x86_64-linux-${ZIG_VERSION}"
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${dir}.tar.xz" \
-            | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/$dir" >> "$GITHUB_PATH"
+        uses: ./.github/actions/zig-toolchain
 
       # On this runner the host gate above is itself Linux, so it already lints
       # the `#[cfg(target_os = "linux")]` modules; what this adds here is the
@@ -93,7 +84,7 @@ jobs:
         run: cargo test --workspace --locked
 
   capture:
-    name: Capture path (vcan)
+    name: Capture path and gateway (vcan)
     runs-on: ubuntu-latest
 
     services:
@@ -201,9 +192,13 @@ jobs:
           cargo test -p wiretap-server --test vcan_loopback --locked -- \
             --ignored --test-threads=1 --nocapture
 
+      # To a file, not to the void. This job now makes 29 HTTP assertions plus
+      # the conformance suite against this process, and a backgrounded stdout
+      # from a step that then exits is orphaned - so every one of them would
+      # fail with nothing to read. The stop step dumps it.
       - name: Start the gateway
         run: |
-          target/debug/wiretap-backend &
+          target/debug/wiretap-backend > "$RUNNER_TEMP/gateway.log" 2>&1 &
           echo "GATEWAY_PID=$!" >> "$GITHUB_ENV"
           for _ in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8423/v1/health | grep -q '"db_ok":true'; then
@@ -317,12 +312,15 @@ jobs:
       # reason. The admin key is a positional argument, not an environment
       # variable, which is its own way to get 25 spurious failures.
       #
-      # parity_test.py is deliberately NOT here: it reaches the database with
-      # `docker compose exec -T timescaledb psql`, and this job's TimescaleDB
-      # is an Actions service container with no compose project behind it. The
-      # compose file also does not publish 5432, so a direct-psql path could
-      # not be tested on a development machine before being relied on here.
-      # Teaching it both routes is worth doing; doing it blind is not.
+      # parity_test.py is not here YET, and this is the last suite that only
+      # runs when somebody remembers - which is how the Dockerfile below came
+      # to be broken for two days. It reaches the database with `docker compose
+      # exec -T timescaledb psql`, which this job's service container is not.
+      #
+      # The honest version of that blocker: this job already runs `psql -h
+      # 127.0.0.1` twice, and docker-compose.yml has the 5432 publication
+      # written and commented out for exactly this purpose. So it is a PGHOST
+      # branch in psql() and two uncommented lines, not a design. Next.
       - name: Gateway smoke test
         run: |
           python3 tools/test_ingest_client.py \
@@ -333,7 +331,10 @@ jobs:
 
       - name: Stop the gateway
         if: always()
-        run: kill -TERM "$GATEWAY_PID" || true
+        run: |
+          kill -TERM "$GATEWAY_PID" || true
+          echo "--- gateway log, last 100 lines ---"
+          tail -100 "$RUNNER_TEMP/gateway.log" || true
 
   # The maintainer scripts, which until 2026-09-05 had never run anywhere. The
   # interesting half of debian/postinst sits behind `running_systemd()`, so it
@@ -353,24 +354,9 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-latest
-            rust_target: x86_64-unknown-linux-musl
-            zig_host: x86_64
-            # There is no aarch64 musl build of cargo-zigbuild; only x86_64
-            # has one, so the host triple differs per leg and is spelled out
-            # rather than derived.
-            czb_host: x86_64-unknown-linux-musl
           - arch: arm64
             runner: ubuntu-24.04-arm
-            rust_target: aarch64-unknown-linux-musl
-            zig_host: aarch64
-            czb_host: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
-    env:
-      # Both pinned, and both have to match what developers build with, since
-      # that is the toolchain the cross-build is known to work under. Keep in
-      # step with the Gates job above.
-      ZIG_VERSION: "0.16.0"
-      CARGO_ZIGBUILD_VERSION: "0.23.0"
     steps:
       - uses: actions/checkout@v7
 
@@ -378,7 +364,9 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup target add ${{ matrix.rust_target }}
+          # Native on both legs, so the musl target follows from the host
+          # rather than from a second copy of make-deb.sh's arch table.
+          rustup target add "$(uname -m)-unknown-linux-musl"
           echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v6
@@ -388,42 +376,29 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            !target/deb
           key: ${{ runner.os }}-${{ matrix.arch }}-cargo-package-${{ env.RUSTC_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.arch }}-cargo-package-${{ env.RUSTC_VERSION }}-
 
-      # From the pinned release tarballs rather than a third-party action, so
-      # what packaging/zigcc shells out to is a version somebody chose.
       - name: Install zig and cargo-zigbuild
-        run: |
-          dir="zig-${{ matrix.zig_host }}-linux-${ZIG_VERSION}"
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${dir}.tar.xz" \
-            | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/$dir" >> "$GITHUB_PATH"
-          # Unpacks into a directory of its own name, not flat, so that is what
-          # goes on PATH.
-          czb="cargo-zigbuild-${{ matrix.czb_host }}"
-          curl -fsSL "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/${czb}.tar.xz" \
-            | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/$czb" >> "$GITHUB_PATH"
+        uses: ./.github/actions/zig-toolchain
 
       # sqlite3 counts the disk cache; python3 pushes the frames that put
       # something in it. The runner image is reported to carry both, but that
       # is its business and not a promise, so this asks rather than assuming -
       # and skips a 20-second `apt-get update` on every leg when it is right.
-      - name: Ensure sqlite3
+      - name: Ensure sqlite3 and python3
         run: |
-          command -v sqlite3 >/dev/null \
-            || { sudo apt-get update && sudo apt-get install -y sqlite3; }
+          missing=""
+          for t in sqlite3 python3; do
+            command -v "$t" >/dev/null || missing="$missing $t"
+          done
+          if [ -n "$missing" ]; then
+            sudo apt-get update && sudo apt-get install -y $missing
+          fi
 
-      # target/ is cached and make-deb.sh writes into target/deb, so a restored
-      # tree can still hold the packages of an older version. The glob below
-      # would then match two and the lifecycle test would run against the
-      # wrong one - which is a green run on a version bump, the commit before
-      # a release. Cheap to make impossible.
       - name: Build the .deb
-        run: |
-          rm -rf target/deb
-          packaging/make-deb.sh --arch ${{ matrix.arch }}
+        run: packaging/make-deb.sh --arch ${{ matrix.arch }}
 
       # Installs, upgrades and purges a real package on this runner, which is
       # disposable. Every assertion is in the script, so it runs identically

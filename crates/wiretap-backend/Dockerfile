@@ -19,17 +19,21 @@ COPY Cargo.toml Cargo.lock ./
 # sources, the READMEs and the compose files in the layer that gates
 # `cargo build`, so editing a .tsx would recompile all ~130 crates.
 #
-# Every workspace member, though, and each one's source and not just its
-# manifest. `members = ["crates/*"]` is a glob, so what the workspace contains
-# in here is whatever was copied — and cargo loads every member's manifest, and
-# every path dependency's, before it builds anything. Copying only the backend
-# left `wiretap-model` and `wiretap-ingest-proto` missing, which is a build
-# failure and not a smaller build; the capture server is here so that the
-# workspace matches Cargo.lock and `--locked` can mean something.
+# Every workspace member has to be here, because `members = ["crates/*"]` is a
+# glob and the workspace inside this image is whatever was copied — cargo loads
+# every member's manifest, and every path dependency's, before it builds
+# anything. Copying only the backend left `wiretap-model` and
+# `wiretap-ingest-proto` missing, which is a build failure and not a smaller
+# build.
+#
+# What each member needs differs, and the rule is below: a *dependency* gets its
+# real source, a member that is only a member gets a stub. The capture server is
+# the latter — present so the workspace matches Cargo.lock and `--locked` can
+# mean something, never compiled.
 #
 # Nothing here notices when a crate is added, so adding one breaks this build.
-# It is caught by the release workflow building the image, which is the only
-# thing that does.
+# `ci.yml`'s image job is what catches that, and it exists because this went
+# unnoticed for two days.
 COPY crates/wiretap-model/Cargo.toml        crates/wiretap-model/
 COPY crates/wiretap-model/src               crates/wiretap-model/src
 COPY crates/wiretap-ingest-proto/Cargo.toml crates/wiretap-ingest-proto/
@@ -42,8 +46,13 @@ COPY crates/wiretap-ingest-proto/src        crates/wiretap-ingest-proto/src
 # to avoid. A stub satisfies target discovery, and `--locked` still means what
 # it says: resolution reads manifests, not sources.
 COPY crates/wiretap-server/Cargo.toml       crates/wiretap-server/
+# compile_error! is inert while nothing builds this crate, and names the file
+# the instant something does - a `--workspace` here would otherwise produce a
+# real binary called wiretap-server that does nothing, and say not a word.
 RUN mkdir -p crates/wiretap-server/src \
-    && echo 'fn main() {}' > crates/wiretap-server/src/main.rs
+    && printf '%s\n%s\n' \
+       'compile_error!("stub: the gateway image fabricates this target; COPY the real source to build it");' \
+       'fn main() {}' > crates/wiretap-server/src/main.rs
 COPY crates/wiretap-backend/Cargo.toml      crates/wiretap-backend/
 COPY crates/wiretap-backend/src             crates/wiretap-backend/src
 COPY crates/wiretap-backend/schema          crates/wiretap-backend/schema

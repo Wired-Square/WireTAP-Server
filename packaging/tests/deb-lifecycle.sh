@@ -60,7 +60,7 @@ DEB="${2:?usage: $0 --yes <path-to-.deb>}"
 # locate package target/deb", which names something the caller never typed.
 # Every invocation from the repo root hits this, CI included; it went unnoticed
 # because every local run so far passed an absolute path.
-DEB="$(cd "$(dirname "$DEB")" && pwd)/$(basename "$DEB")"
+DEB="$(CDPATH= cd -- "$(dirname "$DEB")" && pwd)/$(basename "$DEB")"
 [ -d /run/systemd/system ] || die "no running systemd here; see the header"
 [ "$(id -u)" -eq 0 ] || die "must run as root (it installs a package)"
 

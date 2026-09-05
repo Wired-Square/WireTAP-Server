@@ -270,7 +270,14 @@ build_arch() {  # build_arch <arch>
 	local stage out
 	stage="${ROOT}/target/deb/${PKG}_${version}_${arch}"
 	out="${ROOT}/target/deb/${PKG}_${version}_${arch}.deb"
-	rm -rf "${stage}"
+	# Everything this script has previously produced for THIS architecture,
+	# not just the staging tree it is about to rebuild. A version bump
+	# otherwise leaves the old .deb beside the new one, and the next thing to
+	# glob target/deb - packaging/tests/deb-lifecycle.sh, or a person - gets
+	# two matches and silently takes the older. `--arch all` still accumulates
+	# both architectures, because the pattern is per-arch.
+	rm -rf "${ROOT}/target/deb/${PKG}_"*"_${arch}" \
+	       "${ROOT}/target/deb/${PKG}_"*"_${arch}.deb"
 	mkdir -p "${stage}/DEBIAN" \
 	         "${stage}/usr/bin" \
 	         "${stage}/usr/lib/systemd/system" \

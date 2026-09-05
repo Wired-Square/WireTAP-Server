@@ -57,6 +57,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # The CI check below reads the Actions API, and a job-level block sets
+      # every scope it does not name to `none` — the same rule the image job
+      # further down documents.
+      actions: read
     steps:
       - uses: actions/checkout@v7
 
@@ -89,7 +93,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           runs=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success" \
+            "repos/{owner}/{repo}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success" \
             --jq '.workflow_runs | length')
           echo "successful CI runs for ${GITHUB_SHA}: ${runs}"
           test "${runs}" -gt 0 || {
@@ -103,9 +107,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # The same test the manifest job uses to hold `latest` back. Without
+          # it, publishing an rc draft makes it the repository's *Latest
+          # release* — what /releases/latest and `gh release download` resolve
+          # to — so the image half would be careful and the package half not.
+          pre=""
+          case "${GITHUB_REF_NAME#v}" in *-*) pre="--prerelease" ;; esac
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
           gh release create "${GITHUB_REF_NAME}" \
-            --draft \
+            --draft $pre \
             --title "WireTAP Server ${GITHUB_REF_NAME}" \
             --notes "See the [CHANGELOG](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)."
 
@@ -115,12 +125,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      # Both pinned, and both have to match what developers build with, since
-      # that is the toolchain the cross-build is known to work under. Keep in
-      # step with ci.yml.
-      ZIG_VERSION: "0.16.0"
-      CARGO_ZIGBUILD_VERSION: "0.23.0"
     steps:
       - uses: actions/checkout@v7
 
@@ -129,7 +133,6 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
-          echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
 
       # No cache, deliberately. Actions caches are scoped by ref: a run on a tag
       # can read its own ref and the default branch, so a `release` key nothing
@@ -139,16 +142,7 @@ jobs:
       # artefact somebody downloads.
 
       - name: Install zig and cargo-zigbuild
-        run: |
-          dir="zig-x86_64-linux-${ZIG_VERSION}"
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${dir}.tar.xz" \
-            | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/$dir" >> "$GITHUB_PATH"
-          # Unpacks into a directory of its own name, not flat.
-          czb="cargo-zigbuild-x86_64-unknown-linux-musl"
-          curl -fsSL "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/${czb}.tar.xz" \
-            | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/$czb" >> "$GITHUB_PATH"
+        uses: ./.github/actions/zig-toolchain
 
       # Two files, not the six the plan first sketched: wiretap-web has no
       # crate yet and the gateway ships as an image, so this is one package.
