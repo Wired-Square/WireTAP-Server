@@ -136,6 +136,9 @@ jobs:
       CAPTURE_DB: vehicle_ci
       CONFORMANCE_DB: vehicle_ci_conformance
       PUSHED_DB: vehicle_ci_pushed
+      # smoke_test.sh reads frame_id 2016 (0x7E0) and needs its own database,
+      # seeded by the step that runs it.
+      SMOKE_DB: vehicle_ci_smoke
       # cangen's fixed arbitration id, in hex as cangen wants it. The assertions
       # convert rather than restating it in decimal.
       CANGEN_ID: "2A0"
@@ -303,6 +306,30 @@ jobs:
             "SELECT count(*) FROM public.can_frame;")
           echo "pushed=$pushed"
           test "$pushed" = "3200" || { echo "expected 3200 pushed frames, got $pushed" >&2; exit 1; }
+
+      # The gateway's own endpoint and auth-matrix suite, 29 checks. It has
+      # only ever run when somebody remembered to, which is exactly how the
+      # Dockerfile came to be broken for two days — and it needs no more than
+      # the gateway this job already has running.
+      #
+      # Seeded first: four of the read checks query frame_id 2016 (0x7E0) in a
+      # database nothing else creates, and without it they fail for the wrong
+      # reason. The admin key is a positional argument, not an environment
+      # variable, which is its own way to get 25 spurious failures.
+      #
+      # parity_test.py is deliberately NOT here: it reaches the database with
+      # `docker compose exec -T timescaledb psql`, and this job's TimescaleDB
+      # is an Actions service container with no compose project behind it. The
+      # compose file also does not publish 5432, so a direct-psql path could
+      # not be tested on a development machine before being relied on here.
+      # Teaching it both routes is worth doing; doing it blind is not.
+      - name: Gateway smoke test
+        run: |
+          python3 tools/test_ingest_client.py \
+            --host 127.0.0.1 --port 9323 --token "$WIRETAP_ADMIN_KEY" \
+            --database "$SMOKE_DB" --count 40
+          crates/wiretap-backend/smoke_test.sh \
+            http://127.0.0.1:8423 "$WIRETAP_ADMIN_KEY" "$SMOKE_DB"
 
       - name: Stop the gateway
         if: always()
