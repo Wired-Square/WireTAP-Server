@@ -312,15 +312,22 @@ jobs:
       # reason. The admin key is a positional argument, not an environment
       # variable, which is its own way to get 25 spurious failures.
       #
-      # parity_test.py is not here YET, and this is the last suite that only
-      # runs when somebody remembers - which is how the Dockerfile below came
-      # to be broken for two days. It reaches the database with `docker compose
-      # exec -T timescaledb psql`, which this job's service container is not.
+      # The guard against the backend's sql.rs drifting from the desktop
+      # repo's dbquery.rs, which run near-identical SQL. Cross-repo automation
+      # is still unsolved, but running the backend's half here at least keeps
+      # this side honest - and it was the last suite that only ran when
+      # somebody remembered, which is how the Dockerfile below came to be
+      # broken for two days.
       #
-      # The honest version of that blocker: this job already runs `psql -h
-      # 127.0.0.1` twice, and docker-compose.yml has the 5432 publication
-      # written and commented out for exactly this purpose. So it is a PGHOST
-      # branch in psql() and two uncommented lines, not a design. Next.
+      # PGHOST is what makes it reachable from here: the suite's other route
+      # is `docker compose exec`, and this job's TimescaleDB is a service
+      # container with no compose project behind it. Both routes are tested.
+      - name: Analytical SQL parity
+        run: |
+          PGHOST=127.0.0.1 PGPASSWORD="$POSTGRES_PASSWORD" \
+            python3 crates/wiretap-backend/parity_test.py \
+              http://127.0.0.1:8423 "$WIRETAP_ADMIN_KEY"
+
       - name: Gateway smoke test
         run: |
           python3 tools/test_ingest_client.py \

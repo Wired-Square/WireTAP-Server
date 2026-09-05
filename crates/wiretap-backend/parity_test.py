@@ -11,6 +11,7 @@ compares the API result against a direct psql computation.
 Usage: ./parity_test.py [base-url] [admin-key]
 """
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -50,12 +51,24 @@ def api(method, path, body=None, raw=None):
 
 
 def psql(sql):
-    """Run SQL in the container and return rows as list of tuples (text)."""
-    out = subprocess.check_output(
-        ["docker", "compose", "exec", "-T", "timescaledb",
-         "psql", "-U", "postgres", "-d", DB, "-tA", "-F", "|", "-c", sql],
-        text=True,
-    )
+    """Run SQL against the capture database and return rows as text tuples.
+
+    Two routes, because this has to reach the same database from places that
+    do not agree on how to get at it. Set PGHOST and it goes straight there
+    with psql, which is what a CI job with a service container has (and what
+    Debian's compose package needs, since it ships `docker-compose` and not
+    the `docker compose` plugin this otherwise calls). Unset, it goes through
+    the compose project, which is what a developer running the stack from
+    crates/wiretap-backend has and needs no port published to do it.
+
+    PGPASSWORD is the caller's business either way.
+    """
+    args = ["psql", "-U", "postgres", "-d", DB, "-tA", "-F", "|", "-c", sql]
+    if os.environ.get("PGHOST"):
+        cmd = args
+    else:
+        cmd = ["docker", "compose", "exec", "-T", "timescaledb", *args]
+    out = subprocess.check_output(cmd, text=True)
     return [line.split("|") for line in out.strip().splitlines() if line]
 
 
