@@ -1,5 +1,6 @@
-# The four gates the repo already holds itself to, plus the two things a
-# development machine cannot do: run the capture path, and install the package.
+# The four gates the repo already holds itself to, plus the three things that
+# rot silently otherwise: the capture path, the package, and the gateway image.
+# Each is here because it went unexecuted long enough to break — see the job.
 #
 # `source/socketcan.rs` and the CAN half of `pipeline.rs` are Linux-only, and
 # there is no `vcan` on macOS nor in Docker Desktop's kernel — so before this
@@ -368,3 +369,26 @@ jobs:
         run: |
           sudo packaging/tests/deb-lifecycle.sh --yes \
             target/deb/wiretap-server_*_amd64.deb
+
+  # The gateway image, built and thrown away. Nothing else builds it: the
+  # capture job compiles the gateway with `cargo build` on the runner so the
+  # workspace build is shared, and `docker compose up --build` is a thing only
+  # a person runs. So between 2026-09-03 and 2026-09-05 the Dockerfile did not
+  # build at all — it copies workspace members by name and two crates had been
+  # added since — and neither the documented compose path nor a release would
+  # have worked. Cheap insurance against that happening again.
+  #
+  # One architecture and no push. Multi-arch by digest is release.yml's job,
+  # and this only has to answer "does it still build".
+  image:
+    name: Gateway image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build it, keep nothing
+        run: |
+          docker buildx build \
+            --file crates/wiretap-backend/Dockerfile \
+            --output type=cacheonly \
+            .
