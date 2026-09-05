@@ -22,20 +22,25 @@ described below. The capture server is being ported from the Python implementati
 lived in the WireTAP repo; that Python is kept at [tools/oracle/](tools/oracle/) as the
 reference the port is tested against, and it still runs. The Rust now does all of it —
 capture, the GVRET bridge, archiving to a gateway, the disk cache that carries an outage,
-and the listener for pushed frames — and every part of it has now executed, the SocketCAN
-half against real CAN hardware. What it has *not* had is the field validation that earns
-the switch: a 48-hour run beside the Python on the same bus, and a week-long soak. So the
-Python is still what a deployment should run.
+and the listener for pushed frames — and every part of it has now executed. It has run
+end to end on a real Debian host against two live CAN buses, capturing ~250 frames/s into
+a gateway on the same machine with nothing dropped. What it has *not* had is the
+comparison that earns the switch: a 48-hour run beside the Python on the same bus, and a
+week-long soak. So the Python is still what a deployment should run.
 
 **The capture server is packaged and the package installs; nothing is published yet.**
 `packaging/make-deb.sh --arch all` builds `wiretap-server` as a static musl `.deb` for
-arm64 and amd64, installable on any distribution with systemd. The arm64 package has been
-taken through its whole lifecycle on Debian bookworm — install, reinstall, an upgrade from
-an existing Python deployment, remove, purge, and an image-build chroot with no PID 1 — and
-the disk cache was counted at every step. Nothing is published yet, but the workflow that
-would is written: a `v*` tag drafts a release, attaches both `.deb` files with
-`SHA256SUMS`, and pushes a multi-architecture gateway image to GHCR for a human to publish.
-The `wiretap-web` package arrives later.
+arm64 and amd64, installable on any distribution with systemd. **Both architectures go
+through the whole lifecycle on every CI run** — install, reinstall over a stopped and a
+running daemon, a disk cache the daemon cannot write, remove and purge — with the cache
+counted at each step; the upgrade-from-a-Python-deployment path is a manual drill, since it
+needs a Python deployment to displace. The amd64 package has also been installed on a real
+Debian 13 host and run against live CAN hardware, which is a distribution the package does
+not target and did not need to.
+
+Nothing is published yet, but the workflow that would is written: a `v*` tag drafts a
+release, attaches both `.deb` files with `SHA256SUMS`, and pushes a multi-architecture
+gateway image to GHCR for a human to publish. `wiretap-web` arrives later.
 
 ## Running the gateway
 

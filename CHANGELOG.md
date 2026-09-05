@@ -167,6 +167,17 @@ All notable changes to this project are documented here. Entries go under
   booted systemd host and so needs no container. It is also the only place the amd64
   package is installed at all. And the gateway image is built and thrown away, because
   nothing else built it.
+- The analytical SQL parity suite runs in CI. `parity_test.py` reached the database only
+  through `docker compose exec`, so it could run on a developer's stack and nowhere else —
+  and it guards the backend's `sql.rs` against drifting from the desktop repo's
+  `dbquery.rs`, which nothing else checks. It now takes `PGHOST` when that is set and the
+  compose project otherwise, which covers an Actions service container, a Debian host whose
+  packaged compose is the standalone binary, and the stack a developer already runs. Both
+  routes are tested.
+- CI keeps the `.deb` it lifecycle-tests, as a build artefact. A green package job proved a
+  package and then discarded it, so deploying one meant rebuilding it on a laptop.
+  Publishing remains `release.yml`'s job; this makes a tested build reachable without
+  cutting a tag for it.
 - `.github/workflows/release.yml`. A `v*` tag drafts a release, cross-builds both `.deb`
   files with `SHA256SUMS` from one job, and builds the gateway image natively on an amd64
   and an arm64 runner, pushing each by digest and combining them into one multi-architecture

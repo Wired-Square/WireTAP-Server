@@ -6,6 +6,14 @@
 //! the queue when the sink returns, so frames come out in the order they went
 //! in across an outage boundary.
 //!
+//! **That order is per-bus.** There is one queue however many interfaces feed
+//! it, so frames from two buses interleave and their kernel receive times cross
+//! — a multi-bus archive ordered by `ingest_ts` therefore shows timestamps
+//! going backwards at bus boundaries, and that is not a fault. Measured on a
+//! live two-bus capture: zero inversions within each bus over 34 372 and
+//! 22 460 rows, 38 across the pair. An integrity query wanting the guarantee
+//! this module actually makes has to `PARTITION BY bus`.
+//!
 //! **The log messages here are a compatibility surface.** The shipped
 //! `wiretap-server.toml` tells operators to grep for them, so every one at
 //! `info` and above is the Python's string verbatim — including the ones that
