@@ -243,12 +243,11 @@ All notable changes to this project are documented here. Entries go under
   it — it had never been formatted, having lived in a repo whose CI only built the desktop
   app. `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test` all pass.
 - A disk cache the daemon could read but not write started normally and then dropped every
-  frame. Opening one proves nothing about writing it: SQLite retries `O_RDONLY` after an
-  `EACCES`, the pragmas return the mode already set, `CREATE TABLE IF NOT EXISTS` writes
-  nothing to a table that exists, and the row count is a read — so the startup check that
-  exists to refuse capturing without an archive passed, and the first frame was what failed.
-  The cache is now refused at open, naming the file, which also covers a state directory
-  restored from a backup or carried between machines on an SD card.
+  frame. Opening one proves nothing about writing it — SQLite retries `O_RDONLY` after an
+  `EACCES` — so the startup check that exists to refuse capturing without an archive passed,
+  and the first frame was what failed. The cache is now refused at open, naming the file,
+  which also covers a state directory restored from a backup or carried between machines on
+  an SD card.
 - A purge followed by an install could leave that cache unreadable, which is how the above
   was found. `postrm purge` keeps `/var/lib/wiretap-server` because it holds frames that
   never reached the gateway, but it also deleted the `wiretap` account — and dpkg reserves
@@ -263,7 +262,8 @@ All notable changes to this project are documented here. Entries go under
   `STATE_DIRECTORY`, so the report named a cache path under `$HOME` that the unit never
   opens and omitted the line saying a staged cache was waiting to be adopted — on the one
   path where it had just said frames were staged. The unit and the reference config printed
-  the same command and are fixed with it.
+  the same command and are fixed with it. `--check-config` now also says where it got the
+  cache path, so forgetting the variable is answered rather than believed.
 
 ### Notes
 

@@ -1,5 +1,5 @@
-# The four gates the repo already holds itself to, plus the one thing no
-# development machine can do: run the capture path.
+# The four gates the repo already holds itself to, plus the two things a
+# development machine cannot do: run the capture path, and install the package.
 #
 # `source/socketcan.rs` and the CAN half of `pipeline.rs` are Linux-only, and
 # there is no `vcan` on macOS nor in Docker Desktop's kernel — so before this
@@ -302,3 +302,69 @@ jobs:
       - name: Stop the gateway
         if: always()
         run: kill -TERM "$GATEWAY_PID" || true
+
+  # The maintainer scripts, which until 2026-09-05 had never run anywhere. The
+  # interesting half of debian/postinst sits behind `running_systemd()`, so it
+  # needs a booted host - and the runner is one, which is why this installs the
+  # package on the runner itself rather than in a container. It is also the
+  # only place the amd64 package gets installed at all: it is built on a Mac
+  # and every manual drill so far has been arm64.
+  package:
+    name: Package lifecycle (.deb)
+    runs-on: ubuntu-latest
+    env:
+      # Both pinned, and both have to match what developers build with, since
+      # that is the toolchain the cross-build is known to work under. Keep in
+      # step with the Gates job above.
+      ZIG_VERSION: "0.16.0"
+      CARGO_ZIGBUILD_VERSION: "0.23.0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+          echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-package-${{ env.RUSTC_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-package-${{ env.RUSTC_VERSION }}-
+
+      # From the pinned release tarballs rather than a third-party action, so
+      # what packaging/zigcc shells out to is a version somebody chose.
+      - name: Install zig and cargo-zigbuild
+        run: |
+          dir="zig-x86_64-linux-${ZIG_VERSION}"
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${dir}.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$dir" >> "$GITHUB_PATH"
+          # Unpacks into a directory of its own name, not flat, so that is what
+          # goes on PATH.
+          czb="cargo-zigbuild-x86_64-unknown-linux-musl"
+          curl -fsSL "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/${czb}.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$czb" >> "$GITHUB_PATH"
+
+      # sqlite3 counts the disk cache; python3 is already here and pushes the
+      # frames that put something in it.
+      - name: Install sqlite3
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+
+      - name: Build the .deb
+        run: packaging/make-deb.sh --arch amd64
+
+      # Installs, upgrades and purges a real package on this runner, which is
+      # disposable. Every assertion is in the script, so it runs identically
+      # against a container on a laptop.
+      - name: Install, upgrade, remove, purge
+        run: |
+          sudo packaging/tests/deb-lifecycle.sh --yes \
+            target/deb/wiretap-server_*_amd64.deb

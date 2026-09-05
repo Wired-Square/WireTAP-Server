@@ -25,10 +25,13 @@ capture, the GVRET bridge, archiving to a gateway, the disk cache that carries a
 and the listener for pushed frames — but it has not been through the field validation that
 earns the switch, so the Python is still what a deployment should run.
 
-**The capture server is packaged; nothing is published yet.** `packaging/make-deb.sh
---arch all` builds `wiretap-server` as a static musl `.deb` for arm64 and amd64,
-installable on any distribution with systemd. Published `.deb` files, the `wiretap-web`
-package and a multi-architecture gateway image arrive with the first tagged release.
+**The capture server is packaged and the package installs; nothing is published yet.**
+`packaging/make-deb.sh --arch all` builds `wiretap-server` as a static musl `.deb` for
+arm64 and amd64, installable on any distribution with systemd. The arm64 package has been
+taken through its whole lifecycle on Debian bookworm — install, reinstall, an upgrade from
+an existing Python deployment, remove, purge, and an image-build chroot with no PID 1 — and
+the disk cache was counted at every step. Published `.deb` files, the `wiretap-web` package
+and a multi-architecture gateway image arrive with the first tagged release.
 
 ## Running the gateway
 
@@ -81,10 +84,34 @@ packaging/make-deb.sh --arch all      # target/deb/wiretap-server_<version>_<arc
 ```
 
 Needs `cargo-zigbuild`, `zig` and `dpkg-deb`, and runs on macOS as well as Linux — nothing
-is compiled by the packaging itself. The script refuses to build a package that could not
-work: it checks the unit's `ExecStart`, the address families the CAN socket and the bitrate
-query need, the ELF architecture, that the musl target actually took, and a size floor that
-catches SQLite being dead-code-eliminated.
+is compiled by the packaging itself.
+
+The script refuses to build a package that could not work. Some of that is about the
+binary: the ELF architecture, that the musl target actually took, and a size floor that
+catches SQLite being dead-code-eliminated. The rest is about the several files that have to
+agree with each other and that nothing at runtime notices have stopped agreeing — the
+unit's `ExecStart` and its `-C` flag, the address families the CAN socket and the bitrate
+query need, the paths and the system user shared between `debian/postinst` and
+`debian/postrm`, and the names the packaging borrows from the daemon rather than owning
+(the staged-cache filenames, and the `STATE_DIRECTORY` the documented `--check-config`
+command is prefixed with). Each is compared against whichever file actually owns it, so a
+mismatch is a failed build rather than a host that looks healthy and archives nothing.
+
+### Testing the package
+
+The maintainer scripts do most of their work only when systemd is running, so a container
+that boots it is the cheapest honest test — no Raspberry Pi needed:
+
+```sh
+docker run -d --name wt --privileged --cgroupns=host \
+  -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
+  -v "$PWD/target/deb:/debs:ro" <debian-bookworm-with-systemd> /sbin/init
+docker exec wt apt-get install -y /debs/wiretap-server_0.1.0_arm64.deb
+```
+
+The image is stock `debian:bookworm` plus `systemd systemd-sysv dbus init-system-helpers
+adduser`. Rebuild the `.deb` first — `target/deb/` is a build artefact and says nothing
+about what is committed.
 
 ## Licence
 
