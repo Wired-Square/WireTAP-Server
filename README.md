@@ -52,7 +52,8 @@ host that cannot build images, see [crates/wiretap-backend/deploy/](crates/wiret
 | [tools/](tools/) | Test and admin scripts. Never packaged, never shipped |
 | [tools/oracle/](tools/oracle/) | The Python server, kept runnable as the port's reference |
 | [docs/ingest-protocol.md](docs/ingest-protocol.md) | The binary ingest wire format, for anyone writing capture-device firmware |
-| [debian/](debian/) | Package metadata |
+| [debian/](debian/) | Package metadata, and the maintainer scripts |
+| [packaging/](packaging/) | `make-deb.sh`, the systemd unit, the reference config, and the lifecycle test |
 
 ## Build
 
@@ -101,19 +102,28 @@ mismatch is a failed build rather than a host that looks healthy and archives no
 
 ### Testing the package
 
-The maintainer scripts do most of their work only when systemd is running, so a container
-that boots it is the cheapest honest test — no Raspberry Pi needed:
+[packaging/tests/deb-lifecycle.sh](packaging/tests/deb-lifecycle.sh) takes a built `.deb`
+through install, reinstall over both a stopped and a running daemon, a disk cache it cannot
+write, remove and purge — nine steps, asserting at each, and counting the cache throughout.
+CI runs it on the runner, which is itself a booted systemd host.
+
+It installs and purges a real system package, so run it somewhere disposable; `--yes` is
+the acknowledgement of that. The maintainer scripts do most of their work only when systemd
+is running, so locally that means a container which boots it — no Raspberry Pi needed:
 
 ```sh
+packaging/make-deb.sh --arch arm64
 docker run -d --name wt --privileged --cgroupns=host \
   -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
-  -v "$PWD/target/deb:/debs:ro" <debian-bookworm-with-systemd> /sbin/init
-docker exec wt apt-get install -y /debs/wiretap-server_0.1.0_arm64.deb
+  -v "$PWD:/src:ro" <debian-bookworm-with-systemd> /sbin/init
+docker exec wt sh -c 'cp -r /src /work'
+docker exec wt /work/packaging/tests/deb-lifecycle.sh --yes \
+  /work/target/deb/wiretap-server_0.1.0_arm64.deb
 ```
 
 The image is stock `debian:bookworm` plus `systemd systemd-sysv dbus init-system-helpers
-adduser`. Rebuild the `.deb` first — `target/deb/` is a build artefact and says nothing
-about what is committed.
+adduser sqlite3 python3`. Rebuild the `.deb` first — `target/deb/` is a build artefact and
+says nothing about what is committed.
 
 ## Licence
 
