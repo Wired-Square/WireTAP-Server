@@ -408,6 +408,18 @@ jobs:
           sudo packaging/tests/deb-lifecycle.sh --yes \
             target/deb/wiretap-server_*_${{ matrix.arch }}.deb
 
+      # Kept, so a package that has been through the nine steps above can be
+      # deployed rather than rebuilt on somebody's laptop. `release.yml` is
+      # what publishes; this is what makes a green run usable for a field
+      # trial without cutting a tag for it.
+      - name: Keep the package
+        uses: actions/upload-artifact@v6
+        with:
+          name: wiretap-server-${{ matrix.arch }}
+          path: target/deb/wiretap-server_*_${{ matrix.arch }}.deb
+          if-no-files-found: error
+          retention-days: 14
+
   # The gateway image, built and thrown away. Nothing else builds it: the
   # capture job compiles the gateway with `cargo build` on the runner so the
   # workspace build is shared, and `docker compose up --build` is a thing only
