@@ -18,15 +18,31 @@ Dockerfile. Pick one:
 **A. Build natively on the target host** (no registry; what we use for the NAS).
 Copy a checkout to the host, then:
 ```bash
-docker build -f crates/wiretap-backend/Dockerfile -t wiretap-backend:latest .
+docker build -f crates/wiretap-backend/Dockerfile \
+  --build-arg "WIRETAP_BUILD_ID=$(packaging/build-id.sh)" \
+  -t wiretap-backend:latest .
 ```
 Run it from the repo root — `wiretap-backend` is a workspace member, so cargo
 needs the root `Cargo.toml` and `Cargo.lock`, and the context must include them.
 
+`--build-arg` is what lets the image name the commit it came from, on
+`/v1/health` and in its `org.opencontainers.image.revision` label — a container
+build has no `.git` to ask. Without it `/v1/health` reports `0.1.0 (unknown)`
+and the label is present but empty, against a `:latest` tag that names no
+particular build.
+
+`packaging/build-id.sh` rather than a `git rev-parse` by hand: it adds the
+`-dirty` marker an edited tree needs, and it *fails* in an export with no
+`.git` instead of quietly stamping a bare `g`. If you are building from such an
+export, pass `WIRETAP_BUILD_ID` yourself or accept `unknown` — never a value the
+shell built from a failed command.
+
 **B. Build elsewhere, copy the image** (no registry, cross-machine). Build for
 the target's architecture, then stream it over SSH:
 ```bash
-docker build --platform linux/amd64 -f crates/wiretap-backend/Dockerfile -t wiretap-backend:latest .
+docker build --platform linux/amd64 -f crates/wiretap-backend/Dockerfile \
+  --build-arg "WIRETAP_BUILD_ID=$(packaging/build-id.sh)" \
+  -t wiretap-backend:latest .
 docker save wiretap-backend:latest | ssh root@nas 'docker load'
 ```
 (Apple Silicon must pass `--platform linux/amd64` for an x86_64 NAS.)

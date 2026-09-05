@@ -41,6 +41,15 @@ open http://localhost:8423/admin               # sign in with WIRETAP_ADMIN_KEY
 The default capture database (`wiretap`) and the API-key store are created on
 first start.
 
+`/v1/health` reports `0.1.0 (unknown)` for an image built this way, because a
+container build has no `.git` to read. That is honest and fine for development.
+To build one that names its commit — worth it for anything you might still be
+running next week:
+
+```bash
+WIRETAP_BUILD_ID=$(../../packaging/build-id.sh) docker compose up -d --build
+```
+
 ## API keys & roles
 
 Keys live in the database (`wiretap_meta.api_keys`, sha256-hashed); the

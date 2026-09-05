@@ -30,6 +30,12 @@ services:
     build:
       context: ../..
       dockerfile: crates/wiretap-backend/Dockerfile
+      # The commit this image names, on /v1/health and its revision label — a
+      # container build has no `.git` to ask. Without it the version reads
+      # `0.1.0 (unknown)`. To stamp it:
+      #   WIRETAP_BUILD_ID=$(../../packaging/build-id.sh) docker compose up -d --build
+      args:
+        WIRETAP_BUILD_ID: ${WIRETAP_BUILD_ID:-}
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       WIRETAP_ADMIN_KEY: ${WIRETAP_ADMIN_KEY:-}

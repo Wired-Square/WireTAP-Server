@@ -276,6 +276,22 @@ All notable changes to this project are documented here. Entries go under
 
 ### Fixed
 
+- **A gateway built the documented way could not name its commit.** `ci.yml` and
+  `release.yml` pass `WIRETAP_BUILD_ID`; `docker-compose.yml` and
+  `deploy/README.md`'s own `docker build` methods did not — so every hand-built image
+  reported `0.1.0 (unknown)` on `/v1/health` and carried an empty
+  `org.opencontainers.image.revision`, against a `:latest` tag that names no particular
+  build. That is the one artefact an operator reaches for first, and the only one the
+  build-stamp work had missed. Found by deploying the trial box and reading its
+  `/v1/health`.
+- `packaging/build-id.sh` prints the canonical build id for a checkout, and the docs call
+  it instead of spelling `git rev-parse` inline. The format is the thing two
+  implementations drift on — which is why `wiretap-build-id` exists — and a hand-written
+  copy drops the `-dirty` marker, so an image built from an edited tree claims a commit it
+  is not from. `make-deb.sh` refuses to ship exactly that for the `.deb`, by grepping the
+  built binary for the whole stamp. The script also *fails* in an export with no `.git`
+  rather than expanding to a bare `g` and stamping that, which reads as a real id and is
+  worse than `unknown`.
 - The disk cache under-reported its own size, so `cache_max_mb` did not bound it. It stat'd
   the database file alone, but in WAL mode a gateway outage's frames sit in `cache.db-wal`
   until a checkpoint — so the measurement was wrong in exactly the situation the limit
