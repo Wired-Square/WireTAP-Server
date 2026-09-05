@@ -8,7 +8,14 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[build-dependencies]
+# Stamps the commit into --version; shared with the gateway so the two cannot
+# drift on what a build id looks like.
+wiretap-build-id = { path = "../wiretap-build-id" }
+
 [dependencies]
+# Also a build-dependency above; this side is the build_version! macro only.
+wiretap-build-id = { path = "../wiretap-build-id" }
 wiretap-model = { path = "../wiretap-model" }
 # No `color` (stdout is a journal pipe) and no `suggestions` (a typo at an
 # interactive shell is one --help away): together they cost 33 KB and 7 crates.

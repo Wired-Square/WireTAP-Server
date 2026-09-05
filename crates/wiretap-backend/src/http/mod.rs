@@ -161,7 +161,7 @@ async fn health(State(state): State<St>) -> Json<serde_json::Value> {
     let db_ok = state.dbs.connect_raw("postgres").await.is_ok();
     Json(json!({
         "status": if db_ok { "ok" } else { "degraded" },
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::VERSION,
         "db_ok": db_ok,
     }))
 }

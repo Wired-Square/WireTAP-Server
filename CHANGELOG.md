@@ -8,13 +8,30 @@ All notable changes to this project are documented here. Entries go under
 ### Added
 
 - `wiretap-server --version` reports the commit it was built from —
-  `wiretap-server 0.1.0 (g4bf526d4489)` — and the daemon logs the same string as the
+  `wiretap-server 0.1.0 (g4bf526d44891)` — and the daemon logs the same string as the
   journal's first line, so a running capture can be identified without stopping it. The
   version on its own cannot: every `0.1.0` package, file name and `dpkg-query -W` answer
   is identical, so "this binary soaked for a week" named nothing. A tree with uncommitted
   changes is marked `-dirty`; `WIRETAP_BUILD_ID` is the fallback for a tree with no `.git`
   and never outranks a real checkout; and `make-deb.sh` refuses to package a binary that
-  reports `unknown`.
+  reports `unknown`, or one built from a commit other than the package's own.
+- The **package** version names the commit too, so `dpkg-query -W` and the file name can
+  tell two builds apart: `0.1.0~git20260905.36bfab1729af`. A bare `0.1.0` needs `HEAD`
+  to carry that release's tag, or an explicit `--version`; a pre-release tag `v0.1.0-rc1` becomes
+  `0.1.0~rc1`. `~` rather than `+` so everything sorts *below* the release it precedes —
+  `0.1.0~git… < 0.1.0~rc1 < 0.1.0` — which is what lets the release install cleanly over
+  a test box running any of them. The date leads the commit because a bare SHA has no
+  order at all: dpkg reads `0.1.0~gf00` as newer than `0.1.0~g0ff`.
+- The **gateway** reports the same on `/v1/health`, and its image carries
+  `org.opencontainers.image.revision` so a registry client can read the commit without
+  running it — which matters more there than for the capture server, because the tag in
+  play is `:latest` either way: `docker-compose.yml` has a `build:` and no `image:`, so it
+  builds locally, and `deploy/README.md`'s own methods build or `docker save` rather than
+  pull. A mutable tag names no build. There is no `.git` inside a container build, so the Dockerfile takes
+  `WIRETAP_BUILD_ID` as a build argument and both workflows pass it.
+- `wiretap-build-id` — the build-script helper behind all of the above, shared by the
+  capture server and the gateway rather than copied into each, so the two cannot drift on
+  the abbreviation length, the `-dirty` marker or the override's precedence.
 
 - Split the capture server and the database gateway out of the WireTAP desktop repo into
   this one, preserving their history back to the original 2026-01-13 `candor-server`

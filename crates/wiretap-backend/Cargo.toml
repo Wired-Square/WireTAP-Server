@@ -8,7 +8,14 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[build-dependencies]
+# Stamps the commit into /v1/health; shared with the capture server so the two
+# cannot drift on what a build id looks like.
+wiretap-build-id = { path = "../wiretap-build-id" }
+
 [dependencies]
+# Also a build-dependency above; this side is the build_version! macro only.
+wiretap-build-id = { path = "../wiretap-build-id" }
 # Only the sample types; default-features off keeps the TOML parser out.
 wiretap-model = { path = "../wiretap-model", default-features = false }
 wiretap-ingest-proto = { path = "../wiretap-ingest-proto" }

@@ -2,6 +2,12 @@
 //! TimescaleDB. The only process that talks to Postgres — devices and the
 //! desktop client authenticate with API keys.
 
+/// `0.1.0 (g36bfab1729af)` — the package version and the commit `build.rs`
+/// stamps in, reported by `/v1/health`. See `wiretap-build-id` for why the
+/// version alone is not enough; it matters more here than for the capture
+/// server, because the image's documented tag is the mutable `:latest`.
+pub const VERSION: &str = wiretap_build_id::build_version!();
+
 mod config;
 mod db;
 mod http;
@@ -38,6 +44,12 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    // Before anything that can fail or retry. /v1/health carries this too, but
+    // only once the listener is up: a gateway looping in the Postgres wait
+    // below, or one that never binds, would otherwise be a container with no
+    // way to say which build it is.
+    tracing::info!("wiretap-backend {VERSION}");
+
     let config = Arc::new(Config::from_env()?);
     let dbs = Databases::new(config.clone());
 

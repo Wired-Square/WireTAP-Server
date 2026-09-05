@@ -9,15 +9,10 @@
 //! socket — which is what lets the port be checked against the Python it
 //! replaces.
 
-/// `0.1.0 (g4bf526d4489)` — the package version and the commit `build.rs`
+/// `0.1.0 (g4bf526d44891)` — the package version and the commit `build.rs`
 /// stamps in, reported by `--version` and by the journal's first line. See
-/// `build.rs` for why the version alone is not enough.
-pub const VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    " (",
-    env!("WIRETAP_BUILD_ID"),
-    ")"
-);
+/// `wiretap-build-id` for why the version alone is not enough.
+pub const VERSION: &str = wiretap_build_id::build_version!();
 
 pub mod archive;
 pub mod cache;

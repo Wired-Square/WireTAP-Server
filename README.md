@@ -89,16 +89,30 @@ cargo test -p wiretap-server --test vcan_loopback -- --ignored --test-threads=1
 
 ### Which build is this?
 
+Every artefact names the commit it came from, because a version alone cannot tell
+two builds apart — every `0.1.0` binary, package and file name looks identical.
+
 ```sh
-wiretap-server --version               # wiretap-server 0.1.0 (g4bf526d4489)
+wiretap-server --version                    # wiretap-server 0.1.0 (g36bfab1729af)
+dpkg-query -W wiretap-server                # wiretap-server\t0.1.0~git20260905.36bfab…
+curl -s localhost:8423/v1/health | jq .version   # the gateway
+docker inspect --format \
+  '{{index .Config.Labels "org.opencontainers.image.revision"}}' <image>
 ```
 
-The commit is stamped in at build time, because the version alone cannot tell two
-builds apart — every `0.1.0` package and file name is the same one. The daemon logs
-the same string as its first journal line, so a running capture can be identified
-without stopping it. A tree with uncommitted changes is marked `-dirty`; a tree with
-no `.git` reports `unknown` unless `WIRETAP_BUILD_ID` says otherwise, and
-`make-deb.sh` will not package a binary that cannot name its commit.
+The daemon logs its version as the first journal line, so a running capture can be
+identified without stopping it. A tree with uncommitted changes is marked `-dirty`,
+and `make-deb.sh` refuses to package a binary that cannot name its commit, or one
+built from a commit other than the package's own.
+
+Package versions sort below the release they precede — `0.1.0~git20260905.36bfab <
+0.1.0~rc1 < 0.1.0` — so the release always installs cleanly over anything that came
+before it. A build gets the bare `0.1.0` only when `HEAD` carries that release's
+tag — or when `make-deb.sh --version` is told to use it.
+
+git is the source of truth. `WIRETAP_BUILD_ID` is the fallback for a tree with no
+`.git`, which is how the container build learns its commit — the Dockerfile takes it
+as a build argument, and CI passes it.
 
 ## Packaging
 

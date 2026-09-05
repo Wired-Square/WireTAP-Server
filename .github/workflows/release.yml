@@ -18,11 +18,15 @@
 # without an Environment and a required reviewer.
 #
 # ONE-TIME, AFTER THE FIRST RELEASE: a GHCR package created by Actions is
-# PRIVATE by default, and package visibility does not inherit from the repo.
-# crates/wiretap-backend/docker-compose.yml names no tag, so the documented way
-# to run the gateway is an anonymous pull of `:latest` — which fails for
-# everyone until somebody flips the package to Public in its settings once.
-# Nothing here can do it; the token has no scope for it.
+# PRIVATE by default, and package visibility does not inherit from the repo, so
+# an anonymous `docker pull` of it fails until somebody flips the package to
+# Public in its settings once. Nothing here can do it; the token has no scope.
+#
+# It blocks less than this comment used to claim. Nothing documented pulls the
+# published image: docker-compose.yml has a `build:` and no `image:`, so it
+# builds locally, and deploy/README.md's methods build on the host or move the
+# image with `docker save`. The flip matters for whoever pulls it deliberately —
+# a fleet, CI, deploy/README.md's third method — not for the quick-start path.
 #
 # The .deb files are cross-compiled in ONE job. Both are static musl builds
 # produced by cargo-zigbuild, so an arm64 runner buys nothing here. The image
@@ -70,16 +74,18 @@ jobs:
       # make-deb.sh already refuses to build when the last two disagree, so
       # this only has to bring the tag into that set.
       #
-      # A pre-release tag is compared without its suffix, because the packages
-      # do not carry one: v0.1.0-rc1 ships wiretap-server_0.1.0, which is the
-      # point of a candidate — the artefact is the one the release will have.
-      # It cannot carry the suffix instead: `0.1.0-rc1` sorts NEWER than
-      # `0.1.0` to dpkg, so apt would refuse the upgrade from a candidate to
-      # the release it is a candidate for. Debian spells that `0.1.0~rc1`, and
-      # git rejects `~` in a ref name. This also makes all three places that
-      # read the tag agree that a `-` means pre-release; until it did, an rc
-      # tag died here and the two below were written for tags that could never
-      # reach them.
+      # A pre-release tag is compared without its suffix, because this gate
+      # asks which release the tag names and `v0.1.0-rc1` names `0.1.0`. What
+      # the package is then *called* is make-deb.sh's business, and it is not
+      # this: it spells the same tag `0.1.0~rc1`, with `~` because dpkg sorts
+      # that below the release, where the `-` the tag has to use would sort
+      # above it and block the upgrade from a candidate to the thing it is a
+      # candidate for. git rejects `~` in a ref name, which is why the tag
+      # cannot spell it and make-deb.sh does the translation.
+      #
+      # This also makes all three places here agree that a `-` means
+      # pre-release; until it did, an rc tag died at this step and the two
+      # below were written for tags that could never reach them.
       - name: The tag names the version being built
         run: |
           version="$(awk '/^\[workspace\.package\]/{f=1} f && /^version[[:space:]]*=/{gsub(/[",]/,"",$3); print $3; exit}' Cargo.toml)"
@@ -222,6 +228,7 @@ jobs:
           docker buildx build \
             --platform "linux/${{ matrix.arch }}" \
             --file crates/wiretap-backend/Dockerfile \
+            --build-arg "WIRETAP_BUILD_ID=g${GITHUB_SHA:0:12}" \
             --output "type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true" \
             --metadata-file "${RUNNER_TEMP}/metadata.json" \
             .

@@ -36,6 +36,10 @@ COPY Cargo.toml Cargo.lock ./
 # unnoticed for two days.
 COPY crates/wiretap-model/Cargo.toml        crates/wiretap-model/
 COPY crates/wiretap-model/src               crates/wiretap-model/src
+# A build-dependency of the backend, so it needs its real source like any other
+# dependency — the stub treatment below would fail the build script that uses it.
+COPY crates/wiretap-build-id/Cargo.toml     crates/wiretap-build-id/
+COPY crates/wiretap-build-id/src            crates/wiretap-build-id/src
 COPY crates/wiretap-ingest-proto/Cargo.toml crates/wiretap-ingest-proto/
 COPY crates/wiretap-ingest-proto/src        crates/wiretap-ingest-proto/src
 # The capture server is a member and not a dependency: cargo has to load its
@@ -54,8 +58,20 @@ RUN mkdir -p crates/wiretap-server/src \
        'compile_error!("stub: the gateway image fabricates this target; COPY the real source to build it");' \
        'fn main() {}' > crates/wiretap-server/src/main.rs
 COPY crates/wiretap-backend/Cargo.toml      crates/wiretap-backend/
+COPY crates/wiretap-backend/build.rs        crates/wiretap-backend/
 COPY crates/wiretap-backend/src             crates/wiretap-backend/src
 COPY crates/wiretap-backend/schema          crates/wiretap-backend/schema
+# The commit this image was built from. There is no `.git` in here, so the
+# build script cannot find it and the argument is the only way it can be known;
+# the empty default keeps a bare `docker build` working, and `/v1/health` then
+# says `unknown` rather than claiming a provenance it does not have.
+#
+# Declared here rather than at the top of the stage for the same reason the
+# COPYs above are ordered as they are: this value changes with every commit,
+# and every layer after it inherits the cache miss. The build script needs it
+# only when cargo runs, and that layer has to rerun anyway.
+ARG WIRETAP_BUILD_ID=
+ENV WIRETAP_BUILD_ID=${WIRETAP_BUILD_ID}
 # --locked for the same reason `npm ci` is used above: a build that may quietly
 # re-resolve is a build that can drift off what was committed and tested.
 RUN cargo build --release --locked -p wiretap-backend
@@ -73,6 +89,16 @@ COPY --from=admin-ui /ui/dist /usr/share/wiretap-admin
 # Last, not next to the FROM: an instruction spliced in above the apt layer
 # changes that layer's cache key, and this label is worth nobody's rebuild.
 LABEL org.opencontainers.image.source=https://github.com/Wired-Square/WireTAP-Server
+# The commit, where it can be read without running the image. Everything that
+# runs this gateway ends up at the mutable tag `:latest` — compose builds it
+# locally (a `build:` and no `image:`), and deploy/README.md builds or
+# `docker save`s it — and a mutable tag names no particular build.
+#
+# Redeclared, not duplicated: docker scopes an ARG to the stage it appears in,
+# so the one in the build stage is out of scope here and deleting this line
+# would silently label every image with an empty revision.
+ARG WIRETAP_BUILD_ID=
+LABEL org.opencontainers.image.revision=${WIRETAP_BUILD_ID}
 EXPOSE 8423 9323
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
     CMD curl -fsS http://localhost:8423/v1/health || exit 1

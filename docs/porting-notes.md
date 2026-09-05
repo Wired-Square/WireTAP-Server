@@ -16,7 +16,7 @@ deliberate change made after cutover, not a silent one made during a port.
 ### `--version` exists, and names the commit
 
 The Python had no `--version` — argparse rejects it with a usage error. The Rust
-server reports `wiretap-server 0.1.0 (g4bf526d4489)` and logs the same string as
+server reports `wiretap-server 0.1.0 (g4bf526d44891)` and logs the same string as
 the journal's first line, before any complaint about the configuration.
 
 The commit half is there because the version alone cannot identify a build.
@@ -28,11 +28,15 @@ in the first release candidate and getting two different answers, both
 
 `build.rs` reads the commit from git and marks a tree with uncommitted changes
 `-dirty`. git wins whenever there is a checkout to ask: `WIRETAP_BUILD_ID` is
-the *fallback* for a tree with no `.git`, such as a `git archive` export, and
-does not override a resolvable HEAD — a stray exported variable silently
-outranking ground truth is the failure this exists to prevent, not to add.
-Failing both it reports `unknown`, and `packaging/make-deb.sh` refuses to
-package a binary that says so.
+the *fallback* for a tree with no `.git`, such as a `git archive` export or a
+container build, and does not override a resolvable HEAD — a stray exported
+variable silently outranking ground truth is the failure this exists to
+prevent, not to add. Failing both it reports `unknown`, and
+`packaging/make-deb.sh` refuses to package a binary that says so.
+
+The package version and the gateway's `/v1/health` carry the same identity, for
+the same reason; the sort-order rules behind the package version are in the
+README, and are packaging rather than porting.
 
 ### The direct-to-PostgreSQL sink is not ported
 

@@ -443,9 +443,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The build argument is passed here as well as in release.yml, because a
+      # path only the release exercises is a path that breaks in the release.
+      # There is no `.git` inside the build, so this is the only way the image
+      # can know its commit.
       - name: Build it, keep nothing
         run: |
           docker buildx build \
             --file crates/wiretap-backend/Dockerfile \
+            --build-arg "WIRETAP_BUILD_ID=g${GITHUB_SHA:0:12}" \
             --output type=cacheonly \
             .

@@ -10,6 +10,10 @@
 #
 # Output: target/deb/wiretap-server_<version>_<arch>.deb
 #
+# The version is the one in Cargo.toml only when HEAD carries that release's
+# tag. Otherwise the package names the commit it came from — see the block that
+# builds it — so that no two builds of one version look alike.
+#
 # Both architectures are static musl builds, so one package installs on any
 # distribution with systemd - the Pi appliance on arm64, a VM or an LXC
 # container on amd64.
@@ -33,11 +37,12 @@ DEBIAN="${ROOT}/debian"
 
 skip_build=0
 version=""
+version_given=""
 arches=(arm64)
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--skip-build) skip_build=1 ;;
-		--version) version="${2:?--version needs a value}"; shift ;;
+		--version) version="${2:?--version needs a value}"; version_given=1; shift ;;
 		--arch)
 			case "${2:?--arch needs a value}" in
 				arm64) arches=(arm64) ;;
@@ -65,7 +70,63 @@ if [ -z "${version}" ]; then
 		"${ROOT}/Cargo.toml")"
 fi
 [ -n "${version}" ] || die "could not read the version from Cargo.toml"
-say "version ${version}, architectures: ${arches[*]}"
+
+# The version that goes ON the package, which is not always the version in
+# Cargo.toml. A tagged build is a release; anything else is a snapshot and says
+# which commit it is, because otherwise `dpkg-query -W` and the file name
+# identify a build no better than they did when two different 0.1.0 binaries
+# turned out to be installed and released at the same time.
+#
+# Everything below the release sorts below it, using `~` — the one character
+# dpkg orders before an empty string. That is the property worth having: the
+# release always installs over any snapshot or candidate that preceded it. The
+# obvious `+git` spelling does the opposite, sorting ABOVE `0.1.0` and leaving
+# apt unable to upgrade a test box to the release it was testing.
+#
+#   0.1.0~git20260905.36bfab  <  0.1.0~rc1  <  0.1.0  <  0.1.1
+#
+# The date leads the commit because a bare sha has no order at all — dpkg reads
+# 0.1.0~gf00 as newer than 0.1.0~g0ff — and it is the commit's own date, not
+# today's, so one commit always yields one version.
+#
+# An explicit --version is left exactly as given: the caller has said what they
+# want, and decorating it would be second-guessing them.
+head_sha="$(git -C "${ROOT}" rev-parse --short=12 HEAD 2>/dev/null || true)"
+
+deb_version="${version}"
+if [ -z "${version_given}" ]; then
+	# --tags, because without it describe considers only ANNOTATED tags: a
+	# release cut with a plain `git tag v0.1.0` would fall through to the
+	# snapshot branch and ship a version sorting BELOW the release it is.
+	tag="$(git -C "${ROOT}" describe --tags --exact-match \
+		--match "v${version}" --match "v${version}-*" HEAD 2>/dev/null || true)"
+	if [ -n "${tag}" ]; then
+		# v0.1.0 stays 0.1.0; v0.1.0-rc1 becomes 0.1.0~rc1, because a candidate
+		# has to sort below the release it is a candidate for and `-` sorts
+		# above. git rejects `~` in a ref name, so the tag cannot spell it and
+		# this is where the translation has to happen.
+		deb_version="${tag#v}"
+		deb_version="${deb_version/-/~}"
+	else
+		commit_date="$(git -C "${ROOT}" show -s --format=%cd --date=format:%Y%m%d HEAD 2>/dev/null || true)"
+		if [ -n "${commit_date}" ] && [ -n "${head_sha}" ]; then
+			deb_version="${version}~git${commit_date}.${head_sha}"
+			# The same question wiretap-build-id asks, asked the same way. It
+			# is asked twice and at different moments, so agreement is not
+			# guaranteed here - the guard in build_arch compares the two and
+			# refuses the package if they have diverged.
+			if [ -n "$(git -C "${ROOT}" status --porcelain --untracked-files=no)" ]; then
+				deb_version="${deb_version}.dirty"
+			fi
+		fi
+	fi
+fi
+
+if [ "${deb_version}" = "${version}" ]; then
+	say "version ${version}, architectures: ${arches[*]}"
+else
+	say "version ${deb_version} (Cargo.toml says ${version}), architectures: ${arches[*]}"
+fi
 
 # --- what the package promises about itself -------------------------------
 # Checked once, before any compiling: these are properties of the tree rather
@@ -265,6 +326,32 @@ build_arch() {  # build_arch <arch>
      checkout, or pass the commit in WIRETAP_BUILD_ID."
 	fi
 
+	# And it has to be the build this package claims. --skip-build packages
+	# whatever is already in target/, so the two can disagree - and a stale
+	# target/ is exactly how the first packaging drill came to test a binary
+	# nobody meant to test.
+	#
+	# The whole stamp, not a prefix: `-dirty` is part of the claim, so this is
+	# also the only thing that catches a release package cut from an edited
+	# tree. It is what makes the two `git status` calls - this script's and
+	# wiretap-build-id's - safe to be separate, because a disagreement between
+	# them fails here rather than shipping.
+	#
+	# Skipped for --version, which is the documented escape hatch: that label
+	# is opaque and claims no commit, and `--skip-build --version` is how a
+	# binary built somewhere else gets packaged deliberately.
+	if [ -n "${head_sha}" ] && [ -z "${version_given}" ]; then
+		case "${deb_version}" in
+			*.dirty) want="(g${head_sha}-dirty)" ;;
+			*)       want="(g${head_sha})" ;;
+		esac
+		if ! grep -qaF "${want}" "${bin}"; then
+			die "[${arch}] ${PKG} does not carry ${want}.
+     The package would claim one build and ship another - most likely a stale
+     target/ from --skip-build, or a tree edited since the binary was built."
+		fi
+	fi
+
 	# A size floor, because "it compiled" is not proof a dependency linked. This
 	# binary measured 3.41 MB once the disk cache was actually reachable from
 	# it, and 1.6 MB before that - when SQLite was compiled, linked, and then
@@ -280,8 +367,8 @@ build_arch() {  # build_arch <arch>
 
 	# --- stage ------------------------------------------------------------
 	local stage out
-	stage="${ROOT}/target/deb/${PKG}_${version}_${arch}"
-	out="${ROOT}/target/deb/${PKG}_${version}_${arch}.deb"
+	stage="${ROOT}/target/deb/${PKG}_${deb_version}_${arch}"
+	out="${ROOT}/target/deb/${PKG}_${deb_version}_${arch}.deb"
 	# Everything this script has previously produced for THIS architecture,
 	# not just the staging tree it is about to rebuild. A version bump
 	# otherwise leaves the old .deb beside the new one, and the next thing to
@@ -327,7 +414,7 @@ build_arch() {  # build_arch <arch>
 	# this builds, and the default drops a stray artefact in the source tree.
 	# (It cannot be /dev/null — dpkg-gencontrol writes `.new` and renames.)
 	dpkg-gencontrol -p"${PKG}" -c"${DEBIAN}/control" -l"${DEBIAN}/changelog" \
-	                -P"${stage}" -v"${version}" -DArchitecture="${arch}" \
+	                -P"${stage}" -v"${deb_version}" -DArchitecture="${arch}" \
 	                -f"${ROOT}/target/deb/${PKG}.files"
 
 	# md5sums is optional; skip it rather than fail when md5sum is absent
