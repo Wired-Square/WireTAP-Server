@@ -54,6 +54,13 @@ DEB="${2:?usage: $0 --yes <path-to-.deb>}"
      $(shift; echo "$*")
      A glob matching several is how a stale build gets tested in place of this one."
 [ -f "$DEB" ] || die "no such package: $DEB"
+# Made absolute before apt ever sees it. `apt-get install a/b` is apt's
+# package/release syntax, so a relative path is read as a request for package
+# `target` from release `deb` and the file is never opened - "E: Unable to
+# locate package target/deb", which names something the caller never typed.
+# Every invocation from the repo root hits this, CI included; it went unnoticed
+# because every local run so far passed an absolute path.
+DEB="$(cd "$(dirname "$DEB")" && pwd)/$(basename "$DEB")"
 [ -d /run/systemd/system ] || die "no running systemd here; see the header"
 [ "$(id -u)" -eq 0 ] || die "must run as root (it installs a package)"
 
