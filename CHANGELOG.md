@@ -160,6 +160,20 @@ All notable changes to this project are documented here. Entries go under
   gateway, and the ingest conformance suite. The drill puts frames on the bus with a plain
   `socketcan` socket rather than with a second `CanReader`, so nothing it asserts is
   encoded and decoded by the code under test.
+- Two more CI jobs, each for something that had gone unexecuted long enough to break or
+  nearly to. `packaging/tests/deb-lifecycle.sh` takes the built `.deb` through install,
+  reinstall over a stopped and a running daemon, a cache it cannot write, remove and purge,
+  counting the disk cache at every step — nine asserted steps, on the runner, which is a
+  booted systemd host and so needs no container. It is also the only place the amd64
+  package is installed at all. And the gateway image is built and thrown away, because
+  nothing else built it.
+- `.github/workflows/release.yml`. A `v*` tag drafts a release, cross-builds both `.deb`
+  files with `SHA256SUMS` from one job, and builds the gateway image natively on an amd64
+  and an arm64 runner, pushing each by digest and combining them into one multi-architecture
+  manifest on GHCR. Emulated arm64 Rust builds take twenty to forty minutes, which is why
+  the image gets two runners and the static musl packages get one. The release is left as a
+  draft for a person to publish, and the tag is checked against `Cargo.toml` before anything
+  is created — it is the one part of a release that cannot be corrected afterwards.
 
 ### Changed
 
@@ -242,6 +256,12 @@ All notable changes to this project are documented here. Entries go under
 - Two clippy warnings inherited from the gateway crate, and a one-off `rustfmt` pass over
   it — it had never been formatted, having lived in a repo whose CI only built the desktop
   app. `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test` all pass.
+- The gateway image did not build, and had not since the port's first crates landed. The
+  Dockerfile copies workspace members by name and `members = ["crates/*"]` is a glob, so
+  `wiretap-model` and `wiretap-ingest-proto` were missing from the build context and cargo
+  could not resolve the workspace. `docker compose up --build`, which is how the README
+  says to run the gateway, was broken with it. Every member is copied now, the build takes
+  `--locked`, and CI builds the image on every run so this cannot go unnoticed again.
 - A disk cache the daemon could read but not write started normally and then dropped every
   frame. Opening one proves nothing about writing it — SQLite retries `O_RDONLY` after an
   `EACCES` — so the startup check that exists to refuse capturing without an archive passed,

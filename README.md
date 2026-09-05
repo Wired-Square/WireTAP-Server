@@ -30,8 +30,10 @@ earns the switch, so the Python is still what a deployment should run.
 arm64 and amd64, installable on any distribution with systemd. The arm64 package has been
 taken through its whole lifecycle on Debian bookworm — install, reinstall, an upgrade from
 an existing Python deployment, remove, purge, and an image-build chroot with no PID 1 — and
-the disk cache was counted at every step. Published `.deb` files, the `wiretap-web` package
-and a multi-architecture gateway image arrive with the first tagged release.
+the disk cache was counted at every step. Nothing is published yet, but the workflow that
+would is written: a `v*` tag drafts a release, attaches both `.deb` files with
+`SHA256SUMS`, and pushes a multi-architecture gateway image to GHCR for a human to publish.
+The `wiretap-web` package arrives later.
 
 ## Running the gateway
 
