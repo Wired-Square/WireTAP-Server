@@ -252,6 +252,15 @@ Recorded so a future reader does not go looking.
   discarding a data rate that was read, and a nominal of **zero** — an
   interface that is up but was never given a bitrate — is reported as zero
   rather than replaced by the fallback.
+
+  Verified against real hardware on 2026-09-05, which the `vcan` drill cannot
+  do: a virtual interface has no bit timing to report, so until then only the
+  *fallback* branch had ever executed. Two gs_usb adapters on 250 kbit/s buses
+  returned `rates=250000,250000`, and the bytes a GVRET client received were
+  `f1 06 01 90 d0 03 00 01 90 d0 03 00` — the golden encoding for 250 k, where
+  the fallback would have read `01 20 A1 07 00`. It also ran under the packaged
+  unit's `RestrictAddressFamilies`, so `AF_NETLINK` there is now known to be
+  necessary rather than assumed to be.
 - **Binary-mode resync.** Leading bytes that cannot start a command are skipped
   rather than stalling the connection — deliberate stream recovery in the
   original, kept. The Rust skips to the next candidate in one step where the
