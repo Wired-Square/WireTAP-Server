@@ -1,11 +1,15 @@
 # Everything a tag publishes: the capture server's .deb files, and the
 # gateway's multi-architecture image.
 #
-# Draft first, as the desktop repo does it. Every job uploads into a draft
-# release and a human publishes it — which is also the review step this
-# workflow deliberately does not duplicate. `ci.yml` is what proves the tree;
-# tagging a commit it never ran on is caught by a person looking at a draft
-# with the wrong assets in it, not by running the gates twice.
+# Draft first, as the desktop repo does it: every job uploads into a draft
+# release and a person publishes it.
+#
+# The gates are deliberately not re-run here — `ci.yml` proves the tree, and
+# proving it twice for the same commit buys nothing. What that argument does
+# NOT cover is a tag placed on a commit CI never ran on, because the draft it
+# produces looks exactly like a good one; so the draft job asks the API whether
+# CI actually passed for this SHA. A person publishing a draft is a review of
+# the *release*, not a substitute for the gates.
 #
 # The .deb files are cross-compiled in ONE job. Both are static musl builds
 # produced by cargo-zigbuild, so an arm64 runner buys nothing here. The image
@@ -51,10 +55,35 @@ jobs:
             exit 1
           }
 
+      # A tag can be put on any commit, including one CI never ran on — and a
+      # draft built from such a commit looks exactly like a good one: two .deb
+      # files, a SHA256SUMS, a two-architecture manifest. There is nothing for
+      # the person publishing it to notice, so the check has to be here.
+      #
+      # By head_sha rather than `workflow_run`: ci.yml triggers on main and on
+      # pull requests, so it never runs on a tag ref at all. This finds the run
+      # for the same commit, which also proves the commit reached main or a PR.
+      # Tag after CI is green; tagging alongside the push races it.
+      - name: CI passed for this commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          runs=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success" \
+            --jq '.workflow_runs | length')
+          echo "successful CI runs for ${GITHUB_SHA}: ${runs}"
+          test "${runs}" -gt 0 || {
+            echo "::error::no successful CI run for ${GITHUB_SHA}; tag a commit CI has passed" >&2
+            exit 1
+          }
+
+      # Idempotent, so a re-run after a transient failure does not abort on
+      # "release already exists" and need the draft deleted by hand.
       - name: Create the draft
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
           gh release create "${GITHUB_REF_NAME}" \
             --draft \
             --title "WireTAP Server ${GITHUB_REF_NAME}" \
@@ -82,15 +111,12 @@ jobs:
           rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
           echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
 
-      - uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-release-${{ env.RUSTC_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-release-${{ env.RUSTC_VERSION }}-
+      # No cache, deliberately. Actions caches are scoped by ref: a run on a tag
+      # can read its own ref and the default branch, so a `release` key nothing
+      # on main ever writes would miss every time and then save gigabytes into
+      # a tag scope no later run can reach - evicting the caches that do hit.
+      # A release happens rarely and a cold build is the honest thing for an
+      # artefact somebody downloads.
 
       - name: Install zig and cargo-zigbuild
         run: |
@@ -130,6 +156,10 @@ jobs:
     needs: draft
     runs-on: ${{ matrix.runner }}
     permissions:
+      # A job-level block sets every scope it does not name to `none`, so the
+      # checkout below needs `contents` stated even though nothing is written
+      # with it.
+      contents: read
       packages: write
     strategy:
       fail-fast: false

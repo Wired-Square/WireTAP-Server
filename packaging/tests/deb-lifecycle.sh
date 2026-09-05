@@ -47,6 +47,12 @@ if [ "${1:-}" != "--yes" ]; then
 	exit 2
 fi
 DEB="${2:?usage: $0 --yes <path-to-.deb>}"
+# Callers pass a glob - CI does. If it matched more than one the shell hands
+# them all over and only the first would be tested, which after a version bump
+# is the *previous* release: a green run against a package nobody built today.
+[ "$#" -eq 2 ] || die "expected one package, got $(($# - 1)):
+     $(shift; echo "$*")
+     A glob matching several is how a stale build gets tested in place of this one."
 [ -f "$DEB" ] || die "no such package: $DEB"
 [ -d /run/systemd/system ] || die "no running systemd here; see the header"
 [ "$(id -u)" -eq 0 ] || die "must run as root (it installs a package)"

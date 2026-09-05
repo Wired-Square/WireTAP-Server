@@ -311,8 +311,29 @@ jobs:
   # only place the amd64 package gets installed at all: it is built on a Mac
   # and every manual drill so far has been arm64.
   package:
-    name: Package lifecycle (.deb)
-    runs-on: ubuntu-latest
+    name: Package lifecycle (${{ matrix.arch }})
+    # arm64 is the appliance's own architecture, so it is the one that must not
+    # ship uninstalled - and the runner label is free for public repositories.
+    # Each leg builds its own architecture natively, which is also the only way
+    # the lifecycle test can install what it just built.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            rust_target: x86_64-unknown-linux-musl
+            zig_host: x86_64
+            # There is no aarch64 musl build of cargo-zigbuild; only x86_64
+            # has one, so the host triple differs per leg and is spelled out
+            # rather than derived.
+            czb_host: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-musl
+            zig_host: aarch64
+            czb_host: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     env:
       # Both pinned, and both have to match what developers build with, since
       # that is the toolchain the cross-build is known to work under. Keep in
@@ -326,7 +347,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup target add x86_64-unknown-linux-musl
+          rustup target add ${{ matrix.rust_target }}
           echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v6
@@ -336,20 +357,20 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-package-${{ env.RUSTC_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-package-${{ env.RUSTC_VERSION }}-
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-package-${{ env.RUSTC_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.arch }}-cargo-package-${{ env.RUSTC_VERSION }}-
 
       # From the pinned release tarballs rather than a third-party action, so
       # what packaging/zigcc shells out to is a version somebody chose.
       - name: Install zig and cargo-zigbuild
         run: |
-          dir="zig-x86_64-linux-${ZIG_VERSION}"
+          dir="zig-${{ matrix.zig_host }}-linux-${ZIG_VERSION}"
           curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${dir}.tar.xz" \
             | tar -xJ -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/$dir" >> "$GITHUB_PATH"
           # Unpacks into a directory of its own name, not flat, so that is what
           # goes on PATH.
-          czb="cargo-zigbuild-x86_64-unknown-linux-musl"
+          czb="cargo-zigbuild-${{ matrix.czb_host }}"
           curl -fsSL "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/${czb}.tar.xz" \
             | tar -xJ -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/$czb" >> "$GITHUB_PATH"
@@ -359,8 +380,15 @@ jobs:
       - name: Install sqlite3
         run: sudo apt-get update && sudo apt-get install -y sqlite3
 
+      # target/ is cached and make-deb.sh writes into target/deb, so a restored
+      # tree can still hold the packages of an older version. The glob below
+      # would then match two and the lifecycle test would run against the
+      # wrong one - which is a green run on a version bump, the commit before
+      # a release. Cheap to make impossible.
       - name: Build the .deb
-        run: packaging/make-deb.sh --arch amd64
+        run: |
+          rm -rf target/deb
+          packaging/make-deb.sh --arch ${{ matrix.arch }}
 
       # Installs, upgrades and purges a real package on this runner, which is
       # disposable. Every assertion is in the script, so it runs identically
@@ -368,7 +396,7 @@ jobs:
       - name: Install, upgrade, remove, purge
         run: |
           sudo packaging/tests/deb-lifecycle.sh --yes \
-            target/deb/wiretap-server_*_amd64.deb
+            target/deb/wiretap-server_*_${{ matrix.arch }}.deb
 
   # The gateway image, built and thrown away. Nothing else builds it: the
   # capture job compiles the gateway with `cargo build` on the runner so the
