@@ -232,7 +232,7 @@ to contain the bytes `E7 E7` therefore loses them and desynchronises the
 stream.
 
 Replicated in `Decoder::scan_for_handshake`. Test:
-`gvret::codec::tests::sync_bytes_are_consumed_even_in_binary_mode`.
+`gvret::tests::sync_bytes_are_consumed_even_in_binary_mode`.
 
 Host-to-device transmit is rare, which is presumably why this has never been
 noticed. Worth fixing after cutover by scanning only while not yet in binary
@@ -247,7 +247,7 @@ payload it actually reads to 8. A client declaring 10 therefore has 18 bytes
 consumed and contributes an 8-byte frame.
 
 Replicated in `Decoder::take_transmit`. Test:
-`gvret::codec::tests::an_overlong_declared_length_consumes_all_of_it`.
+`gvret::tests::an_overlong_declared_length_consumes_all_of_it`.
 
 Clamping the consume instead would be more obviously correct — but then the two
 implementations desynchronise *differently* on the same malformed input, and the
@@ -260,7 +260,7 @@ Recorded so a future reader does not go looking.
 
 - **The GVRET reply bytes.** Device info, bus parameters, bus count, timebase
   and keepalive are asserted against golden byte vectors taken from the Python
-  (`gvret::codec::tests`). Device info's constants — build 400, EEPROM version
+  (`gvret::tests`). Device info's constants — build 400, EEPROM version
   1 — are advertised values with no derivation; they are what clients parse.
 - **The FD data length code in the low nibble.** The byte packing bus and DLC
   carries the *code*, not the byte count, so 32 bytes is 13 and 64 bytes is 15.

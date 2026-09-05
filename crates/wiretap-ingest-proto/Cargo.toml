@@ -9,7 +9,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-# Only the sample types: this crate is a codec, and a client of it should not
-# have to take a TOML parser to speak the protocol.
-wiretap-model = { path = "../wiretap-model", default-features = false }
+# The id-flag layout, and nothing else from it: the framing and the CRC below
+# are this protocol's own, and both ends of them are in this workspace. This
+# crate depends on no frame type at all — the sample types live in
+# wiretap-model, and nothing here needs one.
+wiretap-protocol.workspace = true
 crc32fast.workspace = true

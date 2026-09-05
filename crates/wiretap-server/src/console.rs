@@ -14,7 +14,8 @@
 
 use std::fmt::Write;
 
-use wiretap_model::{payload_dlc, CanSample};
+use wiretap_model::CanSample;
+use wiretap_protocol::payload_dlc;
 
 const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";

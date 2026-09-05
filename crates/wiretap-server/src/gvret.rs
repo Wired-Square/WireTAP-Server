@@ -1,4 +1,7 @@
-//! The GVRET TCP listener and the per-client tasks it spawns.
+//! The GVRET TCP server: the live bridge the WireTAP desktop app and SavvyCAN
+//! connect to — the listener, and the per-client tasks it spawns. The wire
+//! codec itself is `wiretap-protocol`'s `gvret` module, extracted so the
+//! desktop's end of this protocol can eventually be the same code.
 //!
 //! This is where the port stops looking like the Python. There, the capture
 //! loop held a lock and did a blocking `sendall` for every connected client
@@ -18,11 +21,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 use wiretap_model::{CanSample, SourceId};
-
-use super::codec::{
+use wiretap_protocol::gvret::{
     encode_canbus_params, encode_dev_info, encode_frame_into, encode_keepalive, encode_num_buses,
     encode_timebase, ClientCommand, Decoder, MAX_FRAME_BYTES,
 };
+
 use crate::source::Transmit;
 
 /// One read of a client's command stream, as the Python's `recv(4096)`.
@@ -258,9 +261,9 @@ fn encode(out: &mut Vec<u8>, s: &CanSample, t0: Instant) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::codec::SYNC;
     use super::*;
     use wiretap_model::Direction;
+    use wiretap_protocol::gvret::SYNC;
 
     fn sample(bus: u8, arb_id: u32) -> Arc<CanSample> {
         Arc::new(CanSample {

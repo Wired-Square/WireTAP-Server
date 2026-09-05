@@ -33,7 +33,7 @@ use crate::archive;
 #[cfg(target_os = "linux")]
 use crate::console;
 #[cfg(target_os = "linux")]
-use crate::gvret::server;
+use crate::gvret;
 use crate::ingest;
 use crate::settings::Settings;
 #[cfg(target_os = "linux")]
@@ -223,10 +223,10 @@ async fn start_capture(
 
     let (frames, _) = broadcast::channel(FRAME_BACKLOG);
     let (transmits, transmit_queue) = mpsc::channel(TRANSMIT_QUEUE);
-    let listener = server::Server::bind(
+    let listener = gvret::Server::bind(
         &settings.host,
         settings.port,
-        server::BusInfo {
+        gvret::BusInfo {
             count: bus_count(readers.len(), settings.bus_offset),
             speeds: rates.iter().map(|r| r.nominal).collect(),
         },

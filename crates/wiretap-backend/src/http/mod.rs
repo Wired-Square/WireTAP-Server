@@ -520,7 +520,7 @@ async fn import_capture(
                 ts_us,
                 id: id_flags & ID_ARB_MASK,
                 extended: id_flags & ID_EXTENDED != 0,
-                dlc: crate::ingest::proto::payload_dlc(plen, is_fd),
+                dlc: wiretap_protocol::payload_dlc(plen, is_fd),
                 is_fd,
                 data,
                 bus,

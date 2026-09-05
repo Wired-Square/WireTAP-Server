@@ -44,14 +44,14 @@ All notable changes to this project are documented here. Entries go under
 - `wiretap-model` — the captured-sample types and the `wiretap-server.toml` schema, with no
   runtime, driver or database behind them, so a client can take the wire contract without
   the capture stack. The config half is behind a default feature, so the gateway takes the
-  sample types without a TOML parser. The gateway now shares its DLC table and length→code
-  rule from here rather than keeping its own copy — the two write the same value onto the
-  GVRET wire and into the `dlc` column, and a drift between them would be invisible.
+  sample types without a TOML parser. (The DLC table landed here first and has since moved
+  again, to `wiretap-protocol`; see Changed.)
 - `wiretap-server` — the Rust port begins. The GVRET codec is complete and asserted against
   golden bytes taken from the Python: device info, bus parameters, bus count, timebase,
   keepalive, frame encode, and a decoder covering the handshake, binary-mode resync, split
   and over-long commands. Written as a pure state machine with no sockets, so the bytes a
-  desktop client sees can be tested without a bus.
+  desktop client sees can be tested without a bus. (It has since moved out to
+  `wiretap-protocol`, tests and all; see Changed.)
 - `wiretap-server --check-config` — parses the configuration, reports anything it had to
   ignore, and prints what the settings resolve to, without echoing secrets. It is the
   answer to "which of the flag, the file and the environment won", a question the Python
@@ -214,6 +214,26 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- The GVRET codec, the CAN data length code table and the ingest id-flag layout moved out
+  to `wiretap-protocol` in the `wiretap-lib-rs` workspace, taken here by git tag. They are
+  the parts of this repository the WireTAP desktop keeps its own copy of, and the copies
+  had drifted: four Rust GVRET codecs — this one, the desktop's live one, a second
+  `#![allow(dead_code)]` one beside it, and the Python oracle's — against one sixteen-entry
+  DLC table written out nine times across the two repos. Nothing else moved:
+  `wiretap-model`'s sample types stay here, and so does the ingest framing, because both
+  ends of that wire are in this workspace. The crate takes scalars and no frame type at
+  all, which is what will let the desktop adopt it without touching the serde contract its
+  frontend reads. **It has not adopted it yet** — that is Stage 7 — so today this buys one
+  definition rather than one implementation.
+  **No wire behaviour changed**: every golden byte string moved with its encoder, and the
+  tests moved with it exactly — `wiretap-server` 118 → 92 and `wiretap-model` 16 → 11
+  against 31 in the new crate, plus 2 written during the move. The thirteenth
+  `wiretap-ingest-proto` test went instead of moving: it existed to pin that the gateway
+  called the shared DLC helper rather than its own, and the gateway now depends on the
+  crate that defines it. The GVRET checksum dialect — which every participant guesses
+  differently and no implementation documents correctly — is now written down in the shared
+  module and deliberately left alone. Fixing it is a protocol change against four live
+  participants, and belongs in its own commit.
 - `.cargo/config.toml` points the musl targets' C compiler at `packaging/zigcc`, a small
   `zig cc` wrapper. Bundled SQLite means a build script compiles C, and a build script runs
   even for `cargo check` — so `cargo clippy --target aarch64-unknown-linux-musl`, which is

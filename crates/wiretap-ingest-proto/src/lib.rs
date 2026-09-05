@@ -34,10 +34,11 @@ pub const ACK_CRC: u8 = 1;
 pub const ACK_MALFORMED: u8 = 2;
 pub const ACK_OVERLOADED: u8 = 3;
 
-pub const ID_EXTENDED: u32 = 1 << 29;
-pub const ID_FD: u32 = 1 << 30;
-pub const ID_TX: u32 = 1 << 31;
-pub const ID_ARB_MASK: u32 = 0x1FFF_FFFF;
+// The id word's layout, shared rather than declared: the WireTAP desktop's
+// HTTP import record packs its arbitration id and flags exactly this way and
+// nothing else the same, so the four constants are what crosses between the
+// two repositories and the framing below is not.
+pub use wiretap_protocol::ingest::{ID_ARB_MASK, ID_EXTENDED, ID_FD, ID_TX};
 
 /// The largest payload a record can carry: one CAN FD frame. The length is a
 /// single byte on the wire, but 64 is the real limit and both ends enforce it.
@@ -47,11 +48,6 @@ pub const MAX_PAYLOAD: usize = 64;
 /// a gateway checks against — over it, the batch is NACKed as malformed rather
 /// than accepted and truncated.
 pub const MAX_BATCH_RECORDS: usize = 256;
-
-// The DLC table and the length→code rule live in `wiretap-model`, shared with
-// the capture server so the code this gateway writes to the `dlc` column and
-// the code the server puts on the GVRET wire cannot drift apart.
-pub use wiretap_model::payload_dlc;
 
 pub fn encode_message(mtype: u8, body: &[u8]) -> Vec<u8> {
     let len = (1 + body.len()) as u16;
@@ -547,14 +543,5 @@ mod tests {
     fn a_truncated_reply_is_an_error_rather_than_a_panic() {
         assert!(parse_hello_ack(&[0, 1]).is_err());
         assert!(parse_ack(&[0, 0, 0]).is_err());
-    }
-
-    #[test]
-    fn fd_dlc_mapping() {
-        // Thin: the rule itself is tested in wiretap-model. This pins that
-        // the gateway is calling the shared version.
-        assert_eq!(payload_dlc(8, true), 8);
-        assert_eq!(payload_dlc(64, true), 15);
-        assert_eq!(payload_dlc(20, false), 8);
     }
 }

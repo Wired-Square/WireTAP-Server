@@ -2160,6 +2160,7 @@ dependencies = [
  "wiretap-build-id",
  "wiretap-ingest-proto",
  "wiretap-model",
+ "wiretap-protocol",
 ]
 
 [[package]]
@@ -2171,7 +2172,7 @@ name = "wiretap-ingest-proto"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
- "wiretap-model",
+ "wiretap-protocol",
 ]
 
 [[package]]
@@ -2182,6 +2183,11 @@ dependencies = [
  "serde_json",
  "toml",
 ]
+
+[[package]]
+name = "wiretap-protocol"
+version = "0.15.1"
+source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.15.1#6fe63329b37e0d57c646dc83dc5bfb8be345c298"
 
 [[package]]
 name = "wiretap-server"
@@ -2197,6 +2203,7 @@ dependencies = [
  "wiretap-build-id",
  "wiretap-ingest-proto",
  "wiretap-model",
+ "wiretap-protocol",
 ]
 
 [[package]]

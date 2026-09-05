@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::{params_from_iter, Connection};
-use wiretap_model::{payload_dlc, CanSample, Direction, SourceId};
+use wiretap_model::{CanSample, Direction, SourceId};
+use wiretap_protocol::payload_dlc;
 
 /// Why a cache operation failed.
 ///
