@@ -69,13 +69,25 @@ jobs:
       # version this is: the tag, Cargo.toml, and debian/changelog.
       # make-deb.sh already refuses to build when the last two disagree, so
       # this only has to bring the tag into that set.
+      #
+      # A pre-release tag is compared without its suffix, because the packages
+      # do not carry one: v0.1.0-rc1 ships wiretap-server_0.1.0, which is the
+      # point of a candidate — the artefact is the one the release will have.
+      # It cannot carry the suffix instead: `0.1.0-rc1` sorts NEWER than
+      # `0.1.0` to dpkg, so apt would refuse the upgrade from a candidate to
+      # the release it is a candidate for. Debian spells that `0.1.0~rc1`, and
+      # git rejects `~` in a ref name. This also makes all three places that
+      # read the tag agree that a `-` means pre-release; until it did, an rc
+      # tag died here and the two below were written for tags that could never
+      # reach them.
       - name: The tag names the version being built
         run: |
           version="$(awk '/^\[workspace\.package\]/{f=1} f && /^version[[:space:]]*=/{gsub(/[",]/,"",$3); print $3; exit}' Cargo.toml)"
           tag="${GITHUB_REF_NAME#v}"
-          echo "Cargo.toml says ${version}, the tag says ${tag}"
-          test "${version}" = "${tag}" || {
-            echo "::error::tag ${GITHUB_REF_NAME} does not match version ${version} in Cargo.toml" >&2
+          release="${tag%%-*}"
+          echo "Cargo.toml says ${version}, the tag says ${tag} (release ${release})"
+          test "${version}" = "${release}" || {
+            echo "::error::tag ${GITHUB_REF_NAME} is not a release of ${version}, the version in Cargo.toml" >&2
             exit 1
           }
 
