@@ -57,6 +57,17 @@ pub struct Cli {
     #[arg(long, default_value_t = 10.0)]
     pub stats_interval: f64,
 
+    // --- Test Pattern responder (link validation) ---
+    // The only thing here that transmits on its own initiative, which is why it
+    // has an enable flag of its own rather than following --can-fd or the
+    // presence of a peer.
+    /// Answer Test Pattern link-validation runs. Transmits on the bus.
+    #[arg(long)]
+    pub test_pattern_enable: bool,
+    /// Interfaces that answer, comma-separated. Default: all of them.
+    #[arg(long, default_value = "")]
+    pub test_pattern_ifaces: String,
+
     // --- binary ingest listener (microcontroller clients) ---
     /// Enable the binary TCP ingest listener.
     #[arg(long)]

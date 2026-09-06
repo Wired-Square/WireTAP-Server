@@ -295,6 +295,34 @@ is the desktop, and a reader comparing the two implementations would otherwise
 find an undocumented difference. Pinned upstream by
 `fd_frame_with_an_inexact_length_is_padded_up_to_its_code`.
 
+### `transmit` builds CAN FD frames, and answers Test Pattern runs
+
+The Python's `_tx_can` packed a 16-byte `can_frame` whatever the socket was in,
+because the only thing that ever called it was a GVRET client and `F1 00`
+carries no FD flag. `CanReader::transmit` took an `is_fd` argument and keeps the
+8-byte clamp on the classic path for exactly that reason.
+
+The FD path exists for the **Test Pattern responder** (`src/testpattern.rs`), a
+capability the Python does not have at all: a WireTAP desktop on the same bus
+runs a link validation and this answers it, proving the transport carries what
+it claims to. A sweep echoes payloads up to 64 bytes, so clamping would answer
+every length code above 8 with 8 bytes — and an initiator compares an echo
+against the length the *code* names, so it would report a broken link. That is
+the fault the sweep exists to find, attributed to the wrong end.
+
+The protocol is `wiretap_protocol::testpattern`, both sides of it, and none of
+it is restated here. What this repo owns is a socket, a clock and a
+configuration.
+
+**It is off unless armed**, because it is the only thing this server does that
+transmits: `[test_pattern] enable`, or `--test-pattern-enable`, plus an optional
+interface list. Unlike `[ingest]` and `[forward]`, a file saying
+`enable = false` beats the flag — a fleet config that disarms a transmitter
+should win over a flag left in a unit file — and a flag it overrode is warned
+about rather than silently dropped. CAN FD is claimed only when `[server]
+can_fd` is on, since `CanReader::recv` skips FD frames otherwise and the
+responder would answer the FD sweep with silence.
+
 ## Replicated quirks
 
 Each is pinned by a test that names it.

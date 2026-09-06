@@ -7,6 +7,25 @@ All notable changes to this project are documented here. Entries go under
 
 ### Added
 
+- A **Test Pattern responder**: a WireTAP desktop on the same physical bus runs a link
+  validation against this server and it answers, proving the transport carries what it
+  claims to — a codec that truncates a payload or downgrades a CAN FD frame to classic
+  produces a capture that looks entirely healthy. The protocol is
+  `wiretap_protocol::testpattern`, both halves of it, and none of it is restated here.
+  **Off unless armed**, because it is the only part of this server that transmits:
+  `[test_pattern] enable`, or `--test-pattern-enable`, with an optional interface list
+  that defaults to every captured interface. It says `ARMED` at WARN on startup naming
+  those interfaces, and `--check-config` prints the same. A config file saying
+  `enable = false` beats the flag — unlike `[ingest]` and `[forward]` — and warns that it
+  did, so an ineffective flag is never silent.
+- `CanReader::transmit` builds **CAN FD frames**, selected by an `is_fd` argument; the
+  classic path keeps its 8-byte clamp, which belongs to GVRET rather than to CAN. Without
+  this a sweep could only ever have been answered below 8 bytes, and an initiator
+  comparing an echo against the length its code names would have blamed the link — the
+  exact fault the sweep exists to find, attributed to the wrong end. CAN FD is claimed in
+  the capability reply only when `[server] can_fd` is on, since the reader skips FD frames
+  otherwise.
+
 - `wiretap-server --version` reports the commit it was built from —
   `wiretap-server 0.1.0 (g4bf526d44891)` — and the daemon logs the same string as the
   journal's first line, so a running capture can be identified without stopping it. The

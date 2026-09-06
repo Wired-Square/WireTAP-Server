@@ -42,6 +42,8 @@ use crate::source::{
     socketcan::{detect_bitrates, CanReader},
     system_time_to_us, Transmit,
 };
+#[cfg(target_os = "linux")]
+use crate::testpattern;
 
 #[cfg(target_os = "linux")]
 /// Frames held for a GVRET client that is behind.
@@ -265,6 +267,44 @@ async fn start_capture(
     if settings.echo_console {
         tokio::spawn(echo_loop(frames.subscribe(), settings.colour));
     }
+    if let Some(tp) = &settings.test_pattern {
+        // No names arms every interface: a `--test-pattern-enable` that armed
+        // nothing would be a silent no-op.
+        let armed: Vec<usize> = (0..settings.ifaces.len())
+            .filter(|&i| tp.ifaces.is_empty() || tp.ifaces.contains(&settings.ifaces[i]))
+            .collect();
+        // A name that matched nothing means an operator believes a bus is armed
+        // that is not, and finds out from a validation run that fails for no
+        // visible reason.
+        for name in tp.ifaces.iter().filter(|n| !settings.ifaces.contains(n)) {
+            warn!("Test Pattern: no interface named {name} is being captured");
+        }
+        if armed.is_empty() {
+            // Saying ARMED here, with an empty list, would be the loudest line
+            // in the journal contradicting the one above it.
+            warn!("Test Pattern: enabled, but no configured interface matched; nothing is armed");
+        } else {
+            // WARN, not INFO: this is the one part of the server that puts
+            // frames on a bus nobody asked it to, and a capture host where it
+            // was armed by accident should say so in the journal's first screen.
+            warn!(
+                "Test Pattern responder ARMED on {} — this transmits on the bus",
+                join(armed.iter().map(|&i| &settings.ifaces[i]))
+            );
+            if !settings.can_fd {
+                warn!("Test Pattern: --can-fd is off, so only the classic sweep can be answered");
+            }
+        }
+        for &i in &armed {
+            tokio::spawn(testpattern::responder_loop(
+                readers[i].clone(),
+                buses[i],
+                settings.can_fd,
+                frames.subscribe(),
+                archive.clone(),
+            ));
+        }
+    }
     tokio::spawn(transmit_loop(
         readers,
         settings.bus_offset,
@@ -363,7 +403,12 @@ async fn transmit_loop(
         let Some(index) = index_for_bus(t.bus, bus_offset, readers.len()) else {
             continue;
         };
-        if let Err(e) = readers[index].transmit(t.arb_id, t.extended, &t.data).await {
+        // Classic: a GVRET `F1 00` carries no FD flag, so a client cannot ask
+        // for one. The Test Pattern responder owns the FD path.
+        if let Err(e) = readers[index]
+            .transmit(t.arb_id, t.extended, false, &t.data)
+            .await
+        {
             warn!("transmit on bus {} failed: {e}", t.bus.0);
             continue;
         }

@@ -11,8 +11,8 @@
 use std::io;
 
 use socketcan::{
-    tokio::CanFdSocket, CanAnyFrame, CanDataFrame, EmbeddedFrame, ExtendedId, Frame, Id,
-    SocketOptions, StandardId,
+    tokio::CanFdSocket, CanAnyFrame, CanDataFrame, CanFdFrame, EmbeddedFrame, ExtendedId, Frame,
+    Id, SocketOptions, StandardId,
 };
 use wiretap_model::{CanSample, Direction, SourceId};
 
@@ -77,15 +77,24 @@ impl CanReader {
         }
     }
 
-    /// Put a frame on this interface's bus, for a GVRET client that asked.
+    /// Put a frame on this interface's bus.
     ///
-    /// Classic frames only, because that is all a client can ask for: `F1 00`
-    /// has no FD flag, and the Python's `_tx_can` was only ever called without
-    /// one, so it packed a 16-byte `can_frame` even when the socket was in FD
-    /// mode. The payload is already clamped to 8 bytes by the decoder; the
-    /// clamp here is what makes that a local guarantee rather than a remote
-    /// one.
-    pub async fn transmit(&self, arb_id: u32, extended: bool, data: &[u8]) -> io::Result<()> {
+    /// The 8-byte clamp on the classic path belongs to GVRET rather than to
+    /// CAN: `F1 00` has no FD flag, the Python's `_tx_can` packed a 16-byte
+    /// `can_frame` even with the socket in FD mode, and the decoder already
+    /// clamps — doing it here too makes that a local guarantee rather than a
+    /// remote one. The FD path must not clamp, because the Test Pattern
+    /// responder echoes sweep payloads up to 64 bytes.
+    ///
+    /// `CanFdFrame::new` rounds the length up to the next valid code and
+    /// zero-fills, so no length-code table is needed here.
+    pub async fn transmit(
+        &self,
+        arb_id: u32,
+        extended: bool,
+        is_fd: bool,
+        data: &[u8],
+    ) -> io::Result<()> {
         let invalid = |what| io::Error::new(io::ErrorKind::InvalidInput, what);
         let id: Id = if extended {
             ExtendedId::new(arb_id)
@@ -98,8 +107,15 @@ impl CanReader {
                 .ok_or_else(|| invalid("standard id too large"))?
                 .into()
         };
-        let frame = CanDataFrame::new(id, &data[..data.len().min(8)])
-            .ok_or_else(|| invalid("payload too long"))?;
+        let frame: CanAnyFrame = if is_fd {
+            CanFdFrame::new(id, data)
+                .ok_or_else(|| invalid("payload too long for a CAN FD frame"))?
+                .into()
+        } else {
+            CanDataFrame::new(id, &data[..data.len().min(8)])
+                .ok_or_else(|| invalid("payload too long"))?
+                .into()
+        };
         self.socket.write_frame(&frame).await
     }
 }

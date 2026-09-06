@@ -17,6 +17,7 @@ pub struct FileConfig {
     pub server: ServerSection,
     pub postgres: PostgresSection,
     pub ingest: IngestSection,
+    pub test_pattern: TestPatternSection,
     pub forward: ForwardSection,
     pub logging: LoggingSection,
     /// Top-level tables this schema does not define.
@@ -65,6 +66,22 @@ pub struct IngestSection {
     pub token: Option<String>,
     pub keepalive_secs: Option<f64>,
     pub max_batch_frames: Option<usize>,
+    #[serde(flatten)]
+    pub unknown: toml::Table,
+}
+
+/// The Test Pattern responder: which buses answer a link validation run.
+///
+/// CAN FD is not a key here. Whether the responder can answer an FD sweep is
+/// decided by `[server] can_fd`: the socket is a CAN FD socket either way, and
+/// that setting is what decides whether an FD frame is *reported* rather than
+/// skipped. A second switch here could only disagree with it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TestPatternSection {
+    pub enable: Option<bool>,
+    /// Comma-separated, e.g. `can1`. Absent or empty arms every interface.
+    pub ifaces: Option<String>,
     #[serde(flatten)]
     pub unknown: toml::Table,
 }
@@ -123,9 +140,10 @@ impl FileConfig {
     /// `[postgres]` is skipped: the section is retired wholesale, so
     /// [`Self::retired_postgres_sink`] is the thing worth saying about it.
     pub fn unknown_keys(&self) -> Vec<String> {
-        let sections: [(&str, &toml::Table); 4] = [
+        let sections: [(&str, &toml::Table); 5] = [
             ("server", &self.server.unknown),
             ("ingest", &self.ingest.unknown),
+            ("test_pattern", &self.test_pattern.unknown),
             ("forward", &self.forward.unknown),
             ("logging", &self.logging.unknown),
         ];
@@ -211,10 +229,27 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_reported_not_rejected() {
-        let text = "[server]\niface = \"can0\"\nnonsense = 1\n\n[bogus]\nx = 2\n";
+        // Every section this schema defines, because the list in `unknown_keys`
+        // is hand-maintained: a section added to `FileConfig` and forgotten
+        // there swallows an operator's typo in silence.
+        let text = "[server]\niface = \"can0\"\nnonsense = 1\n\
+                    [ingest]\nnope = 1\n[test_pattern]\ncan_fd = true\n\
+                    [forward]\nnope = 1\n[logging]\nnope = 1\n\n[bogus]\nx = 2\n";
         let cfg = FileConfig::parse(text).expect("still parses");
         assert_eq!(cfg.server.iface.as_deref(), Some("can0"));
-        assert_eq!(cfg.unknown_keys(), vec!["bogus", "server.nonsense"]);
+        assert_eq!(
+            cfg.unknown_keys(),
+            vec![
+                "bogus",
+                "forward.nope",
+                "ingest.nope",
+                "logging.nope",
+                "server.nonsense",
+                // The key an operator most plausibly invents for this section,
+                // and the one the section's own doc says not to write.
+                "test_pattern.can_fd",
+            ]
+        );
     }
 
     /// Typed fields must keep their coercions with `flatten` in play — a TOML

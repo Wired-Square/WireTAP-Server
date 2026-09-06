@@ -27,3 +27,4 @@ pub mod ingest;
 pub mod pipeline;
 pub mod settings;
 pub mod source;
+pub mod testpattern;

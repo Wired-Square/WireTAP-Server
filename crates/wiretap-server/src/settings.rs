@@ -189,6 +189,29 @@ impl Ingest {
     }
 }
 
+/// The Test Pattern responder: answers a link validation run on the bus.
+///
+/// **Off unless asked for.** Everything else this server does is read-only on
+/// the bus; this transmits, unbidden, in reply to whatever asks. On a
+/// production capture bus that is a hazard rather than a feature, so there is
+/// no default that arms it and the startup log names every interface it armed.
+///
+/// No `Env` here. The other two optional sections carry a secret that
+/// `resolve` fills in from the environment afterwards; a responder has none.
+#[derive(Debug, Clone)]
+pub struct TestPattern {
+    /// Interfaces that answer, by name. Empty arms all of them.
+    pub ifaces: Vec<String>,
+}
+
+impl TestPattern {
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            ifaces: parse_ifaces(&cli.test_pattern_ifaces),
+        }
+    }
+}
+
 impl Forward {
     fn from_cli(cli: &Cli, env: &Env) -> Self {
         Self {
@@ -216,6 +239,7 @@ pub struct Settings {
     pub stats_interval: f64,
     pub ingest: Option<Ingest>,
     pub forward: Option<Forward>,
+    pub test_pattern: Option<TestPattern>,
 }
 
 /// Python's spellings, because deployed config files use them.
@@ -312,6 +336,12 @@ pub enum Warning {
     NoForwardSink,
     /// Forwarding, but with no credential to authenticate with.
     ForwardKeyMissing,
+    /// `--test-pattern-enable` was given and the config file disarmed it.
+    ///
+    /// Its own variant because the packaged config ships `enable = false` for
+    /// three sections that look identical, and this is the only one where that
+    /// beats the flag. Without a line saying so, the flag simply does nothing.
+    TestPatternDisarmedByFile,
 }
 
 impl fmt::Display for Warning {
@@ -325,6 +355,11 @@ impl fmt::Display for Warning {
                 )
             }
             Self::UnknownKey(k) => write!(f, "unknown config key, ignored: {k}"),
+            Self::TestPatternDisarmedByFile => write!(
+                f,
+                "--test-pattern-enable was overridden by [test_pattern] enable = false in the \
+                 config file: the responder is disarmed"
+            ),
             Self::NoCaptureSource => write!(
                 f,
                 "no CAN interfaces and no ingest listener: this server will capture nothing"
@@ -424,6 +459,7 @@ impl Settings {
             stats_interval: cli.stats_interval,
             ingest: cli.ingest_enable.then(|| Ingest::from_cli(cli)),
             forward: cli.forward_enable.then(|| Forward::from_cli(cli, env)),
+            test_pattern: cli.test_pattern_enable.then(|| TestPattern::from_cli(cli)),
         };
 
         if let Some(f) = file {
@@ -458,6 +494,10 @@ impl Settings {
             // Last, because it depends on where the cache ended up, and every
             // source has now had its say about that.
             fwd.batching.legacy_cache_path = legacy_cache_path(&fwd.batching.cache_path, env);
+        }
+
+        if cli.test_pattern_enable && s.test_pattern.is_none() {
+            warnings.push(Warning::TestPatternDisarmedByFile);
         }
 
         if s.ifaces.is_empty() && s.ingest.is_none() {
@@ -504,6 +544,23 @@ impl Settings {
             over(&mut i.token, f.ingest.token.clone().map(Secret::new));
             over(&mut i.keepalive_secs, f.ingest.keepalive_secs);
             over(&mut i.max_batch_frames, f.ingest.max_batch_frames);
+        }
+
+        // `enable = false` **disarms**, where the other two sections let a
+        // flag survive it. The file overriding the flags is this module's rule, and
+        // this is the one setting where honouring it in the off direction
+        // matters: a fleet config that says the responder is disarmed should
+        // win over a flag somebody left in a unit file.
+        if f.test_pattern.enable == Some(false) {
+            self.test_pattern = None;
+        } else if f.test_pattern.enable == Some(true) || self.test_pattern.is_some() {
+            let tp = self
+                .test_pattern
+                .get_or_insert_with(|| TestPattern::from_cli(cli));
+            over(
+                &mut tp.ifaces,
+                f.test_pattern.ifaces.as_deref().map(parse_ifaces),
+            );
         }
 
         if f.forward.enable == Some(true) || self.forward.is_some() {
@@ -575,6 +632,28 @@ impl Settings {
             }
             None => r.push(("ingest listen", "disabled".into())),
         }
+        // Named even when off: `--check-config` is where someone looks to
+        // find out what a box is about to do, and this is the only setting
+        // that makes it transmit.
+        r.push((
+            "test pattern",
+            match &self.test_pattern {
+                None => "disabled".into(),
+                Some(tp) => format!(
+                    "ARMED, transmits on {}{}",
+                    if tp.ifaces.is_empty() {
+                        "every interface".to_string()
+                    } else {
+                        tp.ifaces.join(", ")
+                    },
+                    if self.can_fd {
+                        ""
+                    } else {
+                        " (classic sweep only; can_fd is off)"
+                    }
+                ),
+            },
+        ));
         match &self.forward {
             Some(f) => {
                 r.push(("forward to", format!("{}:{}", f.host, f.port)));
@@ -1084,6 +1163,118 @@ mod tests {
             "the reference has ingest disabled"
         );
         assert!(r.settings.forward.is_none(), "and forward disabled");
+    }
+
+    /// The responder is the only part of this server that transmits without
+    /// being asked, so the default matters more than the flag does: a build
+    /// that armed it by accident would put frames on a customer's live bus.
+    #[test]
+    fn the_test_pattern_responder_is_off_unless_asked_for() {
+        assert!(resolve(&[], None).unwrap().settings.test_pattern.is_none());
+        assert!(
+            resolve(&["--can-fd", "--iface", "can0"], None)
+                .unwrap()
+                .settings
+                .test_pattern
+                .is_none(),
+            "nothing else turns it on, --can-fd least of all"
+        );
+
+        let tp = resolve(&["--test-pattern-enable"], None)
+            .unwrap()
+            .settings
+            .test_pattern
+            .expect("the flag arms it");
+        assert!(tp.ifaces.is_empty(), "and with no names, every interface");
+
+        let tp = resolve(
+            &[
+                "--test-pattern-enable",
+                "--test-pattern-ifaces",
+                "can1, can2",
+            ],
+            None,
+        )
+        .unwrap()
+        .settings
+        .test_pattern
+        .expect("armed");
+        assert_eq!(tp.ifaces, ["can1", "can2"]);
+    }
+
+    /// The config file can arm it, aim it, and — unlike the other sections —
+    /// turn it off again over a flag.
+    #[test]
+    fn the_config_file_has_the_last_word_on_the_responder() {
+        let tp = resolve(
+            &[],
+            Some("[test_pattern]\nenable = true\nifaces = \"can1\"\n"),
+        )
+        .unwrap()
+        .settings
+        .test_pattern
+        .expect("the file arms it with no flag at all");
+        assert_eq!(tp.ifaces, ["can1"]);
+
+        let r = resolve(
+            &["--test-pattern-enable"],
+            Some("[test_pattern]\nenable = false\n"),
+        )
+        .unwrap();
+        assert!(
+            r.settings.test_pattern.is_none(),
+            "a file that disarms beats a flag that arms"
+        );
+        // The packaged config ships `enable = false` under three sections that
+        // look identical, and this is the only one where it beats the flag. A
+        // silently ineffective flag is the trap; the warning is the way out.
+        assert!(
+            r.warnings.contains(&Warning::TestPatternDisarmedByFile),
+            "and says so: {:?}",
+            r.warnings
+        );
+
+        let tp = resolve(
+            &["--test-pattern-enable", "--test-pattern-ifaces", "can0"],
+            Some("[test_pattern]\nifaces = \"can2\"\n"),
+        )
+        .unwrap()
+        .settings
+        .test_pattern
+        .expect("the flag armed it and the file aimed it");
+        assert_eq!(tp.ifaces, ["can2"], "the file overrides the flag");
+    }
+
+    /// `--check-config` is where an operator finds out what a box is about to
+    /// do, and this is the only setting that makes it transmit. The wording is
+    /// asserted because "no names means every interface" is a rule nobody would
+    /// guess from an empty list.
+    #[test]
+    fn check_config_says_what_the_responder_will_transmit_on() {
+        let row = |args: &[&str]| {
+            let s = resolve(args, None).unwrap().settings;
+            s.rows()
+                .into_iter()
+                .find(|(label, _)| *label == "test pattern")
+                .expect("a test pattern row, armed or not")
+                .1
+        };
+
+        assert_eq!(row(&["-i", "can0"]), "disabled");
+        assert_eq!(
+            row(&["-i", "can0,can1", "--test-pattern-enable", "--can-fd"]),
+            "ARMED, transmits on every interface"
+        );
+        assert_eq!(
+            row(&[
+                "-i",
+                "can0,can1",
+                "--test-pattern-enable",
+                "--test-pattern-ifaces",
+                "can1",
+            ]),
+            "ARMED, transmits on can1 (classic sweep only; can_fd is off)"
+        );
     }
 
     #[test]

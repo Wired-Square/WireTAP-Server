@@ -41,7 +41,7 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 # codec's golden-byte tests failed. Those tests do not run in this repo's CI,
 # and that guarantee is why they do not need to. It holds only for tags cut
 # that way; a hand-cut tag has no gate behind it.
-wiretap-protocol = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.15.2" }
+wiretap-protocol = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.15.4" }
 
 # --- CLI ---
 clap = { version = "4", default-features = false }

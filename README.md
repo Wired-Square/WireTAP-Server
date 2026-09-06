@@ -28,6 +28,18 @@ a gateway on the same machine with nothing dropped. What it has *not* had is the
 comparison that earns the switch: a 48-hour run beside the Python on the same bus, and a
 week-long soak. So the Python is still what a deployment should run.
 
+It also answers **Test Pattern** link validation runs, which the Python cannot: a WireTAP
+desktop on the same bus sends a known sequence and measures what comes back, at every CAN
+and CAN FD length code. This is the one part of the server that transmits, so it is off
+unless armed — see `[test_pattern]` in `packaging/wiretap-server.toml`.
+
+**Owed on hardware.** The responder's own logic and its FD transmit are covered by unit
+tests and by the `vcan` suite CI runs, but two things a virtual interface cannot show are
+outstanding: a CAN FD frame accepted by a *real* FD-capable controller — the trial box's
+adapters are classic 250 kbit/s — and a full run driven by a desktop, which needs the
+desktop's own Test Pattern side to land first. Until both, the FD sweep is proven at the
+socket and not on a wire.
+
 **The capture server is packaged and the package installs; nothing is published yet.**
 `packaging/make-deb.sh --arch all` builds `wiretap-server` as a static musl `.deb` for
 arm64 and amd64, installable on any distribution with systemd. **Both architectures go

@@ -118,6 +118,26 @@ enable = false
 # max_batch_frames = 256   # a full classic-CAN batch is about 4.6 KB, which is
 #                          # the constraint at the device end
 
+[test_pattern]
+# Answer Test Pattern link-validation runs: a WireTAP desktop on the same bus
+# sends a known sequence and measures what comes back, proving the link carries
+# what it claims to.
+#
+# THIS TRANSMITS ON THE BUS. Everything else this server does is read-only, so
+# it is off unless you turn it on, it says so at WARN when it starts, and
+# `--check-config` prints ARMED and the interfaces. On a production capture bus
+# leave it disabled.
+enable = false
+
+# Which interfaces answer. Absent or empty arms every captured interface, which
+# is rarely what you want on a multi-bus box: name the test bus.
+# ifaces = "can1"
+
+# There is no can_fd key here on purpose. `[server] can_fd` decides it: with it
+# off the reader skips FD frames rather than reporting them, so the responder
+# could not answer an FD sweep whatever this section said. It tells the
+# initiator so in its capability reply, and the classic sweep still runs.
+
 [logging]
 # level = "INFO"        # DEBUG is frame-level and very loud on a busy bus
 # stats_interval = 10   # seconds between stats lines; 0 disables them
