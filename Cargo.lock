@@ -2186,8 +2186,8 @@ dependencies = [
 
 [[package]]
 name = "wiretap-protocol"
-version = "0.15.4"
-source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.15.4#b59207f7ed7445e2f46dd108b5b3995bd67a29e3"
+version = "0.16.0"
+source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.16.0#a263ccab3ba0a522f75b672c88a4e8f2305370c0"
 
 [[package]]
 name = "wiretap-server"

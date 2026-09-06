@@ -274,7 +274,7 @@ sends its deltas out of order; it passed either way before.
 
 ### An FD frame is padded up to its data length code
 
-Taken with `wiretap-protocol` `v0.15.2`. The Python emits `data[:data_len]`
+Arrived with `wiretap-protocol` `v0.15.2`. The Python emits `data[:data_len]`
 after packing the *code* into the low nibble, so a CAN FD payload whose length
 is not an exact DLC — 9 bytes, say, which rounds up to code 9 meaning 12 —
 tells the client twelve bytes and sends nine. A client that trusts the code
