@@ -30,12 +30,15 @@
 use std::time::{Duration, SystemTime};
 
 use socketcan::{
-    tokio::CanFdSocket, CanAnyFrame, CanFrame, EmbeddedFrame, ExtendedId, Frame, StandardId,
+    tokio::CanFdSocket, CanAnyFrame, CanFdFrame, CanFrame, EmbeddedFrame, ExtendedId, Frame,
+    StandardId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use wiretap_model::{Direction, SourceId};
-use wiretap_protocol::testpattern::{decode, encode, Command, Flags, Message, ID_CONTROL};
+use wiretap_protocol::testpattern::{
+    encode, sweep_payload, Command, Flags, Message, ID_CONTROL, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
+};
 use wiretap_server::pipeline;
 use wiretap_server::settings::{LogLevel, Settings, TestPattern};
 use wiretap_server::source::socketcan::{detect_bitrates, CanReader};
@@ -82,6 +85,12 @@ impl Bus {
         self.0.write_frame(&frame).await.expect("put it on the bus");
     }
 
+    /// A CAN FD frame, which `CanFrame` cannot represent.
+    async fn send_fd(&self, arb_id: u32, data: &[u8]) {
+        let frame = CanFdFrame::new(standard(arb_id), data).expect("an FD frame");
+        self.0.write_frame(&frame).await.expect("put it on the bus");
+    }
+
     /// The next frame on the bus, or a failed test.
     async fn next(&self) -> CanAnyFrame {
         tokio::time::timeout(PATIENCE, self.0.read_frame())
@@ -123,6 +132,39 @@ fn settings(port: u16, test_pattern: Option<TestPattern>) -> Settings {
         forward: None,
         test_pattern,
     }
+}
+
+/// Start a server and return only once its CAN sockets are certainly open.
+///
+/// **The barrier is the point.** vcan delivers a frame only to sockets that
+/// were already open when it was written, so a test that writes to the bus
+/// straight after `tokio::spawn` is racing `CanReader::open` — and losing the
+/// race looks like the code under test saying nothing. The GVRET handshake is
+/// the proxy: the listener is spawned *after* the readers in `start_capture`,
+/// so a device-info reply proves both are up. `ci.yml` waits on the same port
+/// for the same reason.
+///
+/// The join handle comes back so a caller can tell "the server refused to
+/// start" from "the server said nothing", which are the same symptom otherwise.
+async fn server_listening(
+    settings: Settings,
+) -> tokio::task::JoinHandle<Result<(), pipeline::RunError>> {
+    let port = settings.port;
+    let mut server = tokio::spawn(async move { pipeline::run(&settings).await });
+    let mut client = tokio::select! {
+        stopped = &mut server => panic!("the server stopped before listening: {stopped:?}"),
+        client = connect(port) => client,
+    };
+    client
+        .write_all(&[0xE7, 0xE7, 0xF1, 0x07])
+        .await
+        .expect("write the handshake");
+    assert_eq!(
+        read_exactly(&mut client, 8).await,
+        [0xF1, 0x07, 0x90, 0x01, 0x01, 0x00, 0x00, 0x00],
+        "device info, which is also the proof the readers are open"
+    );
+    server
 }
 
 /// Read until the frame with `arb_id` arrives, failing if it never does.
@@ -426,55 +468,68 @@ async fn read_exactly(stream: &mut TcpStream, n: usize) -> Vec<u8> {
     buf
 }
 
-/// The responder end to end: a Test Pattern frame on a real bus, answered by a
-/// real socket. The unit tests drive the same loop against a recording sink;
-/// what only this can show is that the reply is actually transmitted.
+/// The responder end to end, on the half that matters: a **CAN FD sweep**.
+///
+/// The unit tests drive the same loop against a recording sink and
+/// `an_fd_transmit_keeps_its_whole_payload` drives the socket directly. Only
+/// this wires them together — broadcast, state machine, `ReplySink`, socket —
+/// and so only this would catch the reply's `fd` flag being dropped on the way
+/// to `transmit`, which every other test in the tree passes without.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a vcan interface; see the module docs"]
-async fn an_armed_responder_answers_on_the_bus() {
+async fn an_armed_responder_echoes_an_fd_sweep_on_the_bus() {
     let bus = Bus::open();
-    let settings = settings(
+    let mut settings = settings(
         free_port().await,
         Some(TestPattern {
             ifaces: vec![iface()],
         }),
     );
-    let _server = tokio::spawn(async move { pipeline::run(&settings).await });
+    // Without this the reader drops every FD frame before the broadcast, so
+    // the sweep below would never reach the responder at all.
+    settings.can_fd = true;
+    let _server = server_listening(settings).await;
 
-    // A Hello is the one message answered outside a run, so it needs no setup.
-    let hello = encode(Message::Control(Command::Hello), Flags::new(0, 0));
-    bus.send(CanFrame::new(standard(ID_CONTROL), &hello).expect("a control frame"))
+    // Bind a run first: a responder echoes sweeps only inside one.
+    let start = encode(
+        Message::Control(Command::Start { mode: 0, run: 1 }),
+        Flags::new(0, 1),
+    );
+    bus.send(CanFrame::new(standard(ID_CONTROL), &start).expect("a control frame"))
         .await;
 
-    // No filtering: this socket never sees the frame it just sent, so the first
-    // thing it reads is the responder's answer. Filtering on the id would in
-    // fact skip that answer — a Hello reply is a Control message, so it carries
-    // the same ID_CONTROL as the request.
-    let reply = bus.next().await;
+    // Code 15 is 64 bytes — the longest thing the protocol can ask for, and the
+    // one the old 8-byte clamp would have answered with eight.
+    let payload = sweep_payload(15, true);
+    assert_eq!(payload.len(), 64, "the crate's own idea of code 15");
+    bus.send_fd(SWEEP_REQUEST_BASE + 15, &payload).await;
 
-    let (msg, _) = decode(reply.data()).expect("a framed message");
+    let echo = bus.next().await;
+    assert_eq!(echo.raw_id(), SWEEP_ECHO_BASE + 15, "the echo id");
+    assert_eq!(echo.data(), &payload[..], "all 64 bytes came back");
     assert!(
-        matches!(msg, Message::Control(Command::HelloReply { .. })),
-        "got {msg:?}"
+        matches!(echo, CanAnyFrame::Fd(_)),
+        "and came back as CAN FD, not downgraded to classic"
     );
 }
 
 /// **Disabled is silent.** The responder is the only thing here that transmits
-/// unbidden, so "off" has to mean nothing reaches the bus at all — not merely
-/// that no reply is generated.
+/// unbidden, so "off" has to mean nothing reaches the bus at all.
+///
+/// This assertion is only worth anything because [`server_listening`] has
+/// already proved the reader is open: without that barrier the frame would be
+/// written before anything could hear it, and the test would pass just as
+/// happily with the responder armed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a vcan interface; see the module docs"]
 async fn a_disabled_responder_transmits_nothing() {
     let bus = Bus::open();
-    let settings = settings(free_port().await, None);
-    let _server = tokio::spawn(async move { pipeline::run(&settings).await });
+    let _server = server_listening(settings(free_port().await, None)).await;
 
     let hello = encode(Message::Control(Command::Hello), Flags::new(0, 0));
     bus.send(CanFrame::new(standard(ID_CONTROL), &hello).expect("a control frame"))
         .await;
 
-    // Nothing at all should arrive: this socket is not given its own frame back,
-    // and with the responder off nothing else is transmitting.
     let heard = bus.interruption(Duration::from_millis(500)).await;
     assert!(
         heard.is_none(),

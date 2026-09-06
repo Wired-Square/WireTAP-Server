@@ -588,6 +588,25 @@ impl Settings {
         Ok(())
     }
 
+    /// Which captured interfaces the responder answers on, as indices into
+    /// [`Self::ifaces`].
+    ///
+    /// One definition because two things read it — `start_capture`, to spawn a
+    /// responder per interface, and `--check-config`, to say what will
+    /// transmit. Reporting the *configured* names instead would tell an
+    /// operator a bus was armed that is not being captured at all.
+    ///
+    /// Naming none arms every interface: `--test-pattern-enable` on its own
+    /// that armed nothing would be a silent no-op.
+    pub fn armed_indices(&self, tp: &TestPattern) -> Vec<usize> {
+        self.ifaces
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| tp.ifaces.is_empty() || tp.ifaces.contains(name))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Label/value pairs for `--check-config`. Env render through
     /// [`Secret`]'s redacting `Display`, so this cannot echo one.
     fn rows(&self) -> Vec<(&'static str, String)> {
@@ -639,19 +658,29 @@ impl Settings {
             "test pattern",
             match &self.test_pattern {
                 None => "disabled".into(),
-                Some(tp) => format!(
-                    "ARMED, transmits on {}{}",
-                    if tp.ifaces.is_empty() {
-                        "every interface".to_string()
-                    } else {
-                        tp.ifaces.join(", ")
-                    },
-                    if self.can_fd {
-                        ""
-                    } else {
-                        " (classic sweep only; can_fd is off)"
+                // The *armed* set, not the configured names: a name that no
+                // captured interface matches arms nothing, and a row that
+                // answered "ARMED on can9" for a box capturing can0 would be
+                // wrong in exactly the configuration someone opened this report
+                // to check. `start_capture` intersects the same two lists.
+                Some(tp) => match self.armed_indices(tp) {
+                    armed if armed.is_empty() => {
+                        "enabled, but no captured interface matches; nothing is armed".into()
                     }
-                ),
+                    armed => format!(
+                        "ARMED, transmits on {}{}",
+                        armed
+                            .iter()
+                            .map(|&i| self.ifaces[i].as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        if self.can_fd {
+                            ""
+                        } else {
+                            " (classic sweep only; can_fd is off)"
+                        }
+                    ),
+                },
             },
         ));
         match &self.forward {
@@ -1261,9 +1290,11 @@ mod tests {
         };
 
         assert_eq!(row(&["-i", "can0"]), "disabled");
+        // Named, not "every interface": the report says which buses will carry
+        // frames, which is the question someone opened it to answer.
         assert_eq!(
             row(&["-i", "can0,can1", "--test-pattern-enable", "--can-fd"]),
-            "ARMED, transmits on every interface"
+            "ARMED, transmits on can0, can1"
         );
         assert_eq!(
             row(&[
@@ -1274,6 +1305,19 @@ mod tests {
                 "can1",
             ]),
             "ARMED, transmits on can1 (classic sweep only; can_fd is off)"
+        );
+        // The case the row used to get wrong: a name matching no captured
+        // interface arms nothing, and saying "ARMED on can9" for a box
+        // capturing can0 would be wrong exactly where it is being checked.
+        assert_eq!(
+            row(&[
+                "-i",
+                "can0",
+                "--test-pattern-enable",
+                "--test-pattern-ifaces",
+                "can9",
+            ]),
+            "enabled, but no captured interface matches; nothing is armed"
         );
     }
 

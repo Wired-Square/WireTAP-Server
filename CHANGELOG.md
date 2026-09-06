@@ -15,7 +15,10 @@ All notable changes to this project are documented here. Entries go under
   **Off unless armed**, because it is the only part of this server that transmits:
   `[test_pattern] enable`, or `--test-pattern-enable`, with an optional interface list
   that defaults to every captured interface. It says `ARMED` at WARN on startup naming
-  those interfaces, and `--check-config` prints the same. A config file saying
+  those interfaces, and `--check-config` names the same set — both from
+  `Settings::armed_indices`, so a name matching no captured interface reports
+  `nothing is armed` in both places rather than claiming a bus that will stay quiet. A
+  config file saying
   `enable = false` beats the flag — unlike `[ingest]` and `[forward]` — and warns that it
   did, so an ineffective flag is never silent.
 - `CanReader::transmit` builds **CAN FD frames**, selected by an `is_fd` argument; the

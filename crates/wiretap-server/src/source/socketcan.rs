@@ -80,11 +80,10 @@ impl CanReader {
     /// Put a frame on this interface's bus.
     ///
     /// The 8-byte clamp on the classic path belongs to GVRET rather than to
-    /// CAN: `F1 00` has no FD flag, the Python's `_tx_can` packed a 16-byte
-    /// `can_frame` even with the socket in FD mode, and the decoder already
-    /// clamps — doing it here too makes that a local guarantee rather than a
-    /// remote one. The FD path must not clamp, because the Test Pattern
-    /// responder echoes sweep payloads up to 64 bytes.
+    /// CAN: `F1 00` has no FD flag and the decoder already clamps, so doing it
+    /// here too makes that a local guarantee rather than a remote one. The FD
+    /// path must not clamp — the Test Pattern responder echoes sweep payloads
+    /// up to 64 bytes.
     ///
     /// `CanFdFrame::new` rounds the length up to the next valid code and
     /// zero-fills, so no length-code table is needed here.

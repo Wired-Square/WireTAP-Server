@@ -127,7 +127,6 @@ pub async fn responder_loop<S: ReplySink>(
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use wiretap_model::Direction;
     use wiretap_protocol::testpattern::{
         encode, Command, Flags, Message, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
     };

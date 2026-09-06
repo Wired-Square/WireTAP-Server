@@ -297,10 +297,12 @@ find an undocumented difference. Pinned upstream by
 
 ### `transmit` builds CAN FD frames, and answers Test Pattern runs
 
-The Python's `_tx_can` packed a 16-byte `can_frame` whatever the socket was in,
-because the only thing that ever called it was a GVRET client and `F1 00`
-carries no FD flag. `CanReader::transmit` took an `is_fd` argument and keeps the
-8-byte clamp on the classic path for exactly that reason.
+The Python's `_tx_can` has an FD branch — `if is_fd and self.can_fd` at
+`wiretap-server.py:1613` — and **nothing has ever reached it**: the one call
+site, `tx_func(bus, can_id_sc, data)` at `:1444`, never passes `is_fd`, so the
+default `False` sends the classic branch every time. `CanReader::transmit` takes
+`is_fd` as an argument rather than a default, so the caller must say, and keeps
+the 8-byte clamp on the classic path because `F1 00` carries no FD flag.
 
 The FD path exists for the **Test Pattern responder** (`src/testpattern.rs`), a
 capability the Python does not have at all: a WireTAP desktop on the same bus

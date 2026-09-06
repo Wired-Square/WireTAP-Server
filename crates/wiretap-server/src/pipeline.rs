@@ -268,11 +268,7 @@ async fn start_capture(
         tokio::spawn(echo_loop(frames.subscribe(), settings.colour));
     }
     if let Some(tp) = &settings.test_pattern {
-        // No names arms every interface: a `--test-pattern-enable` that armed
-        // nothing would be a silent no-op.
-        let armed: Vec<usize> = (0..settings.ifaces.len())
-            .filter(|&i| tp.ifaces.is_empty() || tp.ifaces.contains(&settings.ifaces[i]))
-            .collect();
+        let armed = settings.armed_indices(tp);
         // A name that matched nothing means an operator believes a bus is armed
         // that is not, and finds out from a validation run that fails for no
         // visible reason.
