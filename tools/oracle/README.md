@@ -538,6 +538,53 @@ Options:
   --log-level LEVEL       Log level (DEBUG, INFO, WARNING, ERROR)
 ```
 
+## The Stage 6 parallel run
+
+This oracle's last job is to be the thing the Rust port is diffed against on live
+hardware: both readers on the same buses, writing to two databases, for 48 hours.
+SocketCAN is multicast, so two raw sockets each see every frame and neither
+reader can cost the other anything — the run is free to leave going.
+
+```bash
+docker build -t wiretap-oracle:parallel tools/oracle
+
+docker run -d --name wiretap-oracle-parallel --network host \
+  --restart unless-stopped -v wiretap-backend_pgsocket:/var/run/postgresql \
+  wiretap-oracle:parallel -i can0,can1 -p 2323 --pg-enable \
+  --pg-dsn "host=/var/run/postgresql dbname=<py-db> user=postgres password=..."
+
+tools/oracle/parallel-diff.sh <rust-db> <py-db>
+```
+
+Three parts of that are load-bearing:
+
+- **`--network host`** — SocketCAN interfaces are network devices in a network
+  namespace, so a bridged container sees no `can0`.
+- **The `pgsocket` volume** rather than publishing 5432 — the gateway's compose
+  file deliberately publishes no Postgres port, and this keeps it that way.
+- **`-p 2323`** — the Rust daemon owns port 23.
+
+Create the oracle's database with `POST /v1/databases` on the gateway rather
+than by hand, so both sides get their schema from the same code path. (Unlike
+the standalone setup above, which applies `init_schema.sql` directly because it
+has no gateway to ask.)
+
+`parallel-diff.sh` compares per-bus and per-id counts, payloads, `dlc`, the
+flags and the timestamps over one identical window, and exits non-zero if any of
+them disagree. `dlc` agreeing is not a tautology — the Rust never stores it and
+the gateway recomputes it from the payload length.
+
+Nothing is exempted, because a field exempted from a diff is a field nobody
+looks at. One difference is nonetheless expected: `docs/porting-notes.md` records
+under *Deliberate changes* that the Python archives remote-transmission frames
+and the Rust skips them, so a bus carrying RTR moves counts, payloads and `dlc`
+together. Timestamps have no such excuse — porting-notes files the two socket
+options under *Confirmed identical*, so a difference there contradicts the
+port's own record.
+
+What the run finds belongs in `docs/porting-notes.md`, which outlives this
+directory.
+
 ## License
 
 See the main WireTAP repository for license information.
