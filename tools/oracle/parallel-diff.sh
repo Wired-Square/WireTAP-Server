@@ -62,6 +62,19 @@
 #     a value only the oracle has, sitting just below one the Rust duplicated,
 #     means something collapsed two frames onto one time. Row and distinct-value
 #     counts are printed below for that reason.
+#
+# `lag` is `max(ingest_ts) - max(ts)`: how long after the newest frame in the
+# window the transaction that wrote it began. `ingest_ts` is `DEFAULT now()` and
+# `now()` is transaction start, so it is stamped by whichever process opened the
+# transaction — the oracle itself, and for the Rust the *gateway*, one process
+# and one TCP hop further on. **The Rust side is therefore expected to run a
+# little higher, and does**: ~0.18 ms against ~0.11 ms on loopback, flat across
+# hours. That gap is the hop, not a fault.
+#
+# What this column is here to catch is a writer seconds or minutes behind, which
+# is the state where two captures compare identical because one has not written
+# the window yet. Sub-millisecond on both sides means both are live; a median
+# climbing hour on hour would mean the queue is backing up.
 
 set -euo pipefail
 
