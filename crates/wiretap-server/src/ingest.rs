@@ -272,9 +272,12 @@ impl Session {
 
         // A relative batch's base is an epoch this server knows nothing about,
         // so the newest record is stamped with its arrival and the rest are
-        // back-dated by their distance from it.
+        // back-dated by their distance from it. The newest is the *largest*
+        // delta, not the last one: a sender interleaving two buses can hand
+        // over a batch whose last record is not its newest, and taking the
+        // last would then stamp the real newest ahead of its own arrival.
         let base_ts_us = if self.time_relative {
-            let newest = batch.records.last().map_or(0, |r| r.delta_us);
+            let newest = batch.records.iter().map(|r| r.delta_us).max().unwrap_or(0);
             system_time_to_us(SystemTime::now()) - i64::from(newest)
         } else {
             batch.base_ts_us as i64
@@ -616,31 +619,32 @@ mod tests {
             .unwrap();
         reply(&mut c).await;
 
-        // Deltas 1s and 3s after some boot the server knows nothing about, and
-        // a base that is nonsense on this server's clock.
+        // Deltas after some boot the server knows nothing about, and a base
+        // that is nonsense on this server's clock. Deliberately not in order:
+        // a sender interleaving two buses hands over a batch whose last record
+        // is not its newest, and taking the last would stamp the real newest
+        // ahead of the arrival it is supposed to be pinned to.
         let mut records = Vec::new();
-        for delta in [1_000_000u64, 3_000_000] {
+        for delta in [1_000_000u64, 3_000_000, 2_000_000] {
             proto::encode_record_into(&mut records, 0, delta, 0x100, 0, &[7]);
         }
         let before = system_time_to_us(SystemTime::now());
-        c.write_all(&proto::encode_batch(1, 42, 2, &records))
+        c.write_all(&proto::encode_batch(1, 42, 3, &records))
             .await
             .unwrap();
         let ack = proto::parse_ack(&reply(&mut c).await.body).unwrap();
         assert_eq!(ack.status, proto::ACK_OK);
         let after = system_time_to_us(SystemTime::now());
 
-        let frames = wait_for(&seen, 2).await;
-        let (first, last) = (frames[0].ts_us, frames[1].ts_us);
+        let ts: Vec<i64> = wait_for(&seen, 3).await.iter().map(|f| f.ts_us).collect();
         assert!(
-            (before..=after).contains(&last),
-            "the newest record is stamped on arrival: {last} not in {before}..={after}"
+            (before..=after).contains(&ts[1]),
+            "the newest record is the largest delta, and is stamped on its \
+             arrival: {} not in {before}..={after}",
+            ts[1]
         );
-        assert_eq!(
-            last - first,
-            2_000_000,
-            "and the older one keeps its distance"
-        );
-        assert!(last > 42, "the client's own base is discarded");
+        assert_eq!(ts[1] - ts[0], 2_000_000, "the others keep their distance");
+        assert_eq!(ts[1] - ts[2], 1_000_000);
+        assert!(ts[1] > 42, "the client's own base is discarded");
     }
 }

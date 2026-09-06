@@ -578,9 +578,28 @@ Nothing is exempted, because a field exempted from a diff is a field nobody
 looks at. One difference is nonetheless expected: `docs/porting-notes.md` records
 under *Deliberate changes* that the Python archives remote-transmission frames
 and the Rust skips them, so a bus carrying RTR moves counts, payloads and `dlc`
-together. Timestamps have no such excuse — porting-notes files the two socket
-options under *Confirmed identical*, so a difference there contradicts the
-port's own record.
+together. Timestamps have no such excuse.
+
+**Not exempting them is what the run paid for.** The first minutes turned up
+three frames in 15 000 timestamped 4-37 µs late, with every other column
+matching — a forward batch was based on its *first* frame rather than its
+earliest, so any frame the two bus readers enqueued out of order was rewritten
+to the batch head's time. A draft of the diff script had excused timestamps as
+an expected deviation and would have hidden it. The finding and its evidence are
+in `docs/porting-notes.md` under "A forward batch is based on its earliest
+frame".
+
+Two things that leaves for the next reader of a failure. Duplicate timestamps
+are not by themselves a defect: both archives carry same-microsecond pairs on
+one bus, which no 250 kbit/s bus can produce, because the gs_usb driver stamps a
+USB completion. And the decisive query is the set difference *both ways* — a
+value the Rust has and the oracle does not means a clock or rounding difference,
+while a value only the oracle has, just below one the Rust duplicated, means two
+frames were collapsed onto one time.
+
+Exit codes carry the distinction: 0 identical, 1 they disagree, 2 the comparison
+could not be made. A wrapper that cannot tell a typo'd database from a real
+divergence will eventually treat one as the other.
 
 What the run finds belongs in `docs/porting-notes.md`, which outlives this
 directory.

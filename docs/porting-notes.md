@@ -219,6 +219,82 @@ error mask is zero, so no error frame is ever delivered to either. If bus-health
 reporting is wanted later it needs the socket option first; discarding them is
 not what stops them arriving.
 
+### A forward batch is based on its earliest frame, not its first
+
+The Python's ingest client took `chunk[0]`'s timestamp as a batch's base and
+clamped every delta with `max(0, ...)`. The port replicated both, and the
+combination is lossy: two bus readers feed one archive queue, so a chunk's
+first frame is **not** always its earliest, and every frame older than the head
+was encoded with `delta_us = 0` — written at the head's time, moved forward,
+and duplicating a timestamp that belonged to another frame.
+
+Found by the parallel run on 2026-09-06, and it presented as a capture problem
+rather than a wire-format one. Over one minute, `sungrow_multi_tower` and
+`sungrow_parallel_py` agreed on rows per bus (9 043 and 5 941), on the payload,
+`dlc` and flag digests, and disagreed on `ts`: 14 978 distinct against 14 981.
+`SELECT ts FROM rust EXCEPT SELECT ts FROM python` was **empty** — the Rust
+invented no value the oracle had not also recorded, which rules out clock skew,
+rounding and truncation — while the three values only the oracle held each sat
+4–37 µs *below* a Rust duplicate pair spanning two buses. In one, the oracle has
+bus 1 / id `108` at `.736102` and bus 0 / id `1814faa1` at `.736139`; the Rust
+has both at `.736139`, with the same `ingest_ts`, so one batch, head on bus 0.
+
+Three duplicates against **19** inverted pairs in the same minute, which is the
+number that makes the mechanism legible: only a frame older than its chunk's
+*head* saturates, not every frame out of order with its predecessor. Per-bus
+inversions were 0, as they always are — one reader, one socket, one clock.
+
+`ForwardSink::send_chunk` now takes the chunk's minimum, and `write_batch`
+splits on span as well as on the record count, because a delta is a `u32` of
+microseconds and a disk-cache drain reads `ORDER BY id` across a whole outage —
+on a bus averaging a frame every 17 seconds, 256 consecutive cached frames
+reach 71.6 minutes and the delta would *wrap* rather than saturate.
+`encode_record_into` `debug_assert`s the base, as a backstop for a hand-rolled
+caller rather than as the mechanism. Pinned by
+`an_out_of_order_chunk_keeps_every_timestamp` and
+`a_batch_spanning_more_than_a_u32_of_microseconds_is_split`, each of which
+fails against the code it replaced and passes against the other's mutation.
+
+The Python is unchanged and still has this bug — `wiretap-server.py:1206` takes
+`chunk[0]` as the base and `:1216` clamps with `max(0, ...)`. It did not show in
+the parallel run because that run was configured to use the oracle's *other*
+writer, the direct `copy_expert` at `:519`, which has no base at all. That is a
+fact about how the run was set up rather than about either codebase, and is not
+checkable from this repository.
+
+The same belief — that a batch arrives in order — sat in both `TIME_RELATIVE`
+re-basing sites, which took `records.last()` as the newest record and stamped
+it at arrival. A sender interleaving two buses can end a batch with a frame
+that is not its newest, and the real newest was then dated ahead of the arrival
+it was pinned to. Both now take the largest delta. Milder than the base defect
+— the whole batch shifts uniformly, so nothing collapses or duplicates — and
+fixed here because leaving the belief in two more places is how the next one
+starts. Pinned by `relative_timestamps_are_back_dated_from_arrival`, which now
+sends its deltas out of order; it passed either way before.
+
+### An FD frame is padded up to its data length code
+
+Taken with `wiretap-protocol` `v0.15.2`. The Python emits `data[:data_len]`
+after packing the *code* into the low nibble, so a CAN FD payload whose length
+is not an exact DLC — 9 bytes, say, which rounds up to code 9 meaning 12 —
+tells the client twelve bytes and sends nine. A client that trusts the code
+then reads three bytes of the next frame. The codec now zero-pads to the code's
+length.
+
+**No byte this server emits changes**, and the guarantee is stronger than the
+bus. `read_loop` is the only sender into the GVRET broadcast, so every payload
+reaching the encoder arrived through `CanFdFrame::from(canfd_frame)`, which
+*normalises*: it clamps to `CANFD_MAX_DLEN`, rounds the length up to the next
+valid one, zero-fills, and rewrites `len`. So `data()` cannot return an inexact
+length even if a kernel handed one over, and the padding here is always zero
+bytes long. Frames arriving on the ingest listener, which is where an arbitrary
+length could come from, are enqueued to the archive and never broadcast.
+
+The entry is here because the codec is shared: the consumer that *can* reach it
+is the desktop, and a reader comparing the two implementations would otherwise
+find an undocumented difference. Pinned upstream by
+`fd_frame_with_an_inexact_length_is_padded_up_to_its_code`.
+
 ## Replicated quirks
 
 Each is pinned by a test that names it.
@@ -266,10 +342,34 @@ Recorded so a future reader does not go looking.
   carries the *code*, not the byte count, so 32 bytes is 13 and 64 bytes is 15.
   The desktop's parser depends on this. Test:
   `fd_frame_packs_the_dlc_code_not_the_length`.
-- **Kernel receive timestamps.** `socketcan` asks for `SO_TIMESTAMPNS` where
-  the Python asked for `SO_TIMESTAMP` — nanosecond timespec against microsecond
-  timeval, the same kernel software receive time, truncated to microseconds
-  either way. One `recvmsg` per frame in both.
+- **Kernel receive timestamps, at the socket.** `socketcan` asks for
+  `SO_TIMESTAMPNS` where the Python asked for `SO_TIMESTAMP` — nanosecond
+  timespec against microsecond timeval, the same kernel software receive time,
+  truncated to microseconds either way. One `recvmsg` per frame in both.
+
+  **Identical at the socket only** — this entry was read for weeks as covering
+  the timestamp end to end. It does not: the forward encoding was where the two
+  archives diverged, under "A forward batch is based on its earliest frame"
+  above.
+
+  Two things at the socket are *not* identical, neither of which caused that:
+
+  - **A missing control message is an error here and a fallback there.**
+    `wiretap-server.py` computes `now = time.time()` for every frame and
+    overwrites it only if the `SO_TIMESTAMP` cmsg is present, so a socket that
+    stopped delivering them would silently archive a userspace clock.
+    socketcan 3.6.2's `read_frame_with_timestamp` returns
+    `InvalidData: no SO_TIMESTAMPNS control message received`; `read_loop` logs
+    it and backs off a second, capturing nothing until it recovers. Loud is the
+    better failure for an archive, but it is a difference, and it is the one
+    branch here whose absence can only be observed in the field: the
+    `debian-sungrow` journal carried zero such lines over the 2026-09-06 run.
+  - **Same-microsecond frames are real and are not a defect.** Both archives
+    show pairs sharing a microsecond on the *same* bus, which no 250 kbit/s bus
+    can produce: the gs_usb driver stamps a USB completion, so frames delivered
+    together carry one time. They agree on these, which is the point — "no
+    duplicate timestamps" is the wrong success criterion, and "the same
+    duplicates as the oracle" is the right one.
 - **Bitrate detection, now without pyroute2.** `nl::CanInterface::details()`
   replaces the hand-rolled `IFLA_CAN_BITTIMING` parsing. The fallback matches
   the Python case for case, which is subtler than "any error yields

@@ -278,9 +278,11 @@ pub fn record_id_flags(arb_id: u32, extended: bool, is_fd: bool, transmitted: bo
 
 /// Append one record: `delta_us u32 | id_flags u32 | bus u8 | len u8 | payload`.
 ///
-/// `delta_us` saturates at zero, as the Python's `max(0, ...)` did: a batch
-/// whose base is not its earliest frame would otherwise wrap into a delta three
-/// hours in the future.
+/// **The base must be the batch's earliest frame, and its span must fit a
+/// `u32` of microseconds.** Neither is checked by the wire format: a delta
+/// below the base saturates to zero and one above 71.6 minutes wraps, and both
+/// file the frame at a time it did not happen. Callers, not this function, are
+/// where those hold — see `ForwardSink::write_batch`.
 pub fn encode_record_into(
     out: &mut Vec<u8>,
     base_ts_us: u64,
@@ -289,6 +291,10 @@ pub fn encode_record_into(
     bus: u8,
     payload: &[u8],
 ) {
+    debug_assert!(
+        ts_us >= base_ts_us,
+        "the base must be the batch's earliest frame: {ts_us} is before {base_ts_us}"
+    );
     let payload = &payload[..payload.len().min(MAX_PAYLOAD)];
     out.reserve(10 + payload.len());
     out.extend_from_slice(&(ts_us.saturating_sub(base_ts_us) as u32).to_le_bytes());
@@ -494,14 +500,15 @@ mod tests {
         assert_eq!(second.payload.len(), MAX_PAYLOAD);
     }
 
-    /// The Python clamped a delta at zero rather than letting it wrap. A base
-    /// that is not the earliest frame is a caller error, but a three-hour
-    /// forward jump in the archive is a worse way to find out.
+    /// The saturation this asserts against is what a field defect looked like;
+    /// `docs/porting-notes.md` has the evidence. A release build still
+    /// saturates rather than wrapping, which is why the caller is where the
+    /// invariant lives and this is only the backstop.
     #[test]
-    fn a_record_before_the_base_gets_a_zero_delta() {
-        let mut records = Vec::new();
-        encode_record_into(&mut records, 5_000, 1_000, 0x123, 0, &[]);
-        assert_eq!(u32::from_le_bytes(records[0..4].try_into().unwrap()), 0);
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the base must be the batch's earliest frame")]
+    fn a_record_before_the_base_is_a_caller_error() {
+        encode_record_into(&mut Vec::new(), 5_000, 1_000, 0x123, 0, &[]);
     }
 
     /// A payload longer than a CAN FD frame is truncated, not refused: the

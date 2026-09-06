@@ -48,13 +48,32 @@
 #
 #         candump can0 | head -2000 | grep -c ' R '     # 0 = no RTR
 #
-# Timestamps are NOT in that category. porting-notes files the two socket
-# options under *Confirmed identical* — the same kernel receive time, truncated
-# to microseconds either way — so a timestamp difference contradicts the port's
-# own record and is worth chasing. Row and distinct-value counts are printed
-# beside it for that reason.
+# Timestamps are NOT in that category, and refusing to exempt them is what this
+# script is for: it is the column that found the defect in docs/porting-notes.md
+# under "A forward batch is based on its earliest frame", while every other
+# column matched. Two things that leaves behind for whoever reads a failure:
+#
+#   - Duplicate timestamps are NOT by themselves a defect. Both archives carry
+#     same-microsecond pairs on one bus, which no 250 kbit/s bus can produce:
+#     the gs_usb driver stamps a USB completion. The test is whether the two
+#     sides agree on them, not whether they exist.
+#   - The decisive query is the set difference in both directions. A value the
+#     Rust has and the oracle does not means a clock or a rounding difference;
+#     a value only the oracle has, sitting just below one the Rust duplicated,
+#     means something collapsed two frames onto one time. Row and distinct-value
+#     counts are printed below for that reason.
 
 set -euo pipefail
+
+# Exit 2 is "cannot compare", exit 1 is "they disagree". A wrapper that cannot
+# tell a typo'd database from a real divergence will eventually treat one as the
+# other — which is why this is defined before the arguments are read rather than
+# beside its first use. `${2:?...}` reads as a usage guard and exits **1**, so a
+# missing argument used to arrive at the caller spelling "the captures differ".
+die() {
+	echo "$*" >&2
+	exit 2
+}
 
 case "${1:-}" in
 -h | --help | "")
@@ -63,8 +82,9 @@ case "${1:-}" in
 	;;
 esac
 
+[ "$#" -ge 2 ] || die "usage: $0 <rust-db> <py-db> [window-start]"
 RUST_DB="$1"
-PY_DB="${2:?usage: $0 <rust-db> <py-db> [window-start]}"
+PY_DB="$2"
 PIN="${3:-}"
 
 # The pin reaches SQL as text, so it is checked here rather than trusted. psql
@@ -101,14 +121,6 @@ else
 			timescaledb psql "${PSQL_OPTS[@]}" -U postgres -d "$db" "$@")
 	}
 fi
-
-# Exit 2 is "cannot compare", exit 1 is "they disagree". A wrapper that cannot
-# tell a typo'd database from a real divergence will eventually treat one as the
-# other.
-die() {
-	echo "$*" >&2
-	exit 2
-}
 
 # One query rather than four round trips: the bounds and every refusal condition
 # are a single answer. The pin arrives as a psql variable, not as interpolated

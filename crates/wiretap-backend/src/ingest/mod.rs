@@ -252,10 +252,18 @@ impl IngestServer {
             Some(Ok(b)) => b,
         };
 
-        // TIME_RELATIVE: stamp the last record at arrival, back-date the rest
+        // TIME_RELATIVE: stamp the newest record at arrival, back-date the
+        // rest. The newest is the largest delta rather than the last record —
+        // a sender interleaving two buses can send them out of order, and the
+        // last would then stamp the real newest ahead of its own arrival.
         let base_ts_us = if time_relative {
-            let last_delta = batch.records.last().map(|r| r.delta_us as i64).unwrap_or(0);
-            Utc::now().timestamp_micros() - last_delta
+            let newest = batch
+                .records
+                .iter()
+                .map(|r| r.delta_us as i64)
+                .max()
+                .unwrap_or(0);
+            Utc::now().timestamp_micros() - newest
         } else {
             batch.base_ts_us as i64
         };

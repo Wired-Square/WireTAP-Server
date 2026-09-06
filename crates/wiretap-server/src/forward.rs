@@ -45,6 +45,41 @@ pub struct ForwardSink {
     records: Vec<u8>,
 }
 
+/// A capture timestamp as the protocol carries it. One spelling, because the
+/// base and the deltas measured from it have to agree.
+fn ts_us(f: &Arc<CanSample>) -> u64 {
+    f.ts_us.max(0) as u64
+}
+
+/// How many frames from the front of `frames` fit in one batch.
+///
+/// The record count is the protocol's cap. The span is arithmetic: a delta is
+/// a `u32` of microseconds, so a batch cannot reach across more than about
+/// 71.6 minutes without wrapping — filing a frame that far *before* it
+/// happened, silently and in release, where `debug_assert` is not watching.
+///
+/// A live batch spans a flush interval and comes nowhere near it. A disk cache
+/// drain does: `SqliteCache::oldest` reads `ORDER BY id`, so one chunk is 256
+/// consecutive frames from across the whole outage, and a bus quiet enough to
+/// average a frame every 17 seconds reaches 71.6 minutes inside one batch.
+/// That is the recovery path, which is the one that has to work.
+fn batch_len(frames: &[Arc<CanSample>]) -> usize {
+    let (mut lo, mut hi) = (ts_us(&frames[0]), ts_us(&frames[0]));
+    for (n, f) in frames
+        .iter()
+        .enumerate()
+        .take(proto::MAX_BATCH_RECORDS)
+        .skip(1)
+    {
+        let (next_lo, next_hi) = (lo.min(ts_us(f)), hi.max(ts_us(f)));
+        if next_hi - next_lo > u64::from(u32::MAX) {
+            return n;
+        }
+        (lo, hi) = (next_lo, next_hi);
+    }
+    frames.len().min(proto::MAX_BATCH_RECORDS)
+}
+
 /// A connection and whatever of a reply has arrived so far.
 struct Connection {
     stream: TcpStream,
@@ -75,17 +110,18 @@ impl ForwardSink {
     /// `chunk` is at most [`proto::MAX_BATCH_RECORDS`]; a gateway NACKs a batch
     /// that claims more, rather than accepting a truncated one.
     async fn send_chunk(&mut self, chunk: &[Arc<CanSample>]) -> SinkResult {
-        // Absolute timestamps: the base is the first frame's, and every record
-        // is a delta from it. The `[forward]` client does not set
-        // `TIME_RELATIVE`, so the gateway takes these at face value rather than
-        // re-basing them on its own clock.
-        let base_ts_us = chunk[0].ts_us.max(0) as u64;
+        // Absolute timestamps: every record is a delta from the base, and the
+        // base is the chunk's *earliest* frame rather than its first. Two bus
+        // readers feed one queue, so the head is not always the oldest frame.
+        // The `[forward]` client does not set `TIME_RELATIVE`, so the gateway
+        // takes these at face value rather than re-basing them on its own clock.
+        let base_ts_us = chunk.iter().map(ts_us).min().unwrap_or(0);
         self.records.clear();
         for f in chunk {
             proto::encode_record_into(
                 &mut self.records,
                 base_ts_us,
-                f.ts_us.max(0) as u64,
+                ts_us(f),
                 proto::record_id_flags(f.arb_id, f.extended, f.is_fd, f.dir == Direction::Tx),
                 f.bus.0,
                 &f.data,
@@ -204,8 +240,11 @@ impl BatchSink for ForwardSink {
     }
 
     async fn write_batch(&mut self, batch: &[Arc<CanSample>]) -> SinkResult {
-        for chunk in batch.chunks(proto::MAX_BATCH_RECORDS) {
+        let mut rest = batch;
+        while !rest.is_empty() {
+            let (chunk, tail) = rest.split_at(batch_len(rest));
             self.send_chunk(chunk).await?;
+            rest = tail;
         }
         Ok(())
     }
@@ -419,6 +458,82 @@ mod tests {
         assert!(second.id_flags & proto::ID_EXTENDED != 0);
         assert!(second.id_flags & proto::ID_FD != 0);
         assert!(second.id_flags & proto::ID_TX != 0, "a transmitted frame");
+    }
+
+    /// Two bus readers feed one queue, so a batch's first frame is not always
+    /// its earliest. A base taken from the head gives every older frame a
+    /// negative delta, which [`proto::encode_record_into`] saturates to zero —
+    /// filing it at the head's time. See `docs/porting-notes.md`, "A forward
+    /// batch is based on its earliest frame".
+    #[tokio::test]
+    async fn an_out_of_order_chunk_keeps_every_timestamp() {
+        const BASE: i64 = 1_700_000_000_000_000;
+        // The shape the live capture showed: a bus 1 frame 37 µs older than
+        // the bus 0 frame enqueued ahead of it.
+        let queued = [
+            (BASE + 500, SourceId(0)),
+            (BASE + 463, SourceId(1)),
+            (BASE + 900, SourceId(0)),
+            (BASE + 880, SourceId(1)),
+        ];
+
+        let (port, gateway) = fake_gateway(Script::default()).await;
+        let mut s = sink(port, "");
+        s.connect().await.unwrap();
+        let frames: Vec<Arc<CanSample>> = queued
+            .iter()
+            .map(|(t, bus)| {
+                Arc::new(CanSample {
+                    bus: *bus,
+                    ..(*sample(*t, 0x123)).clone()
+                })
+            })
+            .collect();
+        s.write_batch(&frames).await.expect("acknowledged");
+        s.close().await;
+
+        let seen = gateway.await.unwrap();
+        let batch = &seen.batches[0];
+        let rebuilt: Vec<(i64, u8)> = batch
+            .records
+            .iter()
+            .map(|r| (batch.base_ts_us as i64 + i64::from(r.delta_us), r.bus))
+            .collect();
+        let want: Vec<(i64, u8)> = queued.iter().map(|(t, bus)| (*t, bus.0)).collect();
+        assert_eq!(
+            rebuilt, want,
+            "every frame keeps the time it was captured at"
+        );
+    }
+
+    /// A delta is a `u32` of microseconds, so a batch cannot span more than
+    /// 71.6 minutes without wrapping — and a disk cache drain reads across a
+    /// whole outage in insertion order, so on a quiet bus it can. Splitting on
+    /// span as well as count is what keeps the recovery path honest.
+    #[tokio::test]
+    async fn a_batch_spanning_more_than_a_u32_of_microseconds_is_split() {
+        const HOUR_US: i64 = 3_600_000_000;
+        let ts = [0, HOUR_US, 2 * HOUR_US, 2 * HOUR_US + 1];
+
+        let (port, gateway) = fake_gateway(Script::default()).await;
+        let mut s = sink(port, "");
+        s.connect().await.unwrap();
+        let frames: Vec<Arc<CanSample>> = ts.iter().map(|t| sample(*t, 0x123)).collect();
+        s.write_batch(&frames).await.expect("acknowledged");
+        s.close().await;
+
+        let seen = gateway.await.unwrap();
+        let rebuilt: Vec<i64> = seen
+            .batches
+            .iter()
+            .flat_map(|b| {
+                b.records
+                    .iter()
+                    .map(|r| b.base_ts_us as i64 + i64::from(r.delta_us))
+            })
+            .collect();
+        assert_eq!(rebuilt, ts, "no frame is filed 71.6 minutes early");
+        assert!(seen.batches.len() > 1, "the span forced a split");
     }
 
     /// The protocol caps a batch at 256 records and a gateway NACKs one that
