@@ -92,7 +92,7 @@ async fn run() -> Result<(), String> {
     });
 
     let app_state = Arc::new(AppState {
-        dbs,
+        dbs: dbs.clone(),
         keys,
         sessions,
     });
@@ -100,6 +100,16 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|e| format!("http bind {}: {e}", config.http_listen))?;
     tracing::info!("http listening on {}", config.http_listen);
+
+    // Every other capture database, swept in the background — after the bind
+    // above, so the admin UI and the healthcheck can answer while it runs and
+    // the migration is watchable rather than a silent gap before startup.
+    //
+    // Databases behind the current version refuse reads and writes until the
+    // sweep reaches them. A capture server refused at HELLO treats it as a sink
+    // failure, which is the same path as a gateway outage: cache to disk, retry,
+    // drain. Nothing is lost, but nothing is written either until this finishes.
+    tokio::spawn(async move { dbs.migrate_all().await });
     axum::serve(listener, http::router(app_state))
         .await
         .map_err(|e| format!("http server: {e}"))

@@ -6,6 +6,10 @@
   --text: #e3e6eb;
   --text-muted: #8b93a3;
   --accent: #4f8cff;
+  /* Wired Square brand orange, taken from the WireTAP desktop's logo.svg.
+     Deliberately separate from --accent: that drives buttons and focus rings,
+     and the wordmark is identity rather than interaction. */
+  --brand: #f25d19;
   --danger: #e05555;
   --ok: #3fb56a;
   font-family: "Inter", system-ui, -apple-system, sans-serif;
@@ -23,7 +27,12 @@ body {
 #root { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
 
 h1 { font-size: 1.15rem; margin: 0; letter-spacing: 0.02em; }
-h1 span { color: var(--accent); }
+/* Deliberately not flex: the h1's children are `Wire`, a `<span>TAP</span>` and
+   ` Backend`, so a flex gap lands *inside* the wordmark. Align the logo with
+   vertical-align and give it its own right margin instead. */
+h1 .logo { width: 22px; height: 22px; border-radius: 5px;
+           vertical-align: -5px; margin-right: 0.5rem; }
+h1 span { color: var(--brand); }
 h2 { font-size: 0.95rem; margin: 0 0 0.75rem; }
 
 .topbar {
@@ -104,6 +113,12 @@ input:focus, select:focus { outline: 1px solid var(--accent); }
 .badge.read { color: #7ec4ff; }
 .badge.ok { color: var(--ok); }
 .badge.revoked { color: var(--danger); }
+.badge.pending { color: var(--text-muted); }
+/* Not settled: the brand orange, which is the "something is happening" cue the
+   Wired Square palette already uses. Red is kept for genuine failure — a
+   database behind the current schema is transient, a failed migration is not. */
+.badge.migrating,
+.badge.behind { color: var(--brand); border-color: var(--brand); }
 
 .error { color: var(--danger); margin: 0.5rem 0; }
 

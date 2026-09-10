@@ -21,6 +21,7 @@ export default function App() {
     <>
       <div className="topbar">
         <h1>
+          <img className="logo" src="/admin/logo.svg" alt="" />
           Wire<span>TAP</span> Backend
         </h1>
         <nav className="tabs">

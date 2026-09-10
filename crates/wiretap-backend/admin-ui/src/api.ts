@@ -50,9 +50,79 @@ export interface KeySummary {
   revoked: boolean;
 }
 
+export type SchemaState =
+  | "current"
+  | "pending"
+  | "migrating"
+  | "rebuilding"
+  | "failed"
+  | "unknown";
+
 export interface DatabaseEntry {
   name: string;
   size_bytes: number;
+  schema_state: SchemaState;
+  /** null while migrating — the version is in flight. */
+  schema_version: number | null;
+  /** Seconds spent migrating, else null. */
+  busy_secs: number | null;
+  schema_error: string | null;
+  /**
+   * `covered` — stored summaries reach back to the first frame; `incomplete` —
+   * they do not, so rollup queries **omit** the uncovered span rather than
+   * recomputing it; `empty` — no frames. Null when the database is not in a
+   * state to ask.
+   */
+  rollup_state: "covered" | "incomplete" | "empty" | null;
+  /**
+   * Seconds between the newest frame and the last materialised bucket. Null when
+   * there is nothing to compare — no summaries, or no frames.
+   */
+  rollup_lag_secs: number | null;
+  /** Seconds the rollup rebuild has been running, else null. */
+  rollup_busy_secs: number | null;
+}
+
+/**
+ * How far the rollup may legitimately trail before it is worth rebuilding.
+ *
+ * Set by what the policy can repair, not by taste. `init_schema.sql` gives it a
+ * `start_offset` of 3 hours, so it only ever looks at the last three hours: a
+ * rollup further behind than that can never catch up on its own.
+ *
+ * Four terms make up the healthy lag, and the last two are easy to miss:
+ * `end_offset` holds back the last hour; `schedule_interval` adds up to 30
+ * minutes before the job runs; TimescaleDB snaps the refresh window down to a
+ * whole bucket, costing up to another hour; and we measure to the last
+ * materialised bucket, an hour below the watermark itself. A healthy live
+ * archive therefore peaks just under 3.5 h behind — so 4 h, not less.
+ */
+export const ROLLUP_FRESH_SECS = 4 * 60 * 60;
+
+/** A coarse span: `3 days`, `4 hours`, `12 minutes`. */
+export function formatSpan(secs: number): string {
+  const units: [number, string][] = [
+    [86400, "day"],
+    [3600, "hour"],
+    [60, "minute"],
+  ];
+  for (const [size, label] of units) {
+    if (secs >= size) {
+      const n = Math.floor(secs / size);
+      return `${n} ${label}${n === 1 ? "" : "s"}`;
+    }
+  }
+  return `${secs} seconds`;
+}
+
+export interface DatabaseList {
+  databases: DatabaseEntry[];
+  schema_version: number;
+}
+
+/** Seconds as `2m14s` — long enough to matter, short enough to read. */
+export function formatElapsed(secs: number): string {
+  return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m${secs % 60}s`;
 }
 
 export interface IngestSession {

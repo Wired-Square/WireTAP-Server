@@ -16,10 +16,12 @@ use futures_util::TryStreamExt;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::db;
 use crate::ingest::proto::{ID_ARB_MASK, ID_EXTENDED, ID_FD, ID_TX};
 use crate::ingest::writer::FrameRow;
 use crate::keys::{KeyInfo, Role};
 use crate::running;
+use crate::schema;
 use crate::sql;
 use crate::state::AppState;
 use crate::types::ImportResult;
@@ -49,6 +51,7 @@ pub fn router(state: St) -> Router {
         // databases
         .route("/v1/databases", get(list_databases).post(create_database))
         .route("/v1/databases/{db}", delete(delete_database))
+        .route("/v1/databases/{db}/rollup/refresh", post(refresh_rollup))
         .route("/v1/db/{db}/time-bounds", get(time_bounds))
         .route("/v1/db/{db}/inventory", get(inventory))
         .route("/v1/db/{db}/frames", get(frames))
@@ -157,13 +160,97 @@ async fn client_for(state: &St, db: &str) -> Result<deadpool_postgres::Object, A
 // Health / databases
 // ---------------------------------------------------------------------------
 
+/// Unauthenticated — the compose healthcheck curls it with no key — so this
+/// carries a consensus word only, never a database name. Names are for
+/// `/v1/databases`, which at least requires a read-role key.
 async fn health(State(state): State<St>) -> Json<serde_json::Value> {
     let db_ok = state.dbs.connect_raw("postgres").await.is_ok();
     Json(json!({
         "status": if db_ok { "ok" } else { "degraded" },
         "version": crate::VERSION,
         "db_ok": db_ok,
+        "schema": schema_consensus(&state.dbs.schema_states().await),
     }))
+}
+
+/// One word for how the whole deployment stands: the shared version when every
+/// database agrees, else the most urgent thing happening.
+///
+/// For external monitoring — this is the only schema signal available without an
+/// API key, so a check can alert on a half-migrated deployment. The admin UI
+/// does not use it; it holds a key and draws the detail from `/v1/databases`.
+fn schema_consensus(states: &std::collections::HashMap<String, db::DbSchemaState>) -> String {
+    use db::DbSchemaState::*;
+    if states.is_empty() {
+        return "unknown".into();
+    }
+    if states.values().any(|s| matches!(s, Failed { .. })) {
+        return "failed".into();
+    }
+    if states.values().any(|s| matches!(s, Migrating { .. })) {
+        return "migrating".into();
+    }
+    // Before the version fold: a database that is behind and *not* being
+    // migrated still refuses reads and writes, and folding it in would report a
+    // tidy consensus while nothing worked.
+    if states.values().any(|s| matches!(s, Pending { .. })) {
+        return "behind".into();
+    }
+    let mut versions: Vec<i32> = states.values().filter_map(|s| s.version()).collect();
+    versions.sort_unstable();
+    versions.dedup();
+    match versions.as_slice() {
+        [v] => format!("v{v}"),
+        _ => "mixed".into(),
+    }
+}
+
+/// The rollup's state for one database, as the admin UI shows it.
+///
+/// Delegates to [`schema::rollup_status`] rather than asking its own question:
+/// an earlier version measured only the newest stored bucket, which reports a
+/// rollup with a hole underneath as healthy — the exact state worth showing.
+async fn rollup_state(dbs: &db::Databases, name: &str) -> Option<(&'static str, Option<i64>)> {
+    // Pooled, not `connect_raw`: both admin pages poll this every 2 s while
+    // anything is busy, and a fresh connect per database per poll is a backend
+    // process and a SCRAM handshake each time. Callers only reach here for a
+    // database already known Current, so the pool's own gate passes through.
+    let pool = dbs.pool(name).await.ok()?;
+    let client = pool.get().await.ok()?;
+    match schema::rollup_status(&client).await.ok()? {
+        schema::RollupState::Empty => Some(("empty", None)),
+        schema::RollupState::Incomplete => Some(("incomplete", None)),
+        schema::RollupState::Covered { lag_secs } => Some(("covered", Some(lag_secs))),
+    }
+}
+
+/// Materialise the hourly rollup. Returns as soon as it has started — it is
+/// minutes on a large archive — and the state is read back from
+/// `GET /v1/databases`.
+async fn refresh_rollup(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(db): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_admin(&key)?;
+    // Server-side, not just the button's `disabled`: rebuilding the rollup of a
+    // database that has not migrated would run against a schema that has no
+    // capture_frame_hourly to refresh.
+    if !matches!(
+        state.dbs.schema_states().await.get(&db),
+        Some(db::DbSchemaState::Current { .. })
+    ) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("database '{db}' is not at the current schema"),
+        ));
+    }
+    let dbs = state.dbs.clone();
+    let name = db.clone();
+    tokio::spawn(async move {
+        let _ = dbs.refresh_rollup(&name).await;
+    });
+    Ok(Json(json!({ "status": "started", "database": db })))
 }
 
 async fn list_databases(
@@ -186,20 +273,48 @@ async fn list_databases(
         )
         .await
         .map_err(|e| ApiError::from(format!("database list failed: {e}")))?;
-    let databases: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|r| {
-            json!({
-                "name": r.get::<_, String>("datname"),
-                "size_bytes": r.get::<_, i64>("size_bytes"),
-            })
-        })
-        .filter(|d| match &key.database_pin {
-            Some(pin) => d["name"] == *pin,
-            None => true,
-        })
-        .collect();
-    Ok(Json(json!({ "databases": databases })))
+    let states = state.dbs.schema_states().await;
+    let rebuilding = state.dbs.rollup_rebuilds().await;
+    let mut databases: Vec<serde_json::Value> = Vec::new();
+    for r in &rows {
+        let name: String = r.get("datname");
+        // Same filter the sweep uses: a name this gateway would never manage is
+        // not a capture database, and listing it as "unknown" would report the
+        // deployment as mixed forever.
+        if !db::valid_db_name(&name) {
+            continue;
+        }
+        if key.database_pin.as_ref().is_some_and(|pin| *pin != name) {
+            continue;
+        }
+        let schema = states.get(&name);
+        // Only worth asking a database that is actually usable; one mid-migration
+        // would refuse the connection anyway.
+        let rollup = match schema {
+            Some(db::DbSchemaState::Current { .. }) => rollup_state(&state.dbs, &name).await,
+            _ => None,
+        };
+        databases.push(json!({
+            "name": name,
+            "size_bytes": r.get::<_, i64>("size_bytes"),
+            "schema_state": schema.map_or("unknown", |s| s.label()),
+            "schema_version": schema.and_then(|s| s.version()),
+            "busy_secs": schema.and_then(|s| s.busy_secs()),
+            "schema_error": match schema {
+                Some(db::DbSchemaState::Failed { error, .. }) => Some(error.clone()),
+                _ => None,
+            },
+            "rollup_state": rollup.map(|(st, _)| st),
+            "rollup_lag_secs": rollup.and_then(|(_, lag)| lag),
+            "rollup_busy_secs": rebuilding.get(&name),
+        }));
+    }
+    // The version they are all headed for, so the UI can render "v0 → v1"
+    // without hardcoding what current means.
+    Ok(Json(json!({
+        "databases": databases,
+        "schema_version": crate::schema::SCHEMA_VERSION,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -643,4 +758,96 @@ async fn ingest_sessions(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     check_admin(&key)?;
     Ok(Json(json!({ "sessions": state.sessions.list().await })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    fn states(pairs: &[(&str, db::DbSchemaState)]) -> HashMap<String, db::DbSchemaState> {
+        pairs
+            .iter()
+            .map(|(n, s)| (n.to_string(), s.clone()))
+            .collect()
+    }
+
+    /// This is what an external monitor alerts on, and it is the only schema
+    /// signal available without an API key.
+    #[test]
+    fn the_consensus_reports_the_shared_version_when_they_agree() {
+        let s = states(&[
+            ("a", db::DbSchemaState::Current { version: 1 }),
+            ("b", db::DbSchemaState::Current { version: 1 }),
+        ]);
+        assert_eq!(schema_consensus(&s), "v1");
+    }
+
+    /// A database behind and *not* being migrated still refuses reads and
+    /// writes. Folding it into the version tally reported a tidy "v0" while
+    /// nothing worked — which is what an operator running with automatic
+    /// migration off would have seen.
+    #[test]
+    fn a_database_left_behind_is_not_a_clean_consensus() {
+        let s = states(&[
+            ("a", db::DbSchemaState::Current { version: 1 }),
+            ("b", db::DbSchemaState::Pending { version: 0 }),
+        ]);
+        assert_eq!(schema_consensus(&s), "behind");
+
+        let all_behind = states(&[("a", db::DbSchemaState::Pending { version: 0 })]);
+        assert_eq!(schema_consensus(&all_behind), "behind");
+    }
+
+    /// Most urgent first: a failure outranks a migration in progress, which
+    /// outranks a version disagreement.
+    #[test]
+    fn the_consensus_reports_the_most_urgent_state() {
+        let s = states(&[
+            ("a", db::DbSchemaState::Current { version: 1 }),
+            (
+                "b",
+                db::DbSchemaState::Migrating {
+                    since: Instant::now(),
+                },
+            ),
+        ]);
+        assert_eq!(schema_consensus(&s), "migrating");
+
+        let s = states(&[
+            (
+                "a",
+                db::DbSchemaState::Migrating {
+                    since: Instant::now(),
+                },
+            ),
+            (
+                "b",
+                db::DbSchemaState::Failed {
+                    version: 0,
+                    error: "boom".into(),
+                },
+            ),
+        ]);
+        assert_eq!(schema_consensus(&s), "failed");
+    }
+
+    /// Never a database name: this endpoint is unauthenticated.
+    #[test]
+    fn the_consensus_never_leaks_a_database_name() {
+        let s = states(&[(
+            "sungrow_ben_wired",
+            db::DbSchemaState::Failed {
+                version: 0,
+                error: "connection to sungrow_ben_wired refused".into(),
+            },
+        )]);
+        assert!(!schema_consensus(&s).contains("sungrow"));
+    }
+
+    #[test]
+    fn an_empty_cluster_is_unknown_not_a_version() {
+        assert_eq!(schema_consensus(&HashMap::new()), "unknown");
+    }
 }

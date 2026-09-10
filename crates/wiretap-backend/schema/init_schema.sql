@@ -38,13 +38,36 @@ END $$;
 -- the migration's `ALTER TABLE … RENAME TO capture_frame` cannot run either,
 -- so the operator is wedged between two states.
 --
--- Fail first, and name the fix.
+-- Fail first, and name the fix. The gateway migrates by itself, so reaching this
+-- means either automatic migration is off or it did not finish.
 DO $$ BEGIN
   IF (SELECT relkind FROM pg_class WHERE oid = to_regclass('public.can_frame')) = 'r' THEN
     RAISE EXCEPTION 'this database predates the capture_frame rename; apply '
                     'crates/wiretap-backend/schema/migrations/0001_capture_frame.sql first';
   END IF;
 END $$;
+
+-- ----------------------------------------
+-- Schema version
+-- ----------------------------------------
+-- What migration this database has reached. The gateway reads it to decide what
+-- to apply, and reports it per database in the admin UI.
+--
+-- A database written before this table existed is fingerprinted from its shape
+-- instead — see `detect_version` — so an archive from before the scheme joins it
+-- without a special case.
+--
+-- The row itself is written at the *foot* of this file, not here. Each statement
+-- commits on its own, so stamping the version up here would mark a database
+-- current before its hypertable exists — and a first run that died at
+-- `create_hypertable` (the documented failure when timescaledb is missing from
+-- shared_preload_libraries) would be permanently, wrongly, reported as done.
+CREATE TABLE IF NOT EXISTS public.schema_version (
+  version     int PRIMARY KEY,
+  applied_at  timestamptz NOT NULL DEFAULT now(),
+  description text        NOT NULL
+);
+
 
 -- ----------------------------------------
 -- Helper: safe byte accessor for bytea
@@ -360,6 +383,8 @@ CREATE INDEX IF NOT EXISTS events_key_idx
 GRANT USAGE ON SCHEMA public TO wiretap;
 GRANT INSERT, SELECT ON TABLE public.capture_frame TO wiretap;
 GRANT SELECT ON public.capture_frame_hourly TO wiretap;
+-- Read-only: the gateway writes this as the superuser that applies the schema.
+GRANT SELECT ON TABLE public.schema_version TO wiretap;
 -- The pre-2026-09-10 names, still granted so an external reader on the old
 -- name keeps working.
 GRANT INSERT, SELECT ON TABLE public.can_frame TO wiretap;
@@ -371,3 +396,12 @@ GRANT EXECUTE ON FUNCTION public.hex_to_int(text) TO wiretap;
 GRANT EXECUTE ON FUNCTION public.get_byte_safe(bytea, int) TO wiretap;
 GRANT INSERT, SELECT ON TABLE public.events TO wiretap;
 GRANT USAGE ON SEQUENCE public.events_id_seq TO wiretap;
+
+-- ----------------------------------------
+-- Schema version, stamped last
+-- ----------------------------------------
+-- Everything above exists by the time this runs, which is the point: this row
+-- is the marker that the file completed, not that it started.
+INSERT INTO public.schema_version (version, description)
+  VALUES (1, 'capture_frame: one table per protocol, discriminated by protocol')
+  ON CONFLICT (version) DO NOTHING;

@@ -93,6 +93,7 @@ actively ingesting into it (409) and for the default/meta database
 | `WIRETAP_ADMIN_KEY` | — | Break-glass admin key |
 | `WIRETAP_DEFAULT_DB` | `wiretap` | Default capture database |
 | `WIRETAP_AUTO_CREATE` | `true` | Allow ingest/import to auto-create databases |
+| `WIRETAP_AUTO_MIGRATE` | `true` | Migrate capture databases to the current schema on start |
 | `RUST_LOG` | `wiretap_backend=info` | Log filter |
 
 Full list (listen addresses, ingest keepalive/batch caps) is in
@@ -122,13 +123,33 @@ won't work — the new hypertable drops the legacy `row_id`/`id_hex`/`data_hex`
 columns, so the column sets don't match.)
 
 **If the source archive predates 2026-09-10**, the frame table there is called
-`can_frame` and has no `protocol` column. Migrate the *schema* first with
-[schema/migrations/0001_capture_frame.sql](schema/migrations/0001_capture_frame.sql),
-which renames it to `capture_frame`, adds the multi-protocol columns and puts the
-old names back as views. It runs in well under a second on a compressed
-hypertable and rewrites nothing — see the file's header for the measurements.
+`can_frame` and has no `protocol` column. **The gateway migrates it for you** the
+first time it sees the database — nothing to run. It is fast and rewrites
+nothing: 5.3 s for 87.8 M rows on a fully compressed hypertable, with every chunk
+still compressed afterwards.
 
-Run it against the *source* archive, with `-f` and from its own directory:
+Two things to know when it does:
+
+- **The hourly rollup is rebuilt as part of the migration**, which is why a
+  migration takes longer than the schema change alone — 16 s per 88 M compressed
+  rows, minutes on a very large archive. It is not optional: the aggregate comes
+  back empty, and its maintenance policy would then materialise only a recent
+  window and advance the watermark past the gap, leaving `inventory` silently
+  under-reporting the archive's history.
+- **A database refuses reads and writes while it migrates.** A capture server
+  forwarding into it treats that as an outage and caches to disk, so no frames
+  are lost, but nothing lands until the migration finishes.
+- **An archive whose rollup does not reach back to its first frame is repaired
+  on start**, whatever put it that way — a restored backup, an older build, or a
+  maintenance run that materialised a recent window over an empty aggregate. That
+  last case is why the check looks at the *earliest* stored bucket: a holed
+  rollup has recent data and a small lag, so it reads as healthy on every obvious
+  measure while omitting everything below the hole.
+
+To do it by hand instead — worth it if you want to snapshot 30 GB first — start
+the gateway with `WIRETAP_AUTO_MIGRATE=false` and run
+[schema/migrations/0001_capture_frame.sql](schema/migrations/0001_capture_frame.sql)
+against the *source* archive, with `-f` and from its own directory:
 
 ```bash
 cd schema/migrations
@@ -158,9 +179,13 @@ TGT=postgresql://postgres:$POSTGRES_PASSWORD@127.0.0.1:5432/wiretap
 pip install psycopg2-binary    # one-off, for the migrator
 ../../tools/migrate_to_timescale.py --source-dsn "$SRC" --target-dsn "$TGT"
 
-# 3. Verify counts and that the hourly rollup is populated
+# 3. Verify counts, and that the rollup agrees with the base table. Compare the
+#    two numbers: a real-time aggregate answers correctly over an *empty* rollup,
+#    so its total alone proves nothing about materialisation — only a rollup with
+#    a gap under its watermark disagrees, and that is what you are checking for.
 docker compose exec timescaledb psql -U postgres -d wiretap \
   -c "SELECT protocol, count(*) FROM capture_frame GROUP BY 1;" \
+  -c "SELECT count(*) FROM capture_frame;" \
   -c "SELECT sum(frame_count) FROM capture_frame_hourly;"
 ```
 

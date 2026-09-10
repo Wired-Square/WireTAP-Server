@@ -4,11 +4,16 @@
 -- capture_frame, gains `protocol` and the Modbus addressing columns, and the old
 -- CAN-only names come back as views so nothing outside this repo breaks.
 --
--- MANUAL, like tools/migrate_to_timescale.py before it. apply_capture_schema()
--- only ever applies init_schema.sql, which is idempotent but assumes the new
--- names, so run this once against an existing database first:
+-- **The gateway applies this itself**, on start, to every capture database it
+-- finds behind. This file is also runnable by hand for an operator who wants to
+-- snapshot a large archive first, and is how you migrate when the gateway is
+-- started with WIRETAP_AUTO_MIGRATE=false:
 --
 --     psql -U postgres -d <db> -f 0001_capture_frame.sql
+--
+-- One file, two runners. The gateway's SQL splitter drops the `\` meta-commands
+-- below, which psql needs and it does not — it stops on the first error by
+-- construction and applies init_schema.sql itself.
 --
 -- Every step is guarded, so a run interrupted between statements can simply be
 -- repeated.
@@ -92,10 +97,14 @@ ALTER TABLE public.capture_frame
 COMMIT;
 
 -- 4. The rollup, which has to gain `protocol` in its GROUP BY. This drops
--- materialised history and re-derives it; queries stay correct throughout
--- because materialized_only = false folds in whatever is not yet materialised,
--- and are only slower until the policy catches up. Outside a transaction: a
--- continuous aggregate cannot be created inside one.
+-- materialised history, and it must be re-derived over its whole range before
+-- the maintenance policy runs. A real-time aggregate folds in the not-yet-
+-- materialised *tail*, above the watermark — it does not fill gaps below one, so
+-- a policy run that advances the watermark over an empty aggregate hides
+-- everything older. Both runners do it: the gateway calls the refresh after this
+-- file, and step 6 below does it for a psql session.
+--
+-- Outside a transaction: a continuous aggregate cannot be created inside one.
 --
 -- **Test the catalogue, not relkind.** A TimescaleDB continuous aggregate is a
 -- plain view to PostgreSQL — `relkind = 'v'`, not `'m'` — so a relkind guard
@@ -129,3 +138,7 @@ END $$;
 -- which can fail with `tuple concurrently updated`. It is a race, not a fault —
 -- observed once in testing and never on a retry. Re-run this file if you see it.
 \ir ../init_schema.sql
+
+-- 6. Materialise the rollup, now that the aggregate above exists again. In its
+-- own file because only psql should run it from here — see that file.
+\ir 0001_capture_frame_post.sql

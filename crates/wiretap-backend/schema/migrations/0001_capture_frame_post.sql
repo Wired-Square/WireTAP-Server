@@ -1,0 +1,12 @@
+-- Run after init_schema.sql has recreated the rollup — see 0001_capture_frame.sql
+-- step 4 for why this is not optional.
+--
+-- Its own file, reached by `\ir`, so that only psql runs it. The gateway's SQL
+-- splitter drops `\ir` and applies init_schema.sql itself *after* the migration
+-- body, which means a CALL sitting at the foot of that body would fire before
+-- the aggregate exists. The gateway calls the equivalent from
+-- `schema::refresh_rollup` at the right moment instead; the two are one line
+-- each and `the_migration_backfills_the_rollup` holds them together.
+--
+-- Minutes on a very large archive: 16 s per 88 M compressed rows, measured.
+CALL refresh_continuous_aggregate('public.capture_frame_hourly', NULL, NULL);

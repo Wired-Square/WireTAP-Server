@@ -1,19 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
-import { api, DatabaseEntry, formatBytes } from "../api";
+import { useState } from "react";
+import { api, formatBytes } from "../api";
+import { RollupBadge, SchemaBadge, rollupNeedsWork } from "../SchemaBadge";
+import { useDatabases } from "../useDatabases";
 
 export default function Databases() {
-  const [databases, setDatabases] = useState<DatabaseEntry[]>([]);
-  const [error, setError] = useState("");
+  const { databases, target, error, setError, refresh } = useDatabases();
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
-
-  const refresh = useCallback(() => {
-    api<{ databases: DatabaseEntry[] }>("/v1/databases")
-      .then((r) => setDatabases(r.databases))
-      .catch((e) => setError(String(e.message ?? e)));
-  }, []);
-
-  useEffect(refresh, [refresh]);
 
   const create = async () => {
     setCreating(true);
@@ -26,6 +19,16 @@ export default function Databases() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setCreating(false);
+    }
+  };
+
+  const rebuild = async (dbName: string) => {
+    setError("");
+    try {
+      await api(`/v1/databases/${dbName}/rollup/refresh`, { method: "POST" });
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -68,6 +71,8 @@ export default function Databases() {
           <tr>
             <th>Name</th>
             <th>Size</th>
+            <th>Schema</th>
+            <th>Rollup</th>
             <th />
           </tr>
         </thead>
@@ -76,6 +81,17 @@ export default function Databases() {
             <tr key={d.name}>
               <td className="mono">{d.name}</td>
               <td>{formatBytes(d.size_bytes)}</td>
+              <td>
+                <SchemaBadge db={d} target={target} />
+              </td>
+              <td>
+                <RollupBadge db={d} />{" "}
+                {rollupNeedsWork(d) && (
+                  <button className="btn" onClick={() => rebuild(d.name)}>
+                    Rebuild
+                  </button>
+                )}
+              </td>
               <td style={{ textAlign: "right" }}>
                 <button className="btn danger" onClick={() => remove(d.name)}>
                   Delete
@@ -87,7 +103,16 @@ export default function Databases() {
       </table>
       <p className="muted" style={{ marginBottom: 0 }}>
         Ingest devices can also auto-create a database by naming one in their
-        HELLO message (when auto-create is enabled).
+        HELLO message (when auto-create is enabled). A database is migrated to the
+        current schema on start and refuses reads and writes while that runs; a
+        capture server refused this way treats it as an outage and caches to disk
+        until it can drain. Rebuilding a rollup does not block anything — it takes
+        minutes on a large archive, and until it finishes the buckets it has not
+        reached are recomputed on every query. A rollup a few hours behind is the
+        maintenance policy working normally. "incomplete" is not: the stored
+        summaries do not reach this archive's first frame, so rollup queries are
+        omitting the gap rather than recomputing it. The gateway repairs that on
+        start; the button is for a rollup that has merely fallen behind.
       </p>
     </div>
   );
