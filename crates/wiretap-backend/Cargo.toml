@@ -1,0 +1,47 @@
+[package]
+name = "wiretap-backend"
+description = "WireTAP backend gateway: binary CAN ingest + HTTP query API over TimescaleDB"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+# Stamps the commit into /v1/health; shared with the capture server so the two
+# cannot drift on what a build id looks like.
+wiretap-build-id = { path = "../wiretap-build-id" }
+
+[dependencies]
+# Also a build-dependency above; this side is the build_version! macro only.
+wiretap-build-id = { path = "../wiretap-build-id" }
+# Only the sample types; default-features off keeps the TOML parser out.
+wiretap-model = { path = "../wiretap-model", default-features = false }
+wiretap-ingest-proto = { path = "../wiretap-ingest-proto" }
+# The DLC table. Taken from the crate that owns it rather than through the
+# ingest codec's re-export: the HTTP import path below writes a `dlc` column
+# without speaking the ingest protocol at all.
+wiretap-protocol.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+deadpool-postgres.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+
+# Features are declared here rather than in the workspace table: an inherited
+# feature list can only be added to, so anything set at the root becomes a floor
+# for the appliance crates too.
+chrono = { workspace = true, features = ["serde"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tokio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
+tower-http = { workspace = true, features = ["fs"] }
+# `RUST_LOG` filtering, which pulls a regex engine the capture server does not
+# want in a static musl binary.
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

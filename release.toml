@@ -1,0 +1,58 @@
+# cargo-release config — the one canonical release path, mirroring
+# wiretap-lib-rs so the two repos are released the same way. Every crate here
+# inherits `[workspace.package] version`, so one command bumps all five and cuts
+# one tag.
+#
+#   cargo install cargo-release              # once per machine
+#   cargo release patch                      # dry-run preview (0.1.0 -> 0.1.1)
+#   cargo release patch -x                   # --execute: bump, gate, commit, tag
+#
+# Distributed as a Debian package and a container image, never to crates.io.
+#
+# ## Releasing is two pushes, not one — and the order matters
+#
+# `push = false` below, which is the one deliberate difference from
+# wiretap-lib-rs. `.github/workflows/release.yml` refuses to build a draft for a
+# commit that has no successful `ci.yml` run, and `ci.yml` never runs on a tag
+# ref — so a tag pushed alongside its commit races CI and loses. The tag has to
+# follow a green run, which means:
+#
+#   1. Write the debian/changelog entry for the new version, by hand. The
+#      pre-release hook refuses to go on without it: it is prose about an
+#      upgrade path, and nothing can generate it.
+#   2. `cargo release <level> -x` — bumps, runs the gates, commits, tags locally.
+#   3. `git push origin main` — wait for CI to go green on that commit.
+#   4. `git push origin v<version>` — this is what drafts the release, builds
+#      both .deb files and pushes the two-architecture gateway image.
+#   5. Write the release notes over the draft's placeholder body, then publish
+#      it by hand:
+#
+#        gh release edit v<version> --notes-file <filled-in copy>
+#
+#      `.github/release-notes-template.md` is the template and the house style,
+#      which matches the WireTAP desktop's releases.
+#
+# If CI fails at step 3, delete the local tag, fix, and start again. A tag is the
+# one part of a release that cannot be corrected in place.
+
+publish = false
+push = false
+shared-version = true
+allow-branch = ["main"]
+tag-name = "v{{version}}"
+pre-release-commit-message = "Release v{{version}}"
+# Overrides cargo-release's `chore: Release {{crate_name}} version …` default,
+# which is the wrong style for this repo and names one arbitrary crate — the tag
+# covers all five. Matches the release title release.yml gives the draft.
+tag-message = "WireTAP Server v{{version}}"
+
+# Runs after the version is written into Cargo.toml and before anything is
+# committed or tagged, so a tag is never cut from a red tree or from a tree whose
+# three version files disagree. The musl clippy is not redundant with the first:
+# the SocketCAN modules are `#[cfg(target_os = "linux")]`, so on a macOS host
+# nothing else lints them at all — and this is usually released from a Mac.
+pre-release-hook = [
+    "bash",
+    "-c",
+    "\"$WORKSPACE_ROOT\"/scripts/check-release-contract.sh && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p wiretap-server --target aarch64-unknown-linux-musl --all-targets --locked -- -D warnings && cargo test --workspace --locked",
+]

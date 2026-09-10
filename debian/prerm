@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            # SIGTERM is the graceful path: the batcher flushes what it is
+            # holding to the gateway, or to the disk cache if the gateway is
+            # gone. TimeoutStopSec=30 in the unit is the headroom for it.
+            systemctl stop wiretap-server.service >/dev/null 2>&1 || true
+        fi
+        ;;
+    upgrade|failed-upgrade)
+        # Deliberately no stop. The postinst restarts, so stopping here would
+        # only widen the window in which frames are not being captured.
+        ;;
+esac
+
+exit 0

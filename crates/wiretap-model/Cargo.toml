@@ -1,0 +1,22 @@
+[package]
+name = "wiretap-model"
+description = "Shared WireTAP types: captured samples and the server's configuration schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["config"]
+# The config schema drags a TOML parser in. The gateway wants only the sample
+# types, so it takes this crate with default-features = false.
+config = ["dep:toml"]
+
+[dependencies]
+serde.workspace = true
+toml = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true

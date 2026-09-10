@@ -1,0 +1,14 @@
+[package]
+name = "wiretap-build-id"
+description = "Build-script helper: stamps the commit a binary was built from"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# No dependencies, deliberately. This is a build-dependency of everything that
+# ships, so it is compiled before any of them can start; a crates.io tree here
+# would be paid for on every cold build of the workspace.
+[dependencies]

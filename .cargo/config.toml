@@ -1,0 +1,15 @@
+# Cross-compiling the musl targets from a macOS host.
+#
+# `rusqlite`'s bundled SQLite means a build script compiles C, and a build
+# script runs even for `cargo check` and `cargo clippy` — so linting the
+# Linux-only modules for their real target needs a C cross-compiler, not just a
+# cross-linker. Without this, `cargo clippy --target aarch64-unknown-linux-musl`
+# fails looking for `aarch64-linux-musl-gcc`.
+#
+# `force` is left off deliberately: `cargo zigbuild` sets these itself, and an
+# environment value wins over this table, so the packaging build is untouched.
+[env]
+CC_aarch64_unknown_linux_musl = { value = "packaging/zigcc", relative = true }
+CC_x86_64_unknown_linux_musl = { value = "packaging/zigcc", relative = true }
+AR_aarch64_unknown_linux_musl = "zig ar"
+AR_x86_64_unknown_linux_musl = "zig ar"

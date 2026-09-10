@@ -1,0 +1,14 @@
+wiretap-server (0.1.0) bookworm; urgency=medium
+
+  * First packaged release; the Python it replaces had no packaging at all.
+  * Pre-1.0: the interfaces are not stable and the ingest wire format is
+    expected to break at v2. Pin exactly.
+  * Upgrading from a Python deployment: its unit at
+    /etc/systemd/system/wiretap-server.service is stopped and moved aside to
+    .pre-deb, because it shares this package's unit name and /etc outranks
+    /usr/lib. The new daemon is deliberately not started - carry the settings
+    across first. Its disk cache is moved to /var/lib/wiretap-server/ for the
+    daemon to adopt, since the unit's ProtectHome= hides the old location.
+  * The daemon runs as the system user `wiretap`, not as `pi`.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Thu, 10 Sep 2026 14:00:00 +1000

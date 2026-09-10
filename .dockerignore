@@ -1,0 +1,40 @@
+# Trims the build context. The image builds from the workspace root because
+# wiretap-backend is a workspace member and cargo needs the root manifest and
+# lockfile; the Dockerfile copies an explicit list, so this file is defence in
+# depth rather than the mechanism.
+#
+# Docker matches these against the whole context-relative path and, unlike
+# .gitignore, a slash-free pattern is NOT any-depth. Hence `**/` on everything
+# that has to be excluded wherever it appears — `.env` alone would match only a
+# root one, while the file the READMEs tell you to create is at
+# crates/wiretap-backend/.env.
+
+**/target/
+**/node_modules/
+**/dist/
+
+.git/
+.github/
+**/.claude/
+**/CLAUDE.md
+
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.crt
+
+# Not needed to build the image: appliance packaging, the Python oracle and
+# admin tools, and the docs.
+debian/
+packaging/
+tools/
+docs/
+
+**/*.deb
+**/*.img
+**/*.img.xz
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/.DS_Store

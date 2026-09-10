@@ -1,0 +1,55 @@
+# Local agent instructions and settings — never pushed to a remote.
+# A slash-free pattern already matches at any depth, so this covers crates too.
+CLAUDE.md
+.claude/
+
+# Rust and Node build products. Patterns are path-independent so a new crate is
+# covered the day it lands, rather than when someone remembers to edit this file.
+**/target/
+**/node_modules/
+**/dist/
+**/*.tsbuildinfo
+
+# Python bytecode. tools/ holds the test client, the migration script and the
+# oracle the Rust port is checked against, so anyone working on the port runs
+# them and leaves one of these behind.
+__pycache__/
+*.pyc
+
+# A developer's local compose tweaks — the file most likely to hold a published
+# port or a credential.
+**/docker-compose.override.yml
+
+# Secrets and local environment
+.env
+.env.local
+*.pem
+*.key
+*.crt
+
+# Appliance image build. pi-gen clones itself here and writes multi-gigabyte
+# work trees; config.local carries the operator's SSH public key, which is the
+# half of the image config that must not be tracked.
+packaging/image/pi-gen/
+packaging/image/work/
+packaging/image/deploy/
+packaging/image/config.local
+
+# Release artefacts
+*.deb
+*.img
+*.img.xz
+
+# Capture data and caches
+*.db
+*.db-wal
+*.db-shm
+*.dump
+*.pcapng
+
+# Editor / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.sw?

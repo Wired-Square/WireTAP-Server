@@ -1,0 +1,49 @@
+name: Zig cross-toolchain
+description: >
+  zig and cargo-zigbuild, pinned, from their own release tarballs rather than
+  through a third-party action - so what packaging/zigcc shells out to is a
+  version somebody chose. Both workflows install them; this is the one place
+  the versions are written.
+
+inputs:
+  zig-version:
+    description: Keep in step with what developers build with.
+    required: false
+    default: "0.16.0"
+  cargo-zigbuild-version:
+    description: Keep in step with what developers build with.
+    required: false
+    default: "0.23.0"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        ZIG_VERSION: ${{ inputs.zig-version }}
+        CARGO_ZIGBUILD_VERSION: ${{ inputs.cargo-zigbuild-version }}
+      run: |
+        set -euo pipefail
+        # Both runners are native, so the host arch is the whole story - and
+        # `uname -m` already prints zig's own spelling of it.
+        host="$(uname -m)"
+
+        dir="zig-${host}-linux-${ZIG_VERSION}"
+        curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${dir}.tar.xz" \
+          | tar -xJ -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/$dir" >> "$GITHUB_PATH"
+
+        # cargo-zigbuild publishes a musl asset for x86_64 and only a gnu one
+        # for aarch64. That asymmetry is the reason this cannot be derived from
+        # the host triple, and it is written down once, here.
+        case "$host" in
+          x86_64)  czb="cargo-zigbuild-x86_64-unknown-linux-musl" ;;
+          aarch64) czb="cargo-zigbuild-aarch64-unknown-linux-gnu" ;;
+          *) echo "::error::no cargo-zigbuild release asset for $host"; exit 1 ;;
+        esac
+        # Each unpacks into a directory of its own name, not flat.
+        curl -fsSL "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/${czb}.tar.xz" \
+          | tar -xJ -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/$czb" >> "$GITHUB_PATH"
+
+        echo "zig ${ZIG_VERSION} and ${czb} on PATH"
