@@ -967,8 +967,12 @@ impl Settings {
         self.devices.iter().filter(|d| d.is_can()).collect()
     }
 
-    pub fn serial_devices(&self) -> Vec<&Device> {
-        self.devices.iter().filter(|d| !d.is_can()).collect()
+    /// The serial devices, each with its line settings.
+    pub fn serial_devices(&self) -> impl Iterator<Item = (&Device, &SerialSettings)> {
+        self.devices.iter().filter_map(|d| match &d.kind {
+            DeviceKind::Serial(s) => Some((d, s)),
+            DeviceKind::Can { .. } => None,
+        })
     }
 
     /// The databases frames go to, one archive pipeline each: the default
@@ -1835,7 +1839,11 @@ mod tests {
             "serial takes the numbers after, wherever it sat"
         );
         assert_eq!(ifaces(&r.settings), ["can0", "can1"]);
-        assert_eq!(r.settings.serial_devices()[0].interface, "/dev/ttyUSB0");
+        let (serial, line) = r.settings.serial_devices().next().unwrap();
+        assert_eq!(
+            (serial.interface.as_str(), line.baud),
+            ("/dev/ttyUSB0", 9600)
+        );
     }
 
     #[test]

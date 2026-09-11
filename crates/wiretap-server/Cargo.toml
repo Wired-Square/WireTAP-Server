@@ -21,6 +21,10 @@ wiretap-model = { path = "../wiretap-model" }
 # codec takes scalars and this crate adapts, which is what will let the desktop
 # adopt it without touching the serde type its frontend reads.
 wiretap-protocol.workspace = true
+# `ModbusRtuStream`, which frames the serial tap's bytes. It brings the
+# catalogue's other dependencies with it; what that costs the musl binary is
+# recorded in the vault.
+wiretap-catalog.workspace = true
 # No `color` (stdout is a journal pipe) and no `suggestions` (a typo at an
 # interactive shell is one --help away): together they cost 33 KB and 7 crates.
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
@@ -39,6 +43,10 @@ tracing-subscriber.workspace = true
 # netlink answers the bitrate query that replaced pyroute2; dump is its
 # companion and is what `default` would have brought in.
 socketcan = { workspace = true, features = ["tokio", "netlink", "dump"] }
+# termios for the serial tap: the version socketcan already pins, so no new
+# crate. A serial-port crate would open the line read-write and pull libudev;
+# the tap opens it read-only, which is the whole of its passive guarantee.
+nix = { version = "0.29", features = ["term", "fs"] }
 
 [dev-dependencies]
 # The outage drill and the vcan loopback are integration tests, so they link

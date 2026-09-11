@@ -50,15 +50,23 @@ TimeoutStopSec=30
 Restart=always
 RestartSec=5s
 
-# Hardening. The daemon reads CAN sockets, writes one SQLite file, and talks to
-# a gateway over TCP; it has no business doing anything else.
+# Hardening. The daemon reads CAN sockets and serial lines, writes SQLite
+# files, and talks to a gateway over TCP; it has no business doing anything
+# else.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-# SocketCAN is a network protocol family, not a device node — nothing here
-# opens anything under /dev.
-PrivateDevices=true
+# SocketCAN is a network protocol family, not a device node; a serial tap is
+# one. The daemon may read a USB serial adapter and nothing else under /dev —
+# read-only, so a tap cannot transmit however it is configured. A char-
+# group is resolved when the unit starts: with no adapter ever plugged in,
+# the driver is not loaded and the allow is dropped in silence.
+PrivateDevices=false
+DevicePolicy=closed
+DeviceAllow=char-ttyUSB r
+DeviceAllow=char-ttyACM r
+SupplementaryGroups=dialout
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

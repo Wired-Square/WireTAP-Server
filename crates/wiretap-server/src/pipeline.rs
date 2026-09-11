@@ -1,10 +1,10 @@
-//! The running server: the archive, the SocketCAN readers, the GVRET listener,
-//! and the fan-out between them.
+//! The running server: the archives, the SocketCAN readers, the serial taps,
+//! the GVRET listener, and the fan-out between them.
 //!
-//! Only the CAN half is Linux-only, and it is marked as such. Everything else —
-//! the archive, the ingest listener, the shutdown — runs anywhere, which is
-//! what lets an ingest-only deployment (a server with no local CAN hardware,
-//! fed by devices that push to it) be started and tested off a Pi.
+//! Only the device half is Linux-only, and it is marked as such. Everything
+//! else — the archives, the ingest listener, the shutdown — runs anywhere,
+//! which is what lets an ingest-only deployment (a server with no local
+//! hardware, fed by devices that push to it) be started and tested off a Pi.
 //!
 //! The shape is the Python's turned inside out. There, one loop `select`ed
 //! over the CAN sockets and the listening socket and did every client's write
@@ -39,10 +39,12 @@ use crate::gvret;
 use crate::ingest;
 use crate::settings::Settings;
 #[cfg(target_os = "linux")]
-use crate::settings::{Device, Mode};
+use crate::settings::{Device, Mode, SerialSettings};
 #[cfg(target_os = "linux")]
 use crate::source::{
     bus_count, index_for_bus,
+    modbus::RtuTap,
+    serial::SerialLine,
     socketcan::{detect_bitrates, CanReader},
     system_time_to_us, Transmit,
 };
@@ -68,11 +70,20 @@ const TRANSMIT_QUEUE: usize = 64;
 /// How long a reader waits after a failed read before trying again.
 const READ_BACKOFF: Duration = Duration::from_secs(1);
 
+#[cfg(target_os = "linux")]
+/// Read buffer for a serial line: four seconds of 9600 baud, though a read
+/// returns only what has arrived.
+const SERIAL_READ: usize = 4096;
+
 /// Why the server stopped, or would not start.
 #[derive(Debug)]
 pub enum RunError {
     OpenCan {
         iface: String,
+        err: io::Error,
+    },
+    OpenSerial {
+        path: String,
         err: io::Error,
     },
     Bind {
@@ -87,10 +98,8 @@ pub enum RunError {
     NothingToDo,
     /// The ingest listener is on, but there is nowhere for pushed frames to go.
     IngestNeedsForward,
-    /// CAN interfaces were configured on a platform that has no SocketCAN.
-    NoCanCapture,
-    /// A serial device was configured; the tap is not in this build yet.
-    NoSerialCapture,
+    /// Devices were configured on a platform this build does not capture on.
+    NoDeviceCapture,
 }
 
 impl std::fmt::Display for RunError {
@@ -112,6 +121,14 @@ impl std::fmt::Display for RunError {
                 "cannot open {iface}: {err}{}",
                 hint(err, ". Run as root, or grant CAP_NET_RAW")
             ),
+            Self::OpenSerial { path, err } => write!(
+                f,
+                "cannot open {path}: {err}{}",
+                hint(
+                    err,
+                    ". Add the user to dialout; under the packaged unit, DeviceAllow= names it"
+                )
+            ),
             Self::Bind { addr, err } => write!(
                 f,
                 "cannot listen on {addr}: {err}{}",
@@ -131,17 +148,16 @@ impl std::fmt::Display for RunError {
             // Accepting frames from a device and having nowhere to put them
             // would acknowledge them and then drop them, which is the one
             // thing at-least-once delivery must never do.
-            Self::NoCanCapture => write!(
+            Self::NoDeviceCapture => write!(
                 f,
-                "capturing CAN frames needs Linux and its SocketCAN stack; this build can \
-                 still run an ingest-only server, which needs no local CAN hardware"
+                "capturing from a device needs Linux; this build can still run an ingest-only \
+                 server, which needs no local hardware"
             ),
             Self::IngestNeedsForward => write!(
                 f,
                 "the ingest listener is enabled but [forward] is not: frames pushed by a \
                  device would be acknowledged and then dropped. Configure a gateway."
             ),
-            Self::NoSerialCapture => write!(f, "serial capture is not built yet"),
         }
     }
 }
@@ -150,9 +166,6 @@ impl std::fmt::Display for RunError {
 pub async fn run(settings: &Settings) -> Result<(), RunError> {
     if settings.devices.is_empty() && settings.ingest.is_none() {
         return Err(RunError::NothingToDo);
-    }
-    if settings.devices.iter().any(|d| !d.is_can()) {
-        return Err(RunError::NoSerialCapture);
     }
 
     // The archives first: every device and every pushing device feeds one,
@@ -171,11 +184,11 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
         None => Archives::none(),
     };
 
-    if settings.can_devices().is_empty() {
-        // No local CAN hardware, so no sockets and no GVRET listener either.
-        info!("No CAN interfaces configured; running ingest-only");
+    if settings.devices.is_empty() {
+        // No local hardware, so no sockets, no lines and no GVRET listener.
+        info!("No devices configured; running ingest-only");
     } else {
-        start_capture(settings, &archives).await?;
+        start_devices(settings, &archives).await?;
     }
 
     if let Some(ingest) = &settings.ingest {
@@ -203,6 +216,45 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
 }
 
 #[cfg(target_os = "linux")]
+/// Open every device, and start what reads them.
+///
+/// One broadcast for all of them: the GVRET bridge takes the CAN frames off
+/// it and the console echo takes everything.
+async fn start_devices(settings: &Settings, archives: &Archives) -> Result<(), RunError> {
+    let (frames, _) = broadcast::channel(FRAME_BACKLOG);
+    if !settings.can_devices().is_empty() {
+        start_capture(settings, archives, frames.clone()).await?;
+    }
+    for (d, s) in settings.serial_devices() {
+        let line =
+            SerialLine::open_readonly(&d.interface, s).map_err(|err| RunError::OpenSerial {
+                path: d.interface.clone(),
+                err,
+            })?;
+        info!("Tapping {}[{}]  {s}  read-only", d.interface, d.bus.0);
+        tokio::spawn(tap_loop(
+            d.interface.clone(),
+            s.clone(),
+            line,
+            RtuTap::new(d.bus),
+            archives.handle(&d.database),
+            frames.clone(),
+        ));
+    }
+    if settings.echo_console {
+        tokio::spawn(echo_loop(frames.subscribe(), settings.colour));
+    }
+    Ok(())
+}
+
+/// Off Linux there is nothing to capture from, but the rest of the server
+/// still runs — which is what an ingest-only deployment is.
+#[cfg(not(target_os = "linux"))]
+async fn start_devices(_settings: &Settings, _archives: &Archives) -> Result<(), RunError> {
+    Err(RunError::NoDeviceCapture)
+}
+
+#[cfg(target_os = "linux")]
 /// A CAN device with its socket open and its archive found.
 struct Opened {
     device: Device,
@@ -216,7 +268,11 @@ struct Opened {
 /// Sockets first, then the listener, then the banner — the order the Python
 /// used, so a permission problem is reported before anything claims to be
 /// listening.
-async fn start_capture(settings: &Settings, archives: &Archives) -> Result<(), RunError> {
+async fn start_capture(
+    settings: &Settings,
+    archives: &Archives,
+    frames: broadcast::Sender<Arc<Sample>>,
+) -> Result<(), RunError> {
     let mut opened = Vec::new();
     let mut rates = Vec::new();
     for d in settings.can_devices() {
@@ -236,7 +292,6 @@ async fn start_capture(settings: &Settings, archives: &Archives) -> Result<(), R
     }
     let any_fd = settings.any_fd();
 
-    let (frames, _) = broadcast::channel(FRAME_BACKLOG);
     let (transmits, transmit_queue) = mpsc::channel(TRANSMIT_QUEUE);
     let listener = gvret::Server::bind(
         &settings.host,
@@ -279,9 +334,6 @@ async fn start_capture(settings: &Settings, archives: &Archives) -> Result<(), R
             frames.clone(),
             o.archive.clone(),
         ));
-    }
-    if settings.echo_console {
-        tokio::spawn(echo_loop(frames.subscribe(), settings.colour));
     }
     if let Some(tp) = &settings.test_pattern {
         let armed = settings.armed_indices(tp);
@@ -331,13 +383,6 @@ async fn start_capture(settings: &Settings, archives: &Archives) -> Result<(), R
     Ok(())
 }
 
-/// Without SocketCAN there is nothing to capture from, but the rest of the
-/// server still runs — which is what an ingest-only deployment is.
-#[cfg(not(target_os = "linux"))]
-async fn start_capture(_settings: &Settings, _archives: &Archives) -> Result<(), RunError> {
-    Err(RunError::NoCanCapture)
-}
-
 #[cfg(target_os = "linux")]
 fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {
     parts.map(|p| p.to_string()).collect::<Vec<_>>().join(",")
@@ -353,16 +398,7 @@ async fn read_loop(
 ) {
     loop {
         match reader.recv().await {
-            Ok(sample) => {
-                let sample = Arc::new(Sample::Can(sample));
-                // Two consumers, two disciplines: the archive's queue is
-                // bounded and spills to disk, while a send error on the
-                // broadcast only means no GVRET client is watching.
-                if let Some(archive) = &archive {
-                    archive.enqueue(Arc::clone(&sample));
-                }
-                let _ = frames.send(sample);
-            }
+            Ok(sample) => publish(Sample::Can(sample), archive.as_ref(), &frames),
             Err(e) => {
                 // An interface that goes down fails every read, and the Python
                 // spun through them in silence. Say so, once a second.
@@ -389,11 +425,12 @@ async fn echo_loop(mut frames: broadcast::Receiver<Arc<Sample>>, colour: bool) {
     loop {
         match frames.recv().await {
             Ok(sample) => {
-                let Sample::Can(sample) = &*sample else {
-                    continue;
-                };
                 line.clear();
-                console::format_line(&mut line, sample, colour, t0.elapsed().as_micros() as u64);
+                let rel_us = t0.elapsed().as_micros() as u64;
+                match &*sample {
+                    Sample::Can(c) => console::format_line(&mut line, c, colour, rel_us),
+                    Sample::Modbus(m) => console::format_modbus_line(&mut line, m, colour, rel_us),
+                }
                 // Ignored, as the Python ignored it: a console that has gone
                 // away must not stop a capture. `Stdout` is line buffered and
                 // the line ends in a newline, so this is already flushed.
@@ -403,6 +440,65 @@ async fn echo_loop(mut frames: broadcast::Receiver<Arc<Sample>>, colour: bool) {
             Err(RecvError::Closed) => return,
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+/// Read one serial line for as long as the server runs, reopening it when it
+/// goes away — a USB adapter unplugged and plugged back.
+async fn tap_loop(
+    interface: String,
+    settings: SerialSettings,
+    mut line: SerialLine,
+    mut tap: RtuTap,
+    archive: Option<Archive>,
+    frames: broadcast::Sender<Arc<Sample>>,
+) {
+    let mut buf = [0u8; SERIAL_READ];
+    loop {
+        // Read until the line goes away.
+        loop {
+            match line.read(&mut buf).await {
+                Ok(0) => {
+                    error!("{interface}: line closed; reopening");
+                    break;
+                }
+                Ok(n) => {
+                    // One time for the read: a message is stamped as its last
+                    // byte arrives, and every message a read completed shares it.
+                    let ts_us = system_time_to_us(SystemTime::now());
+                    for m in tap.push(&buf[..n], ts_us) {
+                        publish(Sample::Modbus(m), archive.as_ref(), &frames);
+                    }
+                }
+                Err(e) => {
+                    error!("{interface}: read failed: {e}; reopening");
+                    break;
+                }
+            }
+        }
+        // The half-message on either side of the gap does not join. The
+        // reopen attempts are quiet until one works.
+        tap.reset();
+        line = loop {
+            tokio::time::sleep(READ_BACKOFF).await;
+            if let Ok(reopened) = SerialLine::open_readonly(&interface, &settings) {
+                break reopened;
+            }
+        };
+        info!("{interface}: reopened");
+    }
+}
+
+#[cfg(target_os = "linux")]
+/// Hand a sample to both consumers. Two disciplines: the archive's queue is
+/// bounded and spills to disk, while a send error on the broadcast only means
+/// nobody is watching.
+fn publish(sample: Sample, archive: Option<&Archive>, frames: &broadcast::Sender<Arc<Sample>>) {
+    let sample = Arc::new(sample);
+    if let Some(archive) = archive {
+        archive.enqueue(Arc::clone(&sample));
+    }
+    let _ = frames.send(sample);
 }
 
 #[cfg(target_os = "linux")]

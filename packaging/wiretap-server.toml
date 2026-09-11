@@ -36,8 +36,11 @@
 # already be up: see
 # /usr/share/doc/wiretap-server/examples/can-interface.service.
 #
-# EMPTY ("") is an ingest-only deployment - a collection host with no CAN
-# hardware of its own, fed by devices that push to [ingest].
+# Shorthand for one [[device]] of kind = "can" each; see the end of this file
+# for what a [[device]] can say that this cannot.
+#
+# EMPTY ("") is a deployment with no CAN hardware - a collection host fed by
+# devices that push to [ingest], or a box with only serial devices.
 iface = "can0"
 
 # host = "0.0.0.0"       # where the GVRET listener binds
@@ -115,7 +118,7 @@ enable = false
 # token = ""
 
 # keepalive_secs = 30      # clients silent for three times this are dropped
-# max_batch_frames = 256   # a full classic-CAN batch is about 4.6 KB, which is
+# max_batch_frames = 256   # a full classic-CAN batch is about 5.4 KB, which is
 #                          # the constraint at the device end
 
 [test_pattern]
@@ -141,3 +144,44 @@ enable = false
 [logging]
 # level = "INFO"        # DEBUG is frame-level and very loud on a busy bus
 # stats_interval = 10   # seconds between stats lines; 0 disables them
+
+# --- devices ---------------------------------------------------------------
+# One [[device]] table per thing captured, for anything [server] iface cannot
+# say: a serial line, a CAN bus that must never be transmitted on, a device
+# whose frames belong in a different gateway database. The interfaces named
+# by `iface` come first; these follow, in file order. CAN devices are numbered
+# first (bus 0, 1, ...), serial devices after them.
+#
+# `--check-config` lists every device with its bus number and database.
+
+# A Modbus RTU line, tapped. The daemon opens it read-only and never
+# transmits: this is the posture for a bus that already has a master, and the
+# only one a live site allows. Every function code is framed, vendor codes
+# included, so nothing about the line has to be known in advance.
+#
+# The user this runs as needs to read the device: the unit adds it to dialout
+# and allows ttyUSB devices read-only. Prefer a /dev/serial/by-id/ path, which
+# survives the adapter re-enumerating.
+#
+# [[device]]
+# kind = "serial"
+# interface = "/dev/ttyUSB0"
+# baud = 9600            # required: 1200 to 921600, the standard rates
+# framing = "modbus-rtu" # required; the only framing today
+# data_bits = 8          # 5 to 8
+# parity = "none"        # none | even | odd
+# stop_bits = 1          # 1 or 2
+# mode = "passive"       # the only mode for serial: opened read-only
+# database = "rs485"     # its own gateway database; absent means [forward]'s
+
+# A CAN bus with a promise attached. `mode = "passive"` refuses GVRET
+# transmits on this bus and never arms the Test Pattern responder on it;
+# SocketCAN has no per-socket listen-only, so this is the daemon refusing, not
+# the kernel. `fd` overrides [server] can_fd for this bus alone.
+#
+# [[device]]
+# kind = "can"
+# interface = "can2"
+# mode = "passive"
+# fd = true
+# database = "bench"

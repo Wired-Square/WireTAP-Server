@@ -1,8 +1,11 @@
 //! Capture sources: the things that produce frames.
 //!
-//! The socket code is Linux-only, so the bus arithmetic lives here where it
-//! can be tested on any machine.
+//! The socket and serial code is Linux-only, so the bus arithmetic and the
+//! Modbus framing live here where they can be tested on any machine.
 
+pub mod modbus;
+#[cfg(target_os = "linux")]
+pub mod serial;
 #[cfg(target_os = "linux")]
 pub mod socketcan;
 
