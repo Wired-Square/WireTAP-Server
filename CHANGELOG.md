@@ -5,54 +5,39 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
-First release. Two programs: a capture server that reads CAN buses and forwards
-what it sees, and a gateway that stores it and answers queries. Nothing is
-published yet — `packaging/make-deb.sh` builds the `.deb` locally, and the
-gateway builds from source through its own Compose stack.
+## [0.1.1] — 2026-09-12
+
+The capture server taps a Modbus RTU line as well as CAN, and the gateway
+migrates its own databases. The `.deb` files are on the releases page and the
+gateway image is public at `ghcr.io/wired-square/wiretap-backend`.
 
 ### Added
 
-- **CAN capture over SocketCAN.** Several interfaces at once, classic and CAN FD,
-  with bit rates read from the kernel over netlink rather than assumed. The
-  capture path is Linux-only; everything else builds and runs anywhere.
+- **A passive Modbus RTU tap.** A `[[device]]` of `kind = "serial"` opens the
+  line read-only — `O_RDONLY`, and the packaged unit allows the adapter with `r`
+  alone — and frames what it reads with `wiretap-catalog`'s `ModbusRtuStream`,
+  every function code searchable and broadcast allowed, so a line full of a
+  vendor's own codes is captured without knowing them first. Messages are stored
+  whole, CRC included, keyed by `unit << 8 | func`. The line is reopened when it
+  goes away.
 
-- **A GVRET-compatible TCP server**, so a WireTAP desktop connects to this the way
-  it connects to a serial adapter. Binary and text modes, the capability and
-  bit-rate replies, and per-interface bus numbering.
+- **Configuration per device.** `[[device]]` tables name a kind, an interface,
+  a mode and the gateway database the device's frames land in, and the daemon
+  runs one archive pipeline — its own queue, cache file and gateway session —
+  per database. `[server] iface` stays as shorthand for CAN devices, so deployed
+  files are untouched. `mode = "passive"` on a CAN device refuses GVRET
+  transmits on that bus and never arms the responder there.
 
-- **Archiving to a gateway over a binary ingest protocol.** Batches of up to 256
-  records, acknowledged only once the gateway has written them — so a slow
-  archive is felt as a failed write rather than accepted and lost. Transmitted
-  frames are archived too, tagged `tx`, so a request this server made can be told
-  from the traffic it was answering. The wire format is
-  [docs/ingest-protocol.md](docs/ingest-protocol.md).
+- **Ingest protocol v2.** The `BATCH` record names its kind and carries up to
+  256 bytes, so a Modbus message crosses the wire whole; a CAN record's id word
+  is bit-identical to v1's. The gateway accepts v1 sessions **for this release
+  only**, so a capture daemon still on v1 keeps flowing while the gateway is
+  upgraded first — upgrade in that order. The daemon's own listener speaks v2
+  only. `docs/ingest-protocol.md` is rewritten for it.
 
-- **A disk cache that carries an outage.** When the gateway is unreachable frames
-  go to SQLite and drain in order when it returns, oldest first. A cache left by
-  an older install is adopted at startup and then removed, before any frame is
-  enqueued, so an upgrade during an outage keeps what the outage captured.
-
-- **An ingest listener**, so a device too small to hold a connection to the
-  gateway pushes batches here instead. They join the same queue the CAN readers
-  feed, so a pushed frame is cached and drained exactly like a captured one.
-  Every acknowledgement carries how full that queue is, and a batch arriving at a
-  99%-full queue is refused rather than dropped silently — at-least-once delivery
-  is the device's to complete, and it can only do that if a refusal is visible.
-
-- **A Test Pattern responder.** A WireTAP desktop on the same bus runs a link
-  validation and this answers it, proving the transport carries what it claims
-  to. It is the only part of this server that transmits, so it is **off unless
-  armed**, says `ARMED` at WARN naming the interfaces, and a config
-  `enable = false` beats the command-line flag.
-
-- **The gateway** — `crates/wiretap-backend/`: an HTTP query API, the ingest
-  listener's server half, an admin SPA, and a Docker Compose stack with
-  TimescaleDB.
-
-- **A multi-protocol capture schema.** One `capture_frame` hypertable
-  discriminated by `protocol`, so CAN, Modbus and serial share a table, with
-  hourly continuous-aggregate rollups and compression. The CAN-only names it used
-  before are kept as filtered views.
+- **Reading the archive by protocol.** `inventory`, `time-bounds` and `frames`
+  take `?protocol=`, defaulting to `can` so every deployed desktop sees exactly
+  what it did; a misspelt protocol is a 400 rather than an empty result.
 
 - **The gateway migrates its own databases.** Each capture database carries a
   `schema_version`, and on start the gateway brings any that are behind up to
@@ -120,6 +105,78 @@ gateway builds from source through its own Compose stack.
   a tail, not an archive: `WIRETAP_LOG_BUFFER` records (2000 by default), lost on
   restart, with the container's stdout still the durable copy.
 
+### Changed
+
+- A config file's device set is exactly what it names. A file with no
+  `[server] iface` and no `[[device]]` used to capture `can0` by default; it now
+  captures nothing and says so. A hand run with no config file still captures
+  `can0`. Every shipped and deployed file names `iface`, so none is affected.
+
+- `tools/test_ingest_client.py --conformance` takes `--daemon` when the listener
+  is a capture daemon's, which refuses a v1 HELLO where a gateway still accepts
+  one.
+
+### Notes
+
+- A serial tap is read-only by construction: the descriptor cannot be written,
+  and the packaged unit grants the adapter read-only. `tx_packets` on the CAN
+  interfaces remains the proof there.
+- Verified on a live 9600 8N1 RS-485 line to Sungrow inverters: every message
+  framed CRC-valid, seven conversations found without a register map, nothing
+  dropped on either pipeline.
+
+## [0.1.0] — 2026-09-10
+
+First release. Two programs: a capture server that reads CAN buses and forwards
+what it sees, and a gateway that stores it and answers queries.
+`packaging/make-deb.sh` builds the `.deb`, and the gateway builds from source
+through its own Compose stack.
+
+### Added
+
+- **CAN capture over SocketCAN.** Several interfaces at once, classic and CAN FD,
+  with bit rates read from the kernel over netlink rather than assumed. The
+  capture path is Linux-only; everything else builds and runs anywhere.
+
+- **A GVRET-compatible TCP server**, so a WireTAP desktop connects to this the way
+  it connects to a serial adapter. Binary and text modes, the capability and
+  bit-rate replies, and per-interface bus numbering.
+
+- **Archiving to a gateway over a binary ingest protocol.** Batches of up to 256
+  records, acknowledged only once the gateway has written them — so a slow
+  archive is felt as a failed write rather than accepted and lost. Transmitted
+  frames are archived too, tagged `tx`, so a request this server made can be told
+  from the traffic it was answering. The wire format is
+  [docs/ingest-protocol.md](docs/ingest-protocol.md).
+
+- **A disk cache that carries an outage.** When the gateway is unreachable frames
+  go to SQLite and drain in order when it returns, oldest first. A cache left by
+  an older install is adopted at startup and then removed, before any frame is
+  enqueued, so an upgrade during an outage keeps what the outage captured.
+
+- **An ingest listener**, so a device too small to hold a connection to the
+  gateway pushes batches here instead. They join the same queue the CAN readers
+  feed, so a pushed frame is cached and drained exactly like a captured one.
+  Every acknowledgement carries how full that queue is, and a batch arriving at a
+  99%-full queue is refused rather than dropped silently — at-least-once delivery
+  is the device's to complete, and it can only do that if a refusal is visible.
+
+- **A Test Pattern responder.** A WireTAP desktop on the same bus runs a link
+  validation and this answers it, proving the transport carries what it claims
+  to. It is the only part of this server that transmits, so it is **off unless
+  armed**, says `ARMED` at WARN naming the interfaces, and a config
+  `enable = false` beats the command-line flag.
+
+- **The gateway** — `crates/wiretap-backend/`: an HTTP query API, the ingest
+  listener's server half, an admin SPA, and a Docker Compose stack with
+  TimescaleDB.
+
+- **A multi-protocol capture schema.** One `capture_frame` hypertable
+  discriminated by `protocol`, so CAN, Modbus and serial share a table, with
+  hourly continuous-aggregate rollups and compression. The CAN-only names it used
+  before are kept as filtered views. `schema/migrations/0001_capture_frame.sql`
+  migrates an existing archive in one command.
+
 - **Debian packaging.** A `.deb` for amd64 and arm64, a hardened systemd unit,
   and maintainer scripts that handle upgrading from a pre-packaging deployment —
   the old unit is moved aside and the daemon deliberately left stopped so
@@ -131,45 +188,15 @@ gateway builds from source through its own Compose stack.
   `/v1/health` and the image's `org.opencontainers.image.revision`. A `0.1.0`
   on its own identifies nothing.
 
-- **A passive Modbus RTU tap.** A `[[device]]` of `kind = "serial"` opens the
-  line read-only — `O_RDONLY`, and the packaged unit allows the adapter with `r`
-  alone — and frames what it reads with `wiretap-catalog`'s `ModbusRtuStream`,
-  every function code searchable and broadcast allowed, so a line full of a
-  vendor's own codes is captured without knowing them first. Messages are stored
-  whole, CRC included, keyed by `unit << 8 | func`. The line is reopened when it
-  goes away.
-
-- **Configuration per device.** `[[device]]` tables name a kind, an interface,
-  a mode and the gateway database the device's frames land in, and the daemon
-  runs one archive pipeline — its own queue, cache file and gateway session —
-  per database. `[server] iface` stays as shorthand for CAN devices, so deployed
-  files are untouched. `mode = "passive"` on a CAN device refuses GVRET
-  transmits on that bus and never arms the responder there.
-
-- **Ingest protocol v2.** The `BATCH` record names its kind and carries up to
-  256 bytes, so a Modbus message crosses the wire whole; a CAN record's id word
-  is bit-identical to v1's. The gateway accepts v1 sessions **for this release
-  only**, so a capture daemon still on v1 keeps flowing while the gateway is
-  upgraded first — upgrade in that order. The daemon's own listener speaks v2
-  only. `docs/ingest-protocol.md` is rewritten for it.
-
-- **Reading the archive by protocol.** `inventory`, `time-bounds` and `frames`
-  take `?protocol=`, defaulting to `can` so every deployed desktop sees exactly
-  what it did; a misspelt protocol is a 400 rather than an empty result.
-
-### Changed
-
-- A config file's device set is exactly what it names. A file with no
-  `[server] iface` and no `[[device]]` used to capture `can0` by default; it now
-  captures nothing and says so. A hand run with no config file still captures
-  `can0`. Every shipped and deployed file names `iface`, so none is affected.
-
 ### Notes
 
 - The capture server is a **read-only tap** except for the Test Pattern
   responder, which is disabled by default. `tx_packets` on the interface is the
-  proof, and it is worth checking after any session on a live bus. A serial tap
-  is read-only by construction: the descriptor cannot be written.
+  proof, and it is worth checking after any session on a live bus.
 - Verified on a real Debian 13 host reading two live 250 kbit/s buses for 3 days
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
+
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/Wired-Square/WireTAP-Server/releases/tag/v0.1.0

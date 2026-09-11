@@ -174,18 +174,16 @@ mod tests {
         assert!(joined.push(&request, 1).is_empty(), "lost, and holding");
     }
 
-    /// The real line, replayed. `WIRETAP_RS485_RAW` names a capture taken by
-    /// `rs485mon.py` on `debian-sungrow`; the vault's figure for the whole
-    /// 34 MB with this framer is 99.97% of the bytes in messages.
+    /// The real line, replayed. `WIRETAP_RS485_RAW` names a capture taken on
+    /// the trial box: the bytes off the adapter exactly as `read` returned
+    /// them, in order, with no timestamps, delimiters or headers — so message
+    /// boundaries are the framer's to find, which is the point. The vault's
+    /// figure for the whole 34 MB with this framer is 99.97% of the bytes in
+    /// messages.
     #[test]
-    #[ignore = "needs a capture: WIRETAP_RS485_RAW=~/src/wired/josh-bin/captures/rs485.raw"]
+    #[ignore = "needs a capture: WIRETAP_RS485_RAW=<path to rs485.raw>"]
     fn the_sungrow_capture_frames_at_the_measured_coverage() {
-        let path = std::env::var("WIRETAP_RS485_RAW").unwrap_or_else(|_| {
-            format!(
-                "{}/src/wired/josh-bin/captures/rs485.raw",
-                std::env::var("HOME").unwrap()
-            )
-        });
+        let path = std::env::var("WIRETAP_RS485_RAW").expect("WIRETAP_RS485_RAW names the capture");
         let bytes = std::fs::read(&path).expect("the capture");
         for chunk in [64usize, 4096] {
             let mut tap = RtuTap::new(SourceId(0));

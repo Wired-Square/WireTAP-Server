@@ -5,9 +5,9 @@ name: wiretap-backend
 #
 # Unlike ../docker-compose.yml (which BUILDS the image and is meant for dev),
 # this references a PREBUILT image so it works on hosts that can't build (e.g.
-# the TrueNAS app system). Build and distribute the image first — see
-# deploy/README.md. Database backups are left to the host (ZFS snapshots on
-# TrueNAS); the pgBackRest sidecar is intentionally omitted.
+# the TrueNAS app system). Releases publish one to GHCR; pin it in .env, or
+# build your own — see deploy/README.md. Database backups are left to the host
+# (ZFS snapshots on TrueNAS); the pgBackRest sidecar is intentionally omitted.
 #
 # Configure via a .env file beside this one (see .env.example).
 
@@ -32,7 +32,7 @@ services:
     # ports: ["127.0.0.1:5432:5432"]
 
   backend:
-    image: ${WIRETAP_IMAGE:-wiretap-backend:latest}
+    image: ${WIRETAP_IMAGE:-ghcr.io/wired-square/wiretap-backend:latest}
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       WIRETAP_ADMIN_KEY: ${WIRETAP_ADMIN_KEY:-}

@@ -22,8 +22,9 @@ transmits and is disabled unless explicitly armed.
 cd crates/wiretap-backend
 ```
 
-then follow [its README](crates/wiretap-backend/README.md#quick-start). For a
-production host that cannot build images, see
+then follow [its README](crates/wiretap-backend/README.md#quick-start), which
+builds the image. A production host pulls the released one instead —
+`ghcr.io/wired-square/wiretap-backend`, amd64 and arm64 — see
 [crates/wiretap-backend/deploy/](crates/wiretap-backend/deploy/).
 
 ## Running the capture server

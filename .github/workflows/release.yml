@@ -17,16 +17,11 @@
 # and `latest` is held back from pre-releases, which is as far as this goes
 # without an Environment and a required reviewer.
 #
-# ONE-TIME, AFTER THE FIRST RELEASE: a GHCR package created by Actions is
-# PRIVATE by default, and package visibility does not inherit from the repo, so
-# an anonymous `docker pull` of it fails until somebody flips the package to
-# Public in its settings once. Nothing here can do it; the token has no scope.
-#
-# It blocks less than this comment used to claim. Nothing documented pulls the
-# published image: docker-compose.yml has a `build:` and no `image:`, so it
-# builds locally, and deploy/README.md's methods build on the host or move the
-# image with `docker save`. The flip matters for whoever pulls it deliberately —
-# a fleet, CI, deploy/README.md's third method — not for the quick-start path.
+# A GHCR package created by Actions is PRIVATE by default, and package
+# visibility does not inherit from the repo. Nothing here can flip it; the
+# token has no scope. This repository's package was made Public by hand on
+# 2026-09-12, so deploy/README.md now pulls it — a fork gets its own package
+# and has to do the same once, before anything documented there works.
 #
 # The .deb files are cross-compiled in ONE job. Both are static musl builds
 # produced by cargo-zigbuild, so an arm64 runner buys nothing here. The image

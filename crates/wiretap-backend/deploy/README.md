@@ -10,13 +10,35 @@ Two services: TimescaleDB (Postgres, not published) and the backend gateway
 (HTTP API + admin UI on 8423, binary ingest on 9323). Database backups are
 left to the host — on TrueNAS, a ZFS snapshot task on the data dataset.
 
-## 1. Build and distribute the image
+## 1. Get the image
 
 TrueNAS (and most NAS app systems) install from a prebuilt image, not a
-Dockerfile. Pick one:
+Dockerfile. Every release publishes one, public, for amd64 and arm64:
 
-**A. Build natively on the target host** (no registry; what we use for the NAS).
-Copy a checkout to the host, then:
+```
+ghcr.io/wired-square/wiretap-backend:0.1.1      # a release
+ghcr.io/wired-square/wiretap-backend:latest     # moves with each release, never a pre-release
+```
+
+Pin the version on anything that matters: `:latest` is convenient exactly until
+an upgrade happens without anybody deciding it should. The image names the
+commit it was built from on `/v1/health` and in its
+`org.opencontainers.image.revision` label, so a host can always say which build
+it runs.
+
+```bash
+docker pull ghcr.io/wired-square/wiretap-backend:0.1.1
+```
+
+Nothing pulls the image behind your back: `docker compose up` in this directory
+uses the tag `WIRETAP_IMAGE` names in `.env`, and TrueNAS uses the one in the
+app's YAML, so an upgrade is always an edit you made.
+
+For a host with no route to GHCR, or a build that is not a release, build it
+yourself:
+
+**A. Build natively on the target host** (no registry). Copy a checkout to the
+host, then:
 ```bash
 docker build -f crates/wiretap-backend/Dockerfile \
   --build-arg "WIRETAP_BUILD_ID=$(packaging/build-id.sh)" \
@@ -47,8 +69,7 @@ docker save wiretap-backend:latest | ssh root@nas 'docker load'
 ```
 (Apple Silicon must pass `--platform linux/amd64` for an x86_64 NAS.)
 
-**C. Registry.** Push to GHCR/Docker Hub and set `WIRETAP_IMAGE` to the pulled
-tag. Best for fleets/CI; needs the package public or a pull credential on the host.
+Either way, set `WIRETAP_IMAGE` (or the app's `image:`) to the tag you built.
 
 ## 2. Generic Docker host
 
@@ -61,13 +82,13 @@ curl -fsS http://localhost:8423/v1/health
 ## 3. TrueNAS SCALE (24.10+ / 25.04) Custom App
 
 1. **Create a dataset** for the database (Datasets → Add Dataset), e.g.
-   `main-ssd/applications/wiretap-backend` — an SSD pool is ideal for Postgres.
-   Note its mountpoint (`/mnt/main-ssd/applications/wiretap-backend`).
-2. **Load the image** onto the NAS (method A or B above). Confirm with
-   `docker images | grep wiretap-backend`.
-3. **Apps → Discover Apps → Custom App → Install via YAML**, and paste the
+   `tank/applications/wiretap-backend` — an SSD pool is ideal for Postgres.
+   Note its mountpoint (`/mnt/tank/applications/wiretap-backend`).
+2. **Apps → Discover Apps → Custom App → Install via YAML**, and paste the
    compose below, editing the two `CHANGE_ME` values and the dataset path.
-   `openssl rand -hex 32` makes a good admin key.
+   `openssl rand -hex 32` makes a good admin key. TrueNAS pulls the image
+   itself; for one you built (method A or B), load it onto the NAS first and
+   name its tag instead.
 
 ```yaml
 services:
@@ -77,7 +98,7 @@ services:
       POSTGRES_PASSWORD: CHANGE_ME
     command: postgres -c shared_preload_libraries=timescaledb
     volumes:
-      - /mnt/main-ssd/applications/wiretap-backend/pgdata:/var/lib/postgresql/data
+      - /mnt/tank/applications/wiretap-backend/pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -86,7 +107,7 @@ services:
     restart: unless-stopped
 
   backend:
-    image: wiretap-backend:latest
+    image: ghcr.io/wired-square/wiretap-backend:0.1.1
     environment:
       POSTGRES_PASSWORD: CHANGE_ME
       WIRETAP_ADMIN_KEY: CHANGE_ME_admin_key
@@ -102,25 +123,31 @@ services:
     restart: unless-stopped
 ```
 
-4. **Deploy.** When it's running, browse to `http://nas.gou.wiredsquare.com:8423/admin`
-   and sign in with the admin key, or `curl http://nas...:8423/v1/health`.
-5. **Backups** — Data Protection → Periodic Snapshot Tasks on
-   `main-ssd/wiretap` (e.g. hourly, keep 2 weeks). That snapshots the Postgres
+3. **Deploy.** When it's running, browse to `http://<nas>:8423/admin` and sign
+   in with the admin key, or `curl http://<nas>:8423/v1/health`.
+4. **Backups** — Data Protection → Periodic Snapshot Tasks on
+   `tank/applications/wiretap-backend` (e.g. hourly, keep 2 weeks). That snapshots the Postgres
    data dir; replicate the snapshots to another pool/host for off-box safety.
 
 Notes:
 - The container's Postgres runs as uid 999 and chowns its data dir on first
   init, so a fresh empty dataset is fine.
-- Image upgrades: rebuild/reload `wiretap-backend:latest`, then Apps → the app →
-  Edit → Update (or redeploy). The schema is idempotent; data on the dataset
-  persists across container replacement.
+- **Upgrading**: change the `image:` tag in the app's YAML (Apps → the app →
+  Edit) and Update. Take a snapshot first if the release migrates the schema —
+  the CHANGELOG says when one does, and a large archive can be refusing traffic
+  for minutes while it rebuilds its rollup. Capture daemons cache to disk
+  through that and drain when it clears. Data on the dataset persists across
+  container replacement; the old image stays in `docker images` for a rollback.
+- **Upgrade the gateway before the capture daemons.** A gateway still accepts
+  the previous ingest protocol; a daemon speaking a newer one than its gateway
+  is refused, and caches to disk until the gateway catches up.
 
 ## 4. After install
 
 - **Desktop**: Settings → Data I/O → add a *WireTAP Backend* profile with URL
-  `http://nas.gou.wiredsquare.com:8423`, the API key, and a database name.
+  `http://<nas>:8423`, the API key, and a database name.
   Create per-user `read` keys in the admin UI rather than sharing the admin key.
-- **Capture devices / Pi forward mode**: point them at `nas...:9323` with an
+- **Capture devices / Pi forward mode**: point them at `<nas>:9323` with an
   `ingest` key (admin UI → Keys).
 - **Migrate an existing archive** into the NAS database: see the runbook in
   [../README.md](../README.md#migrating-an-existing-archive-into-the-container)
