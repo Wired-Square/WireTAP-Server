@@ -4,6 +4,8 @@
 
 use std::env;
 
+use wiretap_model::Secret;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub http_listen: String,
@@ -11,13 +13,13 @@ pub struct Config {
     pub pg_host: String,
     pub pg_port: u16,
     pub pg_user: String,
-    pub pg_password: String,
+    pub pg_password: Secret,
     /// Database created on first start and used when an ingest client
     /// doesn't name one. Also hosts the wiretap_meta schema (API keys).
     pub default_database: String,
     /// Break-glass admin API key, always honoured (cannot be revoked from
     /// the admin UI). Optional — without it, keys must be seeded in SQL.
-    pub bootstrap_admin_key: Option<String>,
+    pub bootstrap_admin_key: Option<Secret>,
     /// Allow ingest clients / imports to auto-create unknown databases.
     pub auto_create_databases: bool,
     /// Migrate capture databases to the current schema on start. On by default:
@@ -43,6 +45,7 @@ fn parse_or<T: std::str::FromStr>(name: &str, default: T) -> T {
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         let pg_password = env::var("POSTGRES_PASSWORD")
+            .map(Secret::new)
             .map_err(|_| "POSTGRES_PASSWORD is required".to_string())?;
         Ok(Self {
             http_listen: var_or("WIRETAP_HTTP_LISTEN", "0.0.0.0:8423"),
@@ -52,7 +55,10 @@ impl Config {
             pg_user: var_or("WIRETAP_PG_USER", "postgres"),
             pg_password,
             default_database: var_or("WIRETAP_DEFAULT_DB", "wiretap"),
-            bootstrap_admin_key: env::var("WIRETAP_ADMIN_KEY").ok().filter(|k| !k.is_empty()),
+            bootstrap_admin_key: env::var("WIRETAP_ADMIN_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .map(Secret::new),
             auto_create_databases: parse_or("WIRETAP_AUTO_CREATE", true),
             auto_migrate: parse_or("WIRETAP_AUTO_MIGRATE", true),
             ingest_keepalive_secs: parse_or("WIRETAP_INGEST_KEEPALIVE_SECS", 30.0),
@@ -64,7 +70,11 @@ impl Config {
     pub fn pg_dsn(&self, database: &str) -> String {
         format!(
             "host={} port={} user={} password={} dbname={}",
-            self.pg_host, self.pg_port, self.pg_user, self.pg_password, database
+            self.pg_host,
+            self.pg_port,
+            self.pg_user,
+            self.pg_password.expose(),
+            database
         )
     }
 }

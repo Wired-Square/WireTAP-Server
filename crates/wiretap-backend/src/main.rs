@@ -70,7 +70,10 @@ async fn run() -> Result<(), String> {
 
     // Bootstrap: default capture database + schema, then the key store
     dbs.create_database(&config.default_database).await?;
-    let keys = KeyStore::new(dbs.clone(), config.bootstrap_admin_key.as_deref());
+    let keys = KeyStore::new(
+        dbs.clone(),
+        config.bootstrap_admin_key.as_ref().map(|k| k.expose()),
+    );
     keys.bootstrap().await?;
     if config.bootstrap_admin_key.is_none() {
         tracing::warn!("WIRETAP_ADMIN_KEY is not set — admin access requires a seeded key");
