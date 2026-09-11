@@ -5,6 +5,8 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-09-12
+
 ### Changed
 
 - **A serial tap stamps every message when its last byte arrived**, including
@@ -17,6 +19,17 @@ All notable changes to this project are documented here. Entries go under
   Built on `wiretap-lib-rs` v0.16.5, whose framer now reports where each
   message ended and takes `frame_any_function()` in place of a declaration of
   all 256 codes.
+
+### Notes
+
+- Where a single-register read response is followed by a broadcast, the
+  framer can take a one-byte-longer reading that also passes its CRC and
+  swallows the broadcast's address byte — the broadcast is then lost. Which
+  reading wins depends on where the serial read happened to end. Measured at
+  one response in 67 on the Sungrow line, every one a dispatch or write
+  broadcast. The framer is `wiretap-lib-rs`'s and the fix belongs there;
+  until it lands a tap's archive may hold fewer broadcasts than the line
+  carried.
 
 ## [0.1.1] — 2026-09-12
 
@@ -210,6 +223,7 @@ through its own Compose stack.
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
 
-[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Wired-Square/WireTAP-Server/releases/tag/v0.1.0

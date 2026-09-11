@@ -1,27 +1,8 @@
-wiretap-server (0.1.1) bookworm; urgency=medium
+wiretap-server (0.1.2) bookworm; urgency=medium
 
-  * Taps a Modbus RTU line read-only through a [[device]] table, into a
-    gateway database of its own. The unit now allows USB serial adapters,
-    read-only, and runs the daemon with the dialout group.
-  * Speaks ingest protocol v2. Upgrade the gateway before this package: a
-    0.1.1 gateway still accepts a 0.1.0 daemon, but a 0.1.1 daemon is
-    refused by a 0.1.0 gateway and caches to disk until it is upgraded.
-  * A config file naming neither [server] iface nor a [[device]] now
-    captures nothing. Every file this package has written names iface.
+  * A serial tap stamps each message when its last byte arrived, including
+    the burst the framer releases once it has synced after an open; those
+    used to share one timestamp. No configuration change; restart is all.
 
- -- Alex Ferrara <alex@wiredsquare.com>  Fri, 12 Sep 2026 07:40:00 +0930
+ -- Alex Ferrara <alex@wiredsquare.com>  Fri, 12 Sep 2026 20:30:00 +0930
 
-wiretap-server (0.1.0) bookworm; urgency=medium
-
-  * First packaged release; the Python it replaces had no packaging at all.
-  * Pre-1.0: the interfaces are not stable and the ingest wire format is
-    expected to break at v2. Pin exactly.
-  * Upgrading from a Python deployment: its unit at
-    /etc/systemd/system/wiretap-server.service is stopped and moved aside to
-    .pre-deb, because it shares this package's unit name and /etc outranks
-    /usr/lib. The new daemon is deliberately not started - carry the settings
-    across first. Its disk cache is moved to /var/lib/wiretap-server/ for the
-    daemon to adopt, since the unit's ProtectHome= hides the old location.
-  * The daemon runs as the system user `wiretap`, not as `pi`.
-
- -- Alex Ferrara <alex@wiredsquare.com>  Thu, 10 Sep 2026 14:00:00 +1000
