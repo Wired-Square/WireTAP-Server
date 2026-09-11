@@ -26,14 +26,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 use wiretap_ingest_proto as proto;
-use wiretap_model::{CanSample, Direction, Secret, SourceId};
+use wiretap_model::Secret;
 
 use crate::archive::Archive;
 use crate::settings::Ingest;
 use crate::source::system_time_to_us;
+use crate::wire;
 
 /// One read from a client. The Python's `recv(65536)`, and large on purpose: a
-/// full batch is ~19 kB and arrives as one burst.
+/// full batch is up to 64 kB and arrives as one burst.
 const READ_BUF: usize = 65536;
 
 /// Queue occupancy at which a batch is refused rather than accepted.
@@ -204,9 +205,8 @@ impl Session {
             ),
             proto::MSG_BATCH if !self.authed => (None, Next::Drop),
             proto::MSG_BATCH => self.batch(&frame.body),
-            // Ignored rather than refused, which is what lets a client speak a
-            // later version of this protocol to an older server: it announces
-            // 1, reads the version back, and only then sends anything newer.
+            // Ignored rather than refused, as the protocol specifies for a
+            // message type the server does not know.
             _ => (None, Next::Continue),
         }
     }
@@ -218,9 +218,8 @@ impl Session {
         let Ok(hello) = proto::parse_hello(body) else {
             return (None, Next::Drop);
         };
-        // Strict equality, as both server implementations use: it is what makes
-        // `accepted_version` in the reply the way to discover a newer protocol,
-        // rather than announcing one and hoping.
+        // Strict, unlike the gateway's one-release tolerance of v1: nothing
+        // deployed pushes to this listener but this repository's own daemon.
         if hello.version != proto::PROTO_VERSION {
             return (ack(proto::HELLO_BAD_VERSION), Next::Drop);
         }
@@ -283,20 +282,9 @@ impl Session {
             batch.base_ts_us as i64
         };
 
-        for record in &batch.records {
-            self.archive.enqueue(Arc::new(CanSample {
-                ts_us: base_ts_us + i64::from(record.delta_us),
-                arb_id: record.id_flags & proto::ID_ARB_MASK,
-                extended: record.id_flags & proto::ID_EXTENDED != 0,
-                is_fd: record.id_flags & proto::ID_FD != 0,
-                data: record.payload.clone(),
-                bus: SourceId(record.bus),
-                dir: if record.id_flags & proto::ID_TX != 0 {
-                    Direction::Tx
-                } else {
-                    Direction::Rx
-                },
-            }));
+        for record in batch.records {
+            let ts_us = base_ts_us + i64::from(record.delta_us);
+            self.archive.enqueue(Arc::new(wire::decode(ts_us, record)));
         }
         (Some(self.ack(batch.seq, proto::ACK_OK)), Next::Continue)
     }
@@ -315,9 +303,18 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use tokio::sync::watch;
+    use wiretap_model::{CanSample, Sample};
 
     /// What a test reads back: every frame the archive handed to the sink.
-    type Seen = Arc<Mutex<Vec<Arc<CanSample>>>>;
+    type Seen = Arc<Mutex<Vec<Arc<Sample>>>>;
+
+    /// The CAN frame a test expects at this position.
+    fn can(s: &Sample) -> &CanSample {
+        match s {
+            Sample::Can(c) => c,
+            Sample::Modbus(m) => panic!("expected a CAN frame, got {m:?}"),
+        }
+    }
 
     /// Stands in for the gateway, keeping what it was given so a test can see
     /// what the listener put into the archive.
@@ -327,7 +324,7 @@ mod tests {
         async fn connect(&mut self) -> SinkResult {
             Ok(())
         }
-        async fn write_batch(&mut self, batch: &[Arc<CanSample>]) -> SinkResult {
+        async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> SinkResult {
             self.0.lock().unwrap().extend(batch.iter().cloned());
             Ok(())
         }
@@ -341,7 +338,7 @@ mod tests {
     struct NullCache;
 
     impl FrameCache for NullCache {
-        fn append(&mut self, frames: &[Arc<CanSample>]) -> crate::cache::Result<usize> {
+        fn append(&mut self, frames: &[Arc<Sample>]) -> crate::cache::Result<usize> {
             Ok(frames.len())
         }
         fn oldest(&mut self, _: usize) -> crate::cache::Result<Vec<Cached>> {
@@ -391,7 +388,7 @@ mod tests {
 
     /// Wait for the archive to have `n` frames, rather than assuming the
     /// batcher has run by the time the acknowledgement arrived.
-    async fn wait_for(seen: &Mutex<Vec<Arc<CanSample>>>, n: usize) -> Vec<Arc<CanSample>> {
+    async fn wait_for(seen: &Mutex<Vec<Arc<Sample>>>, n: usize) -> Vec<Arc<Sample>> {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let frames = seen.lock().unwrap().clone();
@@ -450,8 +447,10 @@ mod tests {
             &mut records,
             0,
             u64::from(delta_us),
-            proto::record_id_flags(arb_id, false, false, false),
+            proto::RecordKind::Can,
             0,
+            0,
+            proto::record_id_flags(arb_id, false, false, false),
             &[1, 2, 3],
         );
         records
@@ -477,13 +476,53 @@ mod tests {
         assert_eq!((ack.seq, ack.status), (7, proto::ACK_OK));
 
         let frames = wait_for(&seen, 1).await;
-        assert_eq!(frames[0].arb_id, 0x123);
+        assert_eq!(can(&frames[0]).arb_id, 0x123);
         assert_eq!(
-            frames[0].ts_us,
+            frames[0].ts_us(),
             BASE as i64 + 250,
             "the record's delta, on the batch's base"
         );
-        assert_eq!(frames[0].data, [1, 2, 3]);
+        assert_eq!(can(&frames[0]).data, [1, 2, 3]);
+    }
+
+    /// A pushed Modbus message is relayed as one, not flattened into a CAN
+    /// frame on the way through.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_modbus_record_is_relayed_intact() {
+        let (addr, seen, _stop) = listener("", 100).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&proto::encode_hello(b"", "", false))
+            .await
+            .unwrap();
+        reply(&mut c).await;
+
+        let raw = [0x02, 0x65, 0x00, 0x02, 0xD2, 0x38];
+        let mut records = Vec::new();
+        proto::encode_record_into(
+            &mut records,
+            0,
+            5,
+            proto::RecordKind::Modbus,
+            proto::FLAG_CRC_VALID,
+            3,
+            proto::modbus_id(2, 0x65),
+            &raw,
+        );
+        c.write_all(&proto::encode_batch(2, 1_000, 1, &records))
+            .await
+            .unwrap();
+        let ack = proto::parse_ack(&reply(&mut c).await.body).unwrap();
+        assert_eq!((ack.seq, ack.status), (2, proto::ACK_OK));
+
+        let frames = wait_for(&seen, 1).await;
+        let Sample::Modbus(m) = &*frames[0] else {
+            panic!("relayed as {:?}", frames[0]);
+        };
+        assert_eq!(
+            (m.ts_us, m.bus.0, m.unit, m.func, m.crc_valid),
+            (1_005, 3, 2, 0x65, true)
+        );
+        assert_eq!(m.raw, raw);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -626,7 +665,16 @@ mod tests {
         // ahead of the arrival it is supposed to be pinned to.
         let mut records = Vec::new();
         for delta in [1_000_000u64, 3_000_000, 2_000_000] {
-            proto::encode_record_into(&mut records, 0, delta, 0x100, 0, &[7]);
+            proto::encode_record_into(
+                &mut records,
+                0,
+                delta,
+                proto::RecordKind::Can,
+                0,
+                0,
+                0x100,
+                &[7],
+            );
         }
         let before = system_time_to_us(SystemTime::now());
         c.write_all(&proto::encode_batch(1, 42, 3, &records))
@@ -636,7 +684,7 @@ mod tests {
         assert_eq!(ack.status, proto::ACK_OK);
         let after = system_time_to_us(SystemTime::now());
 
-        let ts: Vec<i64> = wait_for(&seen, 3).await.iter().map(|f| f.ts_us).collect();
+        let ts: Vec<i64> = wait_for(&seen, 3).await.iter().map(|f| f.ts_us()).collect();
         assert!(
             (before..=after).contains(&ts[1]),
             "the newest record is the largest delta, and is stamped on its \

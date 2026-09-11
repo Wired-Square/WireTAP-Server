@@ -58,6 +58,15 @@ pub struct IngestServer {
     pub sessions: Sessions,
 }
 
+/// What a HELLO established, held for the life of the connection.
+struct Session {
+    pool: Pool,
+    id: u64,
+    time_relative: bool,
+    /// The parser for the version the client announced.
+    parse: BatchParser,
+}
+
 impl IngestServer {
     pub async fn run(self: Arc<Self>) -> Result<(), String> {
         let listener = TcpListener::bind(&self.config.ingest_listen)
@@ -86,7 +95,7 @@ impl IngestServer {
         let idle_limit = Duration::from_secs_f64(self.config.ingest_keepalive_secs * 3.0);
         let mut buf: Vec<u8> = Vec::with_capacity(8192);
         let mut read_buf = [0u8; 65536];
-        let mut authed: Option<(Pool, u64, bool)> = None; // (pool, session_id, time_relative)
+        let mut authed: Option<Session> = None;
 
         let result = loop {
             // Read with idle timeout (any traffic counts as keepalive)
@@ -138,12 +147,10 @@ impl IngestServer {
                             .map_err(|e| format!("write: {e}"))?;
                     }
                     MSG_BATCH => {
-                        let Some((pool, session_id, time_relative)) = authed.as_ref() else {
+                        let Some(session) = authed.as_ref() else {
                             return self.finish(authed, Err("batch before hello".into())).await;
                         };
-                        let ack = self
-                            .handle_batch(&frame.body, pool, *session_id, *time_relative)
-                            .await;
+                        let ack = self.handle_batch(&frame.body, session).await;
                         stream
                             .write_all(&ack)
                             .await
@@ -159,11 +166,11 @@ impl IngestServer {
     /// Deregister the session (if any) and pass the result through.
     async fn finish(
         &self,
-        authed: Option<(Pool, u64, bool)>,
+        authed: Option<Session>,
         result: Result<(), String>,
     ) -> Result<(), String> {
-        if let Some((_, session_id, _)) = authed {
-            self.sessions.inner.lock().await.remove(&session_id);
+        if let Some(session) = authed {
+            self.sessions.inner.lock().await.remove(&session.id);
         }
         result
     }
@@ -174,14 +181,14 @@ impl IngestServer {
         &self,
         body: &[u8],
         peer: &str,
-    ) -> Result<(Vec<u8>, Option<(Pool, u64, bool)>), String> {
+    ) -> Result<(Vec<u8>, Option<Session>), String> {
         let now_us = Utc::now().timestamp_micros() as u64;
         let reject = |status: u8| Ok((proto::encode_hello_ack(status, now_us), None));
 
         let hello = proto::parse_hello(body).map_err(|e| format!("bad hello: {e}"))?;
-        if hello.version != PROTO_VERSION {
+        let Some(parse) = proto::batch_parser(hello.version) else {
             return reject(HELLO_BAD_VERSION);
-        }
+        };
 
         let key = String::from_utf8_lossy(&hello.token).into_owned();
         let Some(info) = self.keys.validate(&key).await else {
@@ -229,24 +236,26 @@ impl IngestServer {
                 connected_at: Utc::now(),
             },
         );
-        tracing::info!("ingest client {peer} authenticated, database '{database}'");
+        tracing::info!(
+            "ingest client {peer} authenticated, database '{database}', protocol v{}",
+            hello.version
+        );
         Ok((
             proto::encode_hello_ack(HELLO_OK, now_us),
-            Some((pool, session_id, hello.time_relative)),
+            Some(Session {
+                pool,
+                id: session_id,
+                time_relative: hello.time_relative,
+                parse,
+            }),
         ))
     }
 
     /// Write one batch to Postgres, then ACK. The client only treats frames as
     /// delivered once they are durably stored; a DB failure yields ACK_OVERLOADED
     /// so the device caches and retries (no frames are buffered in gateway RAM).
-    async fn handle_batch(
-        &self,
-        body: &[u8],
-        pool: &Pool,
-        session_id: u64,
-        time_relative: bool,
-    ) -> Vec<u8> {
-        let batch = match proto::parse_batch(body, self.config.ingest_max_batch_frames) {
+    async fn handle_batch(&self, body: &[u8], session: &Session) -> Vec<u8> {
+        let batch = match (session.parse)(body, self.config.ingest_max_batch_frames) {
             None => return proto::encode_ack(0, ACK_MALFORMED, 0),
             Some(Err(seq)) => return proto::encode_ack(seq, ACK_MALFORMED, 0),
             Some(Ok(b)) => b,
@@ -256,7 +265,7 @@ impl IngestServer {
         // rest. The newest is the largest delta rather than the last record —
         // a sender interleaving two buses can send them out of order, and the
         // last would then stamp the real newest ahead of its own arrival.
-        let base_ts_us = if time_relative {
+        let base_ts_us = if session.time_relative {
             let newest = batch
                 .records
                 .iter()
@@ -273,25 +282,20 @@ impl IngestServer {
             .records
             .into_iter()
             .map(|rec| {
-                let is_fd = rec.id_flags & ID_FD != 0;
-                let plen = rec.payload.len();
-                FrameRow {
-                    ts_us: base_ts_us + rec.delta_us as i64,
-                    id: rec.id_flags & ID_ARB_MASK,
-                    extended: rec.id_flags & ID_EXTENDED != 0,
-                    dlc: wiretap_protocol::payload_dlc(plen, is_fd),
-                    is_fd,
-                    data: rec.payload,
-                    bus: rec.bus,
-                    dir_tx: rec.id_flags & ID_TX != 0,
+                let ts_us = base_ts_us + rec.delta_us as i64;
+                match rec.kind {
+                    RecordKind::Can => FrameRow::can(ts_us, rec.id_flags, rec.bus, rec.payload),
+                    RecordKind::Modbus => {
+                        FrameRow::modbus(ts_us, rec.id_flags, rec.flags, rec.bus, rec.payload)
+                    }
                 }
             })
             .collect();
         let count = rows.len() as u64;
 
-        match copy_rows(pool, &rows).await {
+        match copy_rows(&session.pool, &rows).await {
             Ok(()) => {
-                if let Some(s) = self.sessions.inner.lock().await.get_mut(&session_id) {
+                if let Some(s) = self.sessions.inner.lock().await.get_mut(&session.id) {
                     s.frames += count;
                     s.batches += 1;
                 }

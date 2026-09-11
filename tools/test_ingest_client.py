@@ -28,6 +28,7 @@ import zlib
 # ---------------------------------------------------------------------------
 # Reference client
 # ---------------------------------------------------------------------------
+PROTO_VERSION = 2
 MSG_HELLO, MSG_BATCH, MSG_PING = 0x01, 0x02, 0x03
 MSG_HELLO_ACK, MSG_ACK, MSG_PONG = 0x81, 0x82, 0x83
 FLAG_TIME_RELATIVE = 0x01
@@ -35,6 +36,9 @@ FLAG_TIME_RELATIVE = 0x01
 ID_EXTENDED = 1 << 29
 ID_FD = 1 << 30
 ID_TX = 1 << 31
+
+KIND_CAN, KIND_MODBUS = 0, 1
+FLAG_CRC_VALID = 0x01
 
 
 def frame_message(mtype: int, body: bytes = b"", corrupt_crc: bool = False) -> bytes:
@@ -46,8 +50,15 @@ def frame_message(mtype: int, body: bytes = b"", corrupt_crc: bool = False) -> b
             + crc.to_bytes(4, "little"))
 
 
+def encode_raw_record(delta_us: int, kind: int, flags: int, bus: int,
+                      id_flags: int, payload: bytes) -> bytes:
+    """`delta u32 | kind u8 | flags u8 | bus u8 | len u16 | id_flags u32 | payload`."""
+    return struct.pack("<IBBBHI", delta_us, kind, flags, bus, len(payload), id_flags) + payload
+
+
 def encode_record(delta_us: int, arb_id: int, payload: bytes,
                   extended=False, fd=False, tx=False, bus=0) -> bytes:
+    """A CAN record."""
     id_flags = (arb_id & 0x1FFFFFFF)
     if extended:
         id_flags |= ID_EXTENDED
@@ -55,7 +66,15 @@ def encode_record(delta_us: int, arb_id: int, payload: bytes,
         id_flags |= ID_FD
     if tx:
         id_flags |= ID_TX
-    return struct.pack("<IIBB", delta_us, id_flags, bus, len(payload)) + payload
+    return encode_raw_record(delta_us, KIND_CAN, 0, bus, id_flags, payload)
+
+
+def encode_modbus_record(delta_us: int, unit: int, func: int, message: bytes,
+                         crc_valid=True, bus=0) -> bytes:
+    """A Modbus record: the id word is `unit << 8 | func`, the payload the
+    whole message, CRC included."""
+    flags = FLAG_CRC_VALID if crc_valid else 0
+    return encode_raw_record(delta_us, KIND_MODBUS, flags, bus, (unit << 8) | func, message)
 
 
 def encode_batch(seq: int, base_ts_us: int, records: list) -> bytes:
@@ -67,12 +86,13 @@ class ReferenceClient:
 
     def __init__(self, host: str, port: int, token: str = "",
                  database: str = "", time_relative: bool = False,
-                 timeout: float = 5.0):
+                 timeout: float = 5.0, version: int = PROTO_VERSION):
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.buf = bytearray()
         self.token = token.encode()
         self.database = database.encode()
         self.time_relative = time_relative
+        self.version = version
 
     def close(self):
         self.sock.close()
@@ -104,7 +124,7 @@ class ReferenceClient:
     def hello(self):
         """Send HELLO; return (status, accepted_version, server_time_us)."""
         flags = FLAG_TIME_RELATIVE if self.time_relative else 0
-        body = (b"WTAP" + bytes([1, flags, len(self.token)]) + self.token
+        body = (b"WTAP" + bytes([self.version, flags, len(self.token)]) + self.token
                 + bytes([len(self.database)]) + self.database)
         self.send_raw(frame_message(MSG_HELLO, body))
         mtype, ack = self.recv_message()
@@ -165,11 +185,26 @@ def conformance(host: str, port: int, token: str, database: str) -> int:
     # authenticated session: batch, CRC, malformed, ping
     c = ReferenceClient(host, port, token=token, database=database, timeout=5.0)
     status, version, server_us = c.hello()
-    check("hello with database accepted", status == 0 and version == 1)
+    check("hello with database accepted", status == 0 and version == PROTO_VERSION)
     check("server time plausible", abs(server_us / 1e6 - time.time()) < 10.0)
 
     seq, status, _ = c.send_batch(42, [rec], base_ts_us=base_us)
     check("absolute batch acked", (seq, status) == (42, 0))
+
+    modbus = encode_modbus_record(0, 1, 0x03, bytes.fromhex("010300000001840a"), bus=2)
+    seq, status, _ = c.send_batch(45, [rec, modbus], base_ts_us=base_us)
+    check("modbus record acked beside a can one", (seq, status) == (45, 0))
+
+    seq, status, _ = c.send_batch(46, [encode_modbus_record(0, 1, 0x04, b"\x01" * 256)],
+                                  base_ts_us=base_us)
+    check("256-byte modbus message acked", (seq, status) == (46, 0))
+
+    seq, status, _ = c.send_batch(47, [encode_record(0, 0x123, b"\x00" * 65, fd=True)],
+                                  base_ts_us=base_us)
+    check("65-byte can payload nacked as malformed", (seq, status) == (47, 2))
+
+    seq, status, _ = c.send_batch(48, [encode_raw_record(0, 7, 0, 0, 0, b"")], base_ts_us=base_us)
+    check("unknown record kind nacked as malformed", (seq, status) == (48, 2))
 
     seq, status, _ = c.send_batch(43, [rec], base_ts_us=base_us, corrupt_crc=True)
     check("corrupt batch nacked with CRC status", (seq, status) == (43, 1))
@@ -193,6 +228,17 @@ def conformance(host: str, port: int, token: str, database: str) -> int:
                encode_record(boot_us + 50_000, 0x200, b"\x02")]
     seq, status, _ = c.send_batch(1, records)
     check("time-relative batch acked", status == 0)
+    c.close()
+
+    # A v1 daemon, not yet upgraded, against this gateway: accepted for one
+    # release so a remote capture box keeps flowing between the two upgrades.
+    c = ReferenceClient(host, port, token=token, database=database,
+                        timeout=5.0, version=1)
+    status, version, _ = c.hello()
+    check("v1 hello still accepted", status == 0 and version == PROTO_VERSION)
+    v1_record = struct.pack("<IIBB", 0, 0x123, 0, 3) + b"\x01\x02\x03"
+    seq, status, _ = c.send_batch(1, [v1_record], base_ts_us=base_us)
+    check("v1 batch acked", (seq, status) == (1, 0))
     c.close()
 
     print(f"\n{'PASS' if failures == 0 else f'{failures} FAILURE(S)'}")

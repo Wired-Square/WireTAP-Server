@@ -28,3 +28,4 @@ pub mod pipeline;
 pub mod settings;
 pub mod source;
 pub mod testpattern;
+pub mod wire;

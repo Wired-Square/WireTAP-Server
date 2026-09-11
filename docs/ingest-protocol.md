@@ -1,11 +1,11 @@
-# WireTAP Binary Ingest Protocol (v1)
+# WireTAP Binary Ingest Protocol (v2)
 
-A compact TCP protocol for pushing batches of CAN frames into wiretap-server
-from microcontroller-class capture devices (ESP32, STM32, etc.). The server
-feeds frames into the same pipeline as local SocketCAN capture: batching,
-relay to the gateway, and the SQLite disk cache for outage resilience. It is
-also the protocol the server speaks as a *client* in `[forward]` mode, so one
-codec covers both ends.
+A compact TCP protocol for pushing batches of captured frames — CAN, or the
+messages a serial tap recovers — into wiretap-server from microcontroller-class
+capture devices (ESP32, STM32, etc.). The server feeds them into the same
+pipeline as local capture: batching, relay to the gateway, and the SQLite disk
+cache for outage resilience. It is also the protocol the server speaks as a
+*client* in `[forward]` mode, so one codec covers both ends.
 
 Design priorities, in order: tiny client footprint (fixed little-endian
 layouts pack directly as C structs — no varint or text encoding), bounded
@@ -56,7 +56,7 @@ the server to drop the connection.
 | offset | size | field           | notes                                  |
 |--------|------|-----------------|----------------------------------------|
 | 0      | 4    | magic           | ASCII `"WTAP"`                         |
-| 4      | 1    | `proto_version` | 1                                      |
+| 4      | 1    | `proto_version` | 2                                      |
 | 5      | 1    | `flags`         | bit 0 = `TIME_RELATIVE` (see below)    |
 | 6      | 1    | `token_len`     | 0–255                                  |
 | 7      | n    | token           | API key / shared secret, compared constant-time |
@@ -85,6 +85,13 @@ On any non-zero status the server closes the connection after the ACK.
 `server_time_us` lets a clock-capable device synchronise before sending
 absolute timestamps.
 
+**Versions.** A client speaks one version and there is no negotiation. A
+server refuses a version it does not speak with `status = 2`, and
+`accepted_version` says which it does, so the refused end can say which side
+is behind. The gateway accepts version 1 as well as 2 **for one release**, so a
+capture daemon that has not been upgraded keeps flowing through a gateway that
+has; the capture daemon's own listener accepts 2 only.
+
 ## Frame delivery: BATCH / ACK
 
 `BATCH` body:
@@ -94,30 +101,49 @@ absolute timestamps.
 | 0      | 4    | `seq`        | u32 — client-chosen, echoed in the ACK      |
 | 4      | 8    | `base_ts_us` | u64 — epoch µs (0 when `TIME_RELATIVE`)     |
 | 12     | 2    | `count`      | u16 — records that follow (≤ 256 default)   |
-| 14     | …    | records      | `count` records, ascending `delta_ts_us`    |
+| 14     | …    | records      | `count` records, in any order               |
 
 Each record:
 
 | offset | size  | field         | notes                                       |
 |--------|-------|---------------|----------------------------------------------|
 | 0      | 4     | `delta_ts_us` | u32 — µs offset from `base_ts_us`           |
-| 4      | 4     | `id_flags`    | bits 0–28 arbitration id, bit 29 extended, bit 30 FD, bit 31 dir (0 = rx, 1 = tx) |
-| 8      | 1     | `bus`         | u8 — GVRET bus number                       |
-| 9      | 1     | `len`         | u8 — payload length, 0–64                   |
-| 10     | `len` | payload       | raw data bytes                              |
+| 4      | 1     | `kind`        | u8 — 0 = CAN, 1 = Modbus; anything else is malformed |
+| 5      | 1     | `flags`       | u8 — per kind, below                        |
+| 6      | 1     | `bus`         | u8 — bus number (the device's interface index) |
+| 7      | 2     | `len`         | u16 — payload length, capped per kind       |
+| 9      | 4     | `id_flags`    | u32 — per kind, below; bit 31 is always dir (0 = rx, 1 = tx) |
+| 13     | `len` | payload       | raw bytes                                   |
 
-Per-record overhead is 10 bytes; a classic 8-byte frame costs 18 bytes on the
+| kind | `id_flags`                                              | `flags`             | payload, `len`                       |
+|------|---------------------------------------------------------|---------------------|--------------------------------------|
+| 0 CAN    | bits 0–28 arbitration id, bit 29 extended, bit 30 FD | 0                   | the frame's data, 0–64               |
+| 1 Modbus | bits 8–15 unit (slave address), bits 0–7 function code | bit 0 = CRC valid | the whole RTU message, CRC included, 0–256 |
+
+A Modbus record's `id_flags` is also the `id` the archive stores, so an
+inventory groups the archive by conversation — `0x0120` is unit 1, function
+`0x20`. The tap that produces them transmits nothing, so its records carry
+`dir = 0`.
+
+Per-record overhead is 13 bytes; a classic 8-byte frame costs 21 bytes on the
 wire. The u32 delta limits a batch's span to ~71 minutes — irrelevant in
 practice since batches should be flushed at least every few seconds.
+
+**Two limits bound a batch, and a client must split at whichever comes
+first.** `count` is capped at 256 by default (`max_batch_frames`). The frame's
+`length` field is a u16, so the body is at most 65 534 bytes — and 256
+full-size Modbus records are 68 878, so a batch of long messages splits by
+bytes before it reaches the count. Past the limit the length prefix wraps
+and the receiver loses framing; nothing refuses it for you.
 
 **Timestamps.** With an absolute clock (NTP, GPS, or synced from
 `server_time_us`): set `base_ts_us` to epoch µs and deltas relative to it.
 Without a clock: set the `TIME_RELATIVE` HELLO flag, use any monotonic µs
 counter (e.g. µs since boot) as the delta base, and send `base_ts_us = 0`.
-The server stamps the **last** record in the batch with its arrival time and
-back-dates the others by their delta differences — accurate to within network
-latency, with correct inter-frame spacing. Records must therefore be in
-ascending delta order.
+The server stamps the **newest** record in the batch — the largest delta,
+wherever it sits — with its arrival time and back-dates the others by their
+delta differences: accurate to within network latency, with correct
+inter-frame spacing. A device interleaving two buses need not sort.
 
 `ACK` body:
 
@@ -169,28 +195,27 @@ wrap the connection in a VPN / stunnel if it crosses untrusted segments.
 
 ## Sizing guidance for clients
 
-A worst-case batch (256 × classic CAN, 8-byte payloads) is
-`7 + 14 + 256 × 18 = 4629` bytes — one static buffer. With a 500 kbit/s bus
+A worst-case CAN batch (256 × classic CAN, 8-byte payloads) is
+`7 + 14 + 256 × 21 = 5397` bytes — one static buffer. With a 500 kbit/s bus
 at full load (~4000 frames/s), flushing 256-frame batches means ~16 batches/s
-≈ 74 KB/s of TCP traffic, comfortably inside ESP32 Wi-Fi capability. Flush
+≈ 84 KB/s of TCP traffic, comfortably inside ESP32 Wi-Fi capability. Flush
 partial batches on a timer (e.g. 250 ms) so quiet buses still record promptly.
+A device carrying Modbus messages needs a 64 KiB buffer, or a smaller
+`count` of its own choosing.
 
 ---
 
-## What comes after v1
+## v1 → v2
 
-This document describes what the code implements. **v1 carries CAN only**: the
-record is fixed at 10 bytes plus payload and every bit of `id_flags` is allocated
-(0–28 arbitration id, 29 extended, 30 FD, 31 direction), so there is no room for
-a Modbus unit id, function code or register address.
+Version 1 carried CAN only: a 10-byte record of `delta_ts_us u32 | id_flags
+u32 | bus u8 | len u8`, with every bit of `id_flags` allocated and a payload of
+at most 64 bytes. Version 2 changed the `0x02 BATCH` record in place rather
+than adding a message type beside it: a `kind` byte says what the record is,
+`flags` carries what the kind needs, and `len` grew to a u16 so a Modbus RTU
+message fits whole. A CAN record's `id_flags` is bit-identical to v1's.
 
-A v2 that carries them is designed but **not built**, and it will change the
-`0x02 BATCH` body rather than adding a message type beside it — so it is a
-**breaking change**, announced by `PROTO_VERSION` going to 2 and enforced by the
-strict-equality check above. A v1 client will be refused at the handshake with
-`HELLO_BAD_VERSION`, loudly, rather than having its batches silently ignored.
-
-Write firmware against v1 as specified above, and expect to update it for v2.
-Earlier drafts of this document promised v1 would be frozen indefinitely; that
-promise is withdrawn, and it was made when this protocol had speakers outside
-this repository. It has none.
+**Upgrade order is gateway first, then capture daemons.** The gateway accepts
+both versions for one release, so a daemon still on v1 keeps flowing between
+the two steps; a v2 daemon against a v1 gateway is refused at the handshake
+and caches to disk until the gateway is upgraded. The daemon's log names both
+versions when that happens.

@@ -1,10 +1,12 @@
 #!/bin/bash
 # Phase B smoke test: endpoint coverage + auth matrix against a running stack.
-# Usage: ./smoke_test.sh [base-url] [admin-key] [seeded-db]
+# Usage: ./smoke_test.sh [base-url] [admin-key] [seeded-db] [ingest-host:port]
 set -u
 BASE="${1:-http://localhost:8423}"
 ADMIN_KEY="${2:-dev-admin-key}"
 DB="${3:-vehicle_test}"
+INGEST="${4:-127.0.0.1:9323}"
+TOOLS="$(cd "$(dirname "$0")/../../tools" && pwd)"
 PASS=0; FAIL=0
 
 check() { # name, condition (0 = ok)
@@ -89,6 +91,26 @@ cnt=$(curl -fsS -H "$R" -H "$J" -d '{"frame_id":768}' "$BASE/v1/db/$IMPORT_DB/qu
 [ "$cnt" = "250" ]; check "imported frames queryable (0x300 count=$cnt)" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" -H "Content-Type: application/x-wiretap-frames" --data-binary @/tmp/wiretap_import.bin "$BASE/v1/db/$IMPORT_DB/import")
 [ "$code" = "403" ]; check "read key cannot import" $?
+
+# --- modbus rows: written over TCP ingest, the only path that carries them,
+# and read back only when a protocol is named ---
+read -r ikid ingest_key < <(curl -fsS -H "$A" -H "$J" -d '{"name":"smoke-ingest","role":"ingest"}' "$BASE/v1/admin/keys" | python3 -c 'import sys,json;k=json.load(sys.stdin);print(k["id"],k["key"])')
+PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ingest_key" "$IMPORT_DB" <<'PYEOF'
+import sys, time
+from test_ingest_client import ReferenceClient, encode_modbus_record
+c = ReferenceClient(sys.argv[1], int(sys.argv[2]), token=sys.argv[3], database=sys.argv[4])
+assert c.hello()[0] == 0
+rec = encode_modbus_record(0, 1, 0x03, bytes.fromhex("010300000001840a"), bus=2)
+assert c.send_batch(1, [rec], base_ts_us=int(time.time() * 1_000_000))[1] == 0
+PYEOF
+check "modbus record ingested over TCP" $?
+curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory?protocol=modbus" | grep -q '"frame_id":259'; check "inventory lists modbus rows when asked (unit 1, FC03 = 0x0103)" $?
+! curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory" | grep -q '"frame_id":259'; check "inventory hides modbus rows by default" $?
+curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/time-bounds?protocol=modbus" | grep -q '"min_ts_us":[0-9]'; check "time-bounds by protocol" $?
+curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/frames?protocol=modbus&limit=5" | grep -q '"dlc":8'; check "frames by protocol carry the message length" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" "$BASE/v1/db/$IMPORT_DB/frames?protocol=modbsu")
+[ "$code" = "400" ]; check "a protocol typo is a 400" $?
+curl -fsS -X DELETE -H "$A" "$BASE/v1/admin/keys/$ikid" >/dev/null
 
 # --- admin views ---
 curl -fsS -H "$A" "$BASE/v1/db/$DB/activity" | grep -q queries; check "activity" $?

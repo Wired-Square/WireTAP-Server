@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::db;
-use crate::ingest::proto::{ID_ARB_MASK, ID_EXTENDED, ID_FD, ID_TX};
+use crate::ingest::proto;
 use crate::ingest::writer::FrameRow;
 use crate::keys::{KeyInfo, Role};
 use crate::running;
@@ -423,20 +423,29 @@ async fn delete_database(
 // Read endpoints
 // ---------------------------------------------------------------------------
 
+/// `protocol` absent means [`sql::DEFAULT_PROTOCOL`] on every read below, so a
+/// desktop that predates the parameter keeps seeing exactly what it did.
+#[derive(Deserialize)]
+struct ProtocolQuery {
+    protocol: Option<sql::Protocol>,
+}
+
 #[derive(Deserialize)]
 struct TimeRangeQuery {
     start: Option<String>,
     end: Option<String>,
+    protocol: Option<sql::Protocol>,
 }
 
 async fn time_bounds(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path(db): Path<String>,
+    Query(q): Query<ProtocolQuery>,
 ) -> Result<Json<crate::types::TimeBounds>, ApiError> {
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
-    Ok(Json(sql::time_bounds(&client).await?))
+    Ok(Json(sql::time_bounds(&client, q.protocol).await?))
 }
 
 async fn inventory(
@@ -447,7 +456,7 @@ async fn inventory(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
-    let entries = sql::inventory(&client, range.start, range.end).await?;
+    let entries = sql::inventory(&client, range.start, range.end, range.protocol).await?;
     Ok(Json(json!({ "entries": entries })))
 }
 
@@ -457,6 +466,7 @@ struct FramesQuery {
     end: Option<String>,
     after: Option<String>,
     limit: Option<u32>,
+    protocol: Option<sql::Protocol>,
 }
 
 async fn frames(
@@ -469,7 +479,15 @@ async fn frames(
     let limit = q.limit.unwrap_or(1000).min(5000);
     let client = client_for(&state, &db).await?;
     Ok(Json(
-        sql::frames_batch(&client, q.start, q.end, q.after.as_deref(), limit).await?,
+        sql::frames_batch(
+            &client,
+            q.start,
+            q.end,
+            q.after.as_deref(),
+            limit,
+            q.protocol,
+        )
+        .await?,
     ))
 }
 
@@ -682,8 +700,11 @@ async fn import_capture(
         let mut off = 0;
         while pending.len() >= off + IMPORT_RECORD_HEADER {
             let plen = pending[off + 13] as usize;
-            if plen > 64 {
-                return Err(ApiError::from(format!("record payload length {plen} > 64")));
+            let max = proto::RecordKind::Can.max_payload();
+            if plen > max {
+                return Err(ApiError::from(format!(
+                    "record payload length {plen} > {max}"
+                )));
             }
             if pending.len() < off + IMPORT_RECORD_HEADER + plen {
                 break;
@@ -692,17 +713,7 @@ async fn import_capture(
             let id_flags = u32::from_le_bytes(pending[off + 8..off + 12].try_into().unwrap());
             let bus = pending[off + 12];
             let data = pending[off + 14..off + 14 + plen].to_vec();
-            let is_fd = id_flags & ID_FD != 0;
-            rows.push(FrameRow {
-                ts_us,
-                id: id_flags & ID_ARB_MASK,
-                extended: id_flags & ID_EXTENDED != 0,
-                dlc: wiretap_protocol::payload_dlc(plen, is_fd),
-                is_fd,
-                data,
-                bus,
-                dir_tx: id_flags & ID_TX != 0,
-            });
+            rows.push(FrameRow::can(ts_us, id_flags, bus, data));
             off += IMPORT_RECORD_HEADER + plen;
         }
         pending.drain(..off);

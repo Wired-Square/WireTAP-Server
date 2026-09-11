@@ -37,6 +37,8 @@ impl Args {
     }
 }
 
+pub use wiretap_model::Protocol;
+
 /// Which protocol a query is about when the caller does not say.
 ///
 /// **Load-bearing, not a tidy default.** The archive has held more than CAN
@@ -46,17 +48,17 @@ impl Args {
 /// default would have those clients present Modbus rows *as CAN*, which is worse
 /// than not showing them at all. Seeing more than CAN is therefore something a
 /// client opts into by naming a protocol.
-pub const DEFAULT_PROTOCOL: &str = "can";
+pub const DEFAULT_PROTOCOL: Protocol = Protocol::Can;
 
 /// `WHERE protocol = $n::text` for the protocol asked for, or [`DEFAULT_PROTOCOL`].
 ///
 /// The anchor, not a fragment: every query in this file filters by protocol, so
 /// this is always the first predicate and callers append with `AND` — the same
 /// shape [`time_clause`] already assumes.
-fn protocol_clause(args: &mut Args, protocol: Option<&str>) -> String {
+fn protocol_clause(args: &mut Args, protocol: Option<Protocol>) -> String {
     format!(
         "WHERE protocol = ${}::text",
-        args.add(protocol.unwrap_or(DEFAULT_PROTOCOL).to_owned())
+        args.add(protocol.unwrap_or(DEFAULT_PROTOCOL).as_str())
     )
 }
 
@@ -70,16 +72,16 @@ pub struct FrameFilter {
     /// Absent means [`DEFAULT_PROTOCOL`] — read its docs before widening this.
     /// Serde treats a missing `Option` field as `None`, so a client that predates
     /// the column sends nothing and keeps getting exactly what it did before.
-    pub protocol: Option<String>,
+    pub protocol: Option<Protocol>,
 }
 
 impl FrameFilter {
     fn where_clause(&self, args: &mut Args) -> String {
         // `id` alone is not an identity any more — a CAN arbitration id and a
-        // Modbus register number share the column.
+        // Modbus unit-and-function word share the column.
         let mut sql = format!(
             "{} AND id = ${}::int4",
-            protocol_clause(args, self.protocol.as_deref()),
+            protocol_clause(args, self.protocol),
             args.add(self.frame_id as i32)
         );
         if let Some(ext) = self.is_extended {
@@ -226,7 +228,7 @@ fn diff_indices(a: &[u8], b: &[u8]) -> Vec<usize> {
 #[derive(Debug, Deserialize)]
 pub struct MirrorValidationParams {
     /// Absent means [`DEFAULT_PROTOCOL`] — read its docs before widening this.
-    pub protocol: Option<String>,
+    pub protocol: Option<Protocol>,
     pub mirror_frame_id: u32,
     pub source_frame_id: u32,
     pub is_extended: Option<bool>,
@@ -248,7 +250,7 @@ pub async fn mirror_validation(
     let source_id = args.add(p.source_frame_id as i32);
     let tolerance = args.add(p.tolerance_ms as i32);
     // Anchors both subqueries, so the protocol placeholder is added once.
-    let where_protocol = protocol_clause(&mut args, p.protocol.as_deref());
+    let where_protocol = protocol_clause(&mut args, p.protocol);
     let mut extra = String::new();
     if let Some(ext) = p.is_extended {
         extra += &format!(" AND extended = ${}::bool", args.add(ext));
@@ -639,7 +641,7 @@ pub async fn gap_analysis(
 #[derive(Debug, Deserialize)]
 pub struct PatternSearchParams {
     /// Absent means [`DEFAULT_PROTOCOL`] — read its docs before widening this.
-    pub protocol: Option<String>,
+    pub protocol: Option<Protocol>,
     pub pattern: Vec<u8>,
     pub pattern_mask: Vec<u8>,
     pub start_time: Option<String>,
@@ -661,7 +663,7 @@ pub async fn pattern_search(
     }
     let result_limit = p.limit.unwrap_or(10000) as usize;
     let mut args = Args::default();
-    let proto = protocol_clause(&mut args, p.protocol.as_deref());
+    let proto = protocol_clause(&mut args, p.protocol);
     let w = time_clause(&mut args, &p.start_time, &p.end_time);
     let query = format!(
         "SELECT (EXTRACT(EPOCH FROM ts) * 1000000)::float8 AS timestamp_us, \
@@ -737,6 +739,7 @@ pub async fn inventory(
     client: &Client,
     start_time: Option<String>,
     end_time: Option<String>,
+    protocol: Option<Protocol>,
 ) -> Result<Vec<InventoryEntry>, String> {
     let map = |row: &tokio_postgres::Row| InventoryEntry {
         frame_id: row.get::<_, i32>("id") as u32,
@@ -744,13 +747,13 @@ pub async fn inventory(
         count: row.get("cnt"),
         first_us: row.get::<_, f64>("first_us") as i64,
         last_us: row.get::<_, f64>("last_us") as i64,
-        max_dlc: row.get::<_, i32>("max_dlc") as u8,
+        max_dlc: row.get::<_, i32>("max_dlc") as u16,
     };
 
     // Full-archive inventory reads the hourly rollup when present
     if start_time.is_none() && end_time.is_none() && rollup_available(client).await {
         let mut args = Args::default();
-        let proto = protocol_clause(&mut args, None);
+        let proto = protocol_clause(&mut args, protocol);
         let rows = client
             .query(
                 &format!(
@@ -769,7 +772,7 @@ pub async fn inventory(
     }
 
     let mut args = Args::default();
-    let proto = protocol_clause(&mut args, None);
+    let proto = protocol_clause(&mut args, protocol);
     let w = time_clause(&mut args, &start_time, &end_time);
     let query = format!(
         "SELECT id, extended, COUNT(*)::int8 AS cnt, \
@@ -785,7 +788,10 @@ pub async fn inventory(
     Ok(rows.iter().map(map).collect())
 }
 
-pub async fn time_bounds(client: &Client) -> Result<TimeBounds, String> {
+pub async fn time_bounds(
+    client: &Client,
+    protocol: Option<Protocol>,
+) -> Result<TimeBounds, String> {
     let (min_expr, max_expr, table) = if rollup_available(client).await {
         (
             "min(first_ts)",
@@ -796,7 +802,7 @@ pub async fn time_bounds(client: &Client) -> Result<TimeBounds, String> {
         ("min(ts)", "max(ts)", "public.capture_frame")
     };
     let mut args = Args::default();
-    let proto = protocol_clause(&mut args, None);
+    let proto = protocol_clause(&mut args, protocol);
     let row = client
         .query_one(
             &format!(
@@ -869,6 +875,7 @@ pub async fn frames_batch(
     end_time: Option<String>,
     after: Option<&str>,
     limit: u32,
+    protocol: Option<Protocol>,
 ) -> Result<FrameBatch, String> {
     let cursor = after.map(decode_cursor).transpose()?;
     let mut args = Args::default();
@@ -876,7 +883,7 @@ pub async fn frames_batch(
         "SELECT (EXTRACT(EPOCH FROM ts) * 1000000)::float8 AS ts_us, \
          id, extended, dlc, is_fd, data_bytes, bus, dir \
          FROM public.capture_frame {}",
-        protocol_clause(&mut args, None)
+        protocol_clause(&mut args, protocol)
     );
     if let Some((ts_us, _)) = cursor {
         sql += &format!(
@@ -901,7 +908,7 @@ pub async fn frames_batch(
             ts_us: row.get::<_, f64>("ts_us") as i64,
             id: row.get::<_, i32>("id") as u32,
             extended: row.get("extended"),
-            dlc: row.get::<_, i16>("dlc") as u8,
+            dlc: row.get::<_, i16>("dlc") as u16,
             is_fd: row.get("is_fd"),
             bus: row.get::<_, i32>("bus") as u8,
             dir: row.get("dir"),

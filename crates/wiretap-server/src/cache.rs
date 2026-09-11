@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::{params_from_iter, Connection};
-use wiretap_model::{CanSample, Direction, SourceId};
+use wiretap_ingest_proto::{modbus_id, modbus_unit_func};
+use wiretap_model::{CanSample, Direction, ModbusSample, Protocol, Sample, SourceId};
 use wiretap_protocol::payload_dlc;
 
 /// Why a cache operation failed.
@@ -46,7 +47,7 @@ pub struct Cached {
     pub id: i64,
     /// Shared, because the frames on this path came from a capture that had
     /// already wrapped them and go to a sink that only reads them.
-    pub sample: Arc<CanSample>,
+    pub sample: Arc<Sample>,
 }
 
 /// A durable FIFO of frames waiting for the gateway.
@@ -63,7 +64,7 @@ pub struct Cached {
 /// worker.
 pub trait FrameCache: Send {
     /// Append frames, returning how many were stored.
-    fn append(&mut self, frames: &[Arc<CanSample>]) -> Result<usize>;
+    fn append(&mut self, frames: &[Arc<Sample>]) -> Result<usize>;
 
     /// The oldest `limit` frames, in capture order.
     fn oldest(&mut self, limit: usize) -> Result<Vec<Cached>>;
@@ -106,8 +107,10 @@ pub struct SqliteCache {
 impl SqliteCache {
     /// Open or create the cache at `path`.
     ///
-    /// `CREATE TABLE IF NOT EXISTS` with the Python's exact column list, so
-    /// opening a cache it wrote is a no-op rather than a migration.
+    /// `CREATE TABLE IF NOT EXISTS` with the Python's column list plus the two
+    /// added since, so a cache it wrote opens as it is; those two are then
+    /// appended to a file that lacks them, which SQLite does without touching
+    /// a row.
     pub fn open(path: impl Into<PathBuf>, max_mb: u64) -> Result<Self> {
         let path = path.into();
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -166,7 +169,7 @@ impl SqliteCache {
             if batch.is_empty() {
                 break;
             }
-            let frames: Vec<Arc<CanSample>> = batch.iter().map(|c| Arc::clone(&c.sample)).collect();
+            let frames: Vec<Arc<Sample>> = batch.iter().map(|c| Arc::clone(&c.sample)).collect();
             self.append(&frames)?;
             old.remove(&batch)?;
         }
@@ -257,9 +260,25 @@ impl SqliteCache {
                 dlc INTEGER NOT NULL,
                 data BLOB NOT NULL,
                 bus INTEGER NOT NULL,
-                dir TEXT NOT NULL
+                dir TEXT NOT NULL,
+                protocol TEXT NOT NULL DEFAULT 'can',
+                crc_valid INTEGER
             )",
         )?;
+        // Every path that opens a file comes through here — `reset` and the
+        // adoption rename included — so this is the one place the widening
+        // can live. A Python-written cache has neither column; its rows read
+        // back as CAN through the default. Constant defaults are metadata in
+        // SQLite, so this rewrites nothing however full the file is.
+        let widened = conn
+            .prepare("SELECT 1 FROM pragma_table_info('frames') WHERE name = 'protocol'")?
+            .exists([])?;
+        if !widened {
+            conn.execute_batch(
+                "ALTER TABLE frames ADD COLUMN protocol TEXT NOT NULL DEFAULT 'can';
+                 ALTER TABLE frames ADD COLUMN crc_valid INTEGER",
+            )?;
+        }
         Ok(conn)
     }
 }
@@ -317,30 +336,51 @@ fn from_secs(ts: f64) -> i64 {
 }
 
 impl FrameCache for SqliteCache {
-    fn append(&mut self, frames: &[Arc<CanSample>]) -> Result<usize> {
+    fn append(&mut self, frames: &[Arc<Sample>]) -> Result<usize> {
         if frames.is_empty() {
             return Ok(0);
         }
         let tx = self.conn.transaction()?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO frames (ts, extended, is_fd, arb_id, dlc, data, bus, dir)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO frames (ts, extended, is_fd, arb_id, dlc, data, bus, dir, protocol, crc_valid)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             for f in frames {
-                // `dlc` is written for the Python's benefit, not ours: it is
-                // derivable from the payload and this store's reader derives
-                // it, but a Python still reading this file expects a column.
-                stmt.execute(rusqlite::params![
-                    to_secs(f.ts_us),
-                    f.extended,
-                    f.is_fd,
-                    f.arb_id,
-                    payload_dlc(f.data.len(), f.is_fd),
-                    f.data,
-                    f.bus.0,
-                    f.dir.as_str(),
-                ])?;
+                match &**f {
+                    // `dlc` is written for the Python's benefit, not ours: it
+                    // is derivable from the payload and this store's reader
+                    // derives it, but a Python still reading this file expects
+                    // a column.
+                    Sample::Can(c) => stmt.execute(rusqlite::params![
+                        to_secs(c.ts_us),
+                        c.extended,
+                        c.is_fd,
+                        c.arb_id,
+                        payload_dlc(c.data.len(), c.is_fd),
+                        c.data,
+                        c.bus.0,
+                        c.dir.as_str(),
+                        f.protocol().as_str(),
+                        Option::<bool>::None,
+                    ])?,
+                    // The CAN columns take what the wire record and the
+                    // archive give them: the id is the unit and function code
+                    // packed, `dlc` is the message length, and a tap sends
+                    // nothing so the direction is `rx`.
+                    Sample::Modbus(m) => stmt.execute(rusqlite::params![
+                        to_secs(m.ts_us),
+                        false,
+                        false,
+                        modbus_id(m.unit, m.func),
+                        m.raw.len() as i64,
+                        m.raw,
+                        m.bus.0,
+                        Direction::Rx.as_str(),
+                        f.protocol().as_str(),
+                        Some(m.crc_valid),
+                    ])?,
+                };
             }
         }
         tx.commit()?;
@@ -350,26 +390,47 @@ impl FrameCache for SqliteCache {
 
     fn oldest(&mut self, limit: usize) -> Result<Vec<Cached>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, ts, extended, is_fd, arb_id, data, bus, dir
+            "SELECT id, ts, extended, is_fd, arb_id, data, bus, dir, protocol, crc_valid
              FROM frames ORDER BY id LIMIT ?1",
         )?;
         let mut out = Vec::with_capacity(limit);
         let rows = stmt.query_map([limit as i64], |r| {
-            Ok(Cached {
-                id: r.get(0)?,
-                sample: Arc::new(CanSample {
-                    ts_us: from_secs(r.get(1)?),
+            let ts_us = from_secs(r.get(1)?);
+            let bus = SourceId(r.get(6)?);
+            // Borrowed rather than owned, because this runs per row over
+            // millions of them on a long drain; neither `FromStr` allocates.
+            let tag = r.get_ref(8)?;
+            let sample = match tag.as_str().ok().and_then(|s| s.parse().ok()) {
+                Some(Protocol::Modbus) => {
+                    let (unit, func) = modbus_unit_func(r.get(4)?);
+                    Sample::Modbus(ModbusSample {
+                        ts_us,
+                        bus,
+                        unit,
+                        func,
+                        crc_valid: r.get::<_, Option<bool>>(9)?.unwrap_or(false),
+                        raw: r.get(5)?,
+                    })
+                }
+                // A tag this build cannot carry — a newer build wrote it — is
+                // an error, not a CAN frame with a nonsense id.
+                Some(Protocol::Serial) | None => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        format!("no sample for protocol {tag:?}").into(),
+                    ));
+                }
+                Some(Protocol::Can) => Sample::Can(CanSample {
+                    ts_us,
                     extended: r.get(2)?,
                     is_fd: r.get(3)?,
                     arb_id: r.get(4)?,
                     data: r.get(5)?,
-                    bus: SourceId(r.get(6)?),
-                    // Borrowed rather than owned, because this runs per row
-                    // over millions of them on a long drain; `Direction`'s
-                    // `FromStr` allocates nothing. An unreadable tag is `rx` —
-                    // the Python wrote whatever `--pg-dir` said, so a cache
-                    // from one could hold anything, and the direction is not
-                    // worth dropping a frame over.
+                    bus,
+                    // An unreadable tag is `rx` — the Python wrote whatever
+                    // `--pg-dir` said, so a cache from one could hold anything,
+                    // and the direction is not worth dropping a frame over.
                     dir: r
                         .get_ref(7)?
                         .as_str()
@@ -377,6 +438,10 @@ impl FrameCache for SqliteCache {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(Direction::Rx),
                 }),
+            };
+            Ok(Cached {
+                id: r.get(0)?,
+                sample: Arc::new(sample),
             })
         })?;
         for row in rows {
@@ -476,8 +541,8 @@ mod tests {
         (dir, cache)
     }
 
-    fn sample(ts_us: i64, arb_id: u32) -> Arc<CanSample> {
-        Arc::new(CanSample {
+    fn sample(ts_us: i64, arb_id: u32) -> Arc<Sample> {
+        Arc::new(Sample::Can(CanSample {
             ts_us,
             arb_id,
             extended: false,
@@ -485,30 +550,47 @@ mod tests {
             data: vec![1, 2, 3],
             bus: SourceId(0),
             dir: Direction::Rx,
-        })
+        }))
+    }
+
+    fn modbus(ts_us: i64, unit: u8, func: u8, raw: &[u8]) -> Arc<Sample> {
+        Arc::new(Sample::Modbus(ModbusSample {
+            ts_us,
+            bus: SourceId(2),
+            unit,
+            func,
+            crc_valid: true,
+            raw: raw.to_vec(),
+        }))
+    }
+
+    /// The CAN frame a row holds, where the test put one there.
+    fn can(s: &Sample) -> &CanSample {
+        match s {
+            Sample::Can(c) => c,
+            Sample::Modbus(m) => panic!("a CAN frame was expected, not {m:?}"),
+        }
+    }
+
+    fn arb_ids(rows: &[Cached]) -> Vec<u32> {
+        rows.iter().map(|c| can(&c.sample).arb_id).collect()
     }
 
     #[test]
     fn frames_come_back_out_in_the_order_they_went_in() {
         let (_dir, mut c) = temp_cache("fifo", 100);
-        let frames: Vec<Arc<CanSample>> = (0..5).map(|i| sample(1_000 + i, i as u32)).collect();
+        let frames: Vec<Arc<Sample>> = (0..5).map(|i| sample(1_000 + i, i as u32)).collect();
         assert_eq!(c.append(&frames).unwrap(), 5);
         assert_eq!(c.count().unwrap(), 5);
 
         let first = c.oldest(3).unwrap();
-        assert_eq!(
-            first.iter().map(|f| f.sample.arb_id).collect::<Vec<_>>(),
-            [0, 1, 2]
-        );
+        assert_eq!(arb_ids(&first), [0, 1, 2]);
 
         // Removing the head leaves the tail, still in order.
         c.remove(&first).unwrap();
         assert_eq!(c.count().unwrap(), 2);
         let rest = c.oldest(10).unwrap();
-        assert_eq!(
-            rest.iter().map(|f| f.sample.arb_id).collect::<Vec<_>>(),
-            [3, 4]
-        );
+        assert_eq!(arb_ids(&rest), [3, 4]);
     }
 
     /// Every field has to survive the round trip, or an outage silently
@@ -516,7 +598,7 @@ mod tests {
     #[test]
     fn a_frame_survives_the_round_trip_intact() {
         let (_dir, mut c) = temp_cache("roundtrip", 100);
-        let original = Arc::new(CanSample {
+        let original = Arc::new(Sample::Can(CanSample {
             ts_us: 1_700_000_000_123_456,
             arb_id: 0x18DA_F110,
             extended: true,
@@ -524,9 +606,47 @@ mod tests {
             data: (0..64).collect(),
             bus: SourceId(7),
             dir: Direction::Tx,
-        });
+        }));
         c.append(std::slice::from_ref(&original)).unwrap();
         assert_eq!(c.oldest(1).unwrap()[0].sample, original);
+    }
+
+    /// A Modbus message rides in the CAN columns, and every field has to come
+    /// back — the id packs the unit and function code, and the CRC verdict is
+    /// stored rather than re-derived on the drain.
+    #[test]
+    fn a_modbus_message_survives_the_round_trip() {
+        let (_dir, mut c) = temp_cache("modbus", 100);
+        let raw = [
+            0x01, 0x20, 0x01, 0xC8, 0x03, 0x11, 0x1A, 0x00, 0x02, 0xE4, 0xCA,
+        ];
+        let original = modbus(1_700_000_000_000_001, 1, 0x20, &raw);
+        c.append(&[sample(1, 0x123), Arc::clone(&original)])
+            .unwrap();
+
+        let rows = c.oldest(2).unwrap();
+        assert_eq!(
+            can(&rows[0].sample).arb_id,
+            0x123,
+            "the CAN row is untouched"
+        );
+        assert_eq!(rows[1].sample, original);
+
+        // What a Python reading the same row would see.
+        let (arb_id, dlc, dir, protocol, crc): (i64, i64, String, String, Option<i64>) = c
+            .conn
+            .query_row(
+                "SELECT arb_id, dlc, dir, protocol, crc_valid FROM frames WHERE id = 2",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(arb_id, 0x0120, "unit << 8 | func");
+        assert_eq!(dlc, 11, "the message length, CRC included");
+        assert_eq!(
+            (dir.as_str(), protocol.as_str(), crc),
+            ("rx", "modbus", Some(1))
+        );
     }
 
     /// The `REAL` column is the Python's, and it has to hold microseconds
@@ -551,7 +671,7 @@ mod tests {
     #[test]
     fn the_size_includes_the_write_ahead_log() {
         let (_dir, mut c) = temp_cache("size", 100);
-        let frames: Vec<Arc<CanSample>> = (0..2_000).map(|i| sample(i, i as u32)).collect();
+        let frames: Vec<Arc<Sample>> = (0..2_000).map(|i| sample(i, i as u32)).collect();
         c.append(&frames).unwrap();
 
         let db_only = std::fs::metadata(&c.path).map(|m| m.len()).unwrap_or(0);
@@ -593,7 +713,7 @@ mod tests {
         // And it is usable afterwards, which is what separates this from
         // `delete`.
         c.append(&[sample(1, 0x321)]).unwrap();
-        assert_eq!(c.oldest(1).unwrap()[0].sample.arb_id, 0x321);
+        assert_eq!(arb_ids(&c.oldest(1).unwrap()), [0x321]);
     }
 
     /// Reopening is what an upgrade does, and it must find what the last run
@@ -607,7 +727,7 @@ mod tests {
         }
         let mut reopened = SqliteCache::open(dir.db(), 100).expect("reopens");
         assert_eq!(reopened.count().unwrap(), 1);
-        assert_eq!(reopened.oldest(1).unwrap()[0].sample.arb_id, 0x123);
+        assert_eq!(arb_ids(&reopened.oldest(1).unwrap()), [0x123]);
     }
 
     /// Refused at open, rather than at the first frame. [`SqliteCache::open_conn`]
@@ -694,7 +814,7 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
 
         let frames = c.oldest(10).unwrap();
         assert_eq!(
-            *frames[0].sample,
+            *can(&frames[0].sample),
             CanSample {
                 ts_us: 1_700_000_000_123_456,
                 arb_id: 0x123,
@@ -706,7 +826,7 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
             }
         );
         assert_eq!(
-            *frames[1].sample,
+            *can(&frames[1].sample),
             CanSample {
                 ts_us: 1_700_000_000_987_654,
                 arb_id: 0x18DA_F110,
@@ -717,12 +837,48 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
                 dir: Direction::Tx,
             }
         );
-        assert_eq!(frames[2].sample.ts_us, 0, "the epoch is a timestamp too");
-        assert!(frames[2].sample.data.is_empty());
+        assert_eq!(frames[2].sample.ts_us(), 0, "the epoch is a timestamp too");
+        assert!(can(&frames[2].sample).data.is_empty());
 
         // And draining it works, which is the point of being able to read it.
         c.remove(&frames).unwrap();
         assert_eq!(c.count().unwrap(), 0);
+    }
+
+    /// The Python's file has neither of the columns added since, and an
+    /// upgrade mid-outage opens exactly that file. It has to be widened on
+    /// open — through the same path a reset or an adoption reopens by — and
+    /// then take a Modbus message beside the frames it already held.
+    #[test]
+    fn a_python_cache_is_widened_on_open() {
+        let dir = TempDir::new("widen");
+        Connection::open(dir.db())
+            .unwrap()
+            .execute_batch(PYTHON_CACHE)
+            .unwrap();
+
+        let mut c = SqliteCache::open(dir.db(), 100).unwrap();
+        c.append(&[modbus(5, 2, 0x65, &[0x02, 0x65, 0x00, 0x02, 0x90, 0x42])])
+            .unwrap();
+        let rows = c.oldest(10).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(arb_ids(&rows[..3]), [0x123, 0x18DA_F110, 0x7FF]);
+        assert!(
+            matches!(&*rows[3].sample, Sample::Modbus(m) if (m.unit, m.func) == (2, 0x65)),
+            "{:?}",
+            rows[3].sample
+        );
+
+        // A reset reopens the file from nothing, and must widen it again.
+        c.reset().unwrap();
+        c.append(&[modbus(
+            6,
+            1,
+            0x03,
+            &[0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A],
+        )])
+        .unwrap();
+        assert_eq!(c.count().unwrap(), 1);
     }
 
     /// The other direction, which no test here can run the Python for: assert
@@ -731,7 +887,7 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
     #[test]
     fn a_python_could_read_what_this_writes() {
         let (_dir, mut c) = temp_cache("forward-compat", 100);
-        c.append(&[Arc::new(CanSample {
+        c.append(&[Arc::new(Sample::Can(CanSample {
             ts_us: 1_700_000_000_123_456,
             arb_id: 0x18DA_F110,
             extended: true,
@@ -739,7 +895,7 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
             data: vec![0xAA; 12],
             bus: SourceId(7),
             dir: Direction::Tx,
-        })])
+        }))])
         .unwrap();
 
         let row: (f64, i64, i64, i64, i64, Vec<u8>, i64, String) = c
@@ -789,11 +945,7 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
 
         // In order, and usable — the frames are older than anything this run
         // will capture, so they have to come out first.
-        let oldest = cache.oldest(3).unwrap();
-        assert_eq!(
-            oldest.iter().map(|c| c.sample.arb_id).collect::<Vec<_>>(),
-            [0, 1, 2]
-        );
+        assert_eq!(arb_ids(&cache.oldest(3).unwrap()), [0, 1, 2]);
         cache.append(&[sample(9_999, 0x321)]).unwrap();
         assert_eq!(cache.count().unwrap(), 2_001);
     }

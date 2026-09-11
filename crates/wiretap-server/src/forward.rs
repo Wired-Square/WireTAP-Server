@@ -16,10 +16,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::info;
 use wiretap_ingest_proto as proto;
-use wiretap_model::{CanSample, Direction, Secret};
+use wiretap_model::{Sample, Secret};
 
 use crate::archive::{BatchSink, SinkError, SinkResult};
 use crate::settings::Forward;
+use crate::wire;
 
 /// How long any single read or write may take, matching the Python's socket
 /// timeout. Long enough for a gateway writing a batch to PostgreSQL over a
@@ -40,15 +41,9 @@ pub struct ForwardSink {
     /// identifies an ACK against its batch, so it only has to be unique among
     /// those in flight — and there is only ever one.
     seq: u32,
-    /// Reused across batches: a batch is up to 256 records of up to 74 bytes,
-    /// and this runs for every batch for the life of the process.
+    /// Reused across batches: a batch is bounded at `MAX_BODY` bytes, and this
+    /// runs for every batch for the life of the process.
     records: Vec<u8>,
-}
-
-/// A capture timestamp as the protocol carries it. One spelling, because the
-/// base and the deltas measured from it have to agree.
-fn ts_us(f: &Arc<CanSample>) -> u64 {
-    f.ts_us.max(0) as u64
 }
 
 /// How many frames from the front of `frames` fit in one batch.
@@ -57,22 +52,27 @@ fn ts_us(f: &Arc<CanSample>) -> u64 {
 /// a `u32` of microseconds, so a batch cannot reach across more than about
 /// 71.6 minutes without wrapping — filing a frame that far *before* it
 /// happened, silently and in release, where `debug_assert` is not watching.
+/// The byte total is the frame's: its length field is a `u16`, which 256
+/// full-size Modbus messages overrun, and past it the length prefix wraps
+/// and the gateway loses framing.
 ///
-/// A live batch spans a flush interval and comes nowhere near it. A disk cache
-/// drain does: `SqliteCache::oldest` reads `ORDER BY id`, so one chunk is 256
-/// consecutive frames from across the whole outage, and a bus quiet enough to
-/// average a frame every 17 seconds reaches 71.6 minutes inside one batch.
-/// That is the recovery path, which is the one that has to work.
-fn batch_len(frames: &[Arc<CanSample>]) -> usize {
-    let (mut lo, mut hi) = (ts_us(&frames[0]), ts_us(&frames[0]));
+/// A live batch spans a flush interval and comes nowhere near either. A disk
+/// cache drain does: `SqliteCache::oldest` reads `ORDER BY id`, so one chunk
+/// is 256 consecutive frames from across the whole outage, and a bus quiet
+/// enough to average a frame every 17 seconds reaches 71.6 minutes inside one
+/// batch. That is the recovery path, which is the one that has to work.
+fn batch_len(frames: &[Arc<Sample>]) -> usize {
+    let (mut lo, mut hi) = (wire::ts_us(&frames[0]), wire::ts_us(&frames[0]));
+    let mut bytes = proto::BATCH_HEADER + wire::wire_len(&frames[0]);
     for (n, f) in frames
         .iter()
         .enumerate()
         .take(proto::MAX_BATCH_RECORDS)
         .skip(1)
     {
-        let (next_lo, next_hi) = (lo.min(ts_us(f)), hi.max(ts_us(f)));
-        if next_hi - next_lo > u64::from(u32::MAX) {
+        let (next_lo, next_hi) = (lo.min(wire::ts_us(f)), hi.max(wire::ts_us(f)));
+        bytes += wire::wire_len(f);
+        if next_hi - next_lo > u64::from(u32::MAX) || bytes > proto::MAX_BODY {
             return n;
         }
         (lo, hi) = (next_lo, next_hi);
@@ -109,23 +109,16 @@ impl ForwardSink {
     ///
     /// `chunk` is at most [`proto::MAX_BATCH_RECORDS`]; a gateway NACKs a batch
     /// that claims more, rather than accepting a truncated one.
-    async fn send_chunk(&mut self, chunk: &[Arc<CanSample>]) -> SinkResult {
+    async fn send_chunk(&mut self, chunk: &[Arc<Sample>]) -> SinkResult {
         // Absolute timestamps: every record is a delta from the base, and the
         // base is the chunk's *earliest* frame rather than its first. Two bus
         // readers feed one queue, so the head is not always the oldest frame.
         // The `[forward]` client does not set `TIME_RELATIVE`, so the gateway
         // takes these at face value rather than re-basing them on its own clock.
-        let base_ts_us = chunk.iter().map(ts_us).min().unwrap_or(0);
+        let base_ts_us = chunk.iter().map(|f| wire::ts_us(f)).min().unwrap_or(0);
         self.records.clear();
         for f in chunk {
-            proto::encode_record_into(
-                &mut self.records,
-                base_ts_us,
-                ts_us(f),
-                proto::record_id_flags(f.arb_id, f.extended, f.is_fd, f.dir == Direction::Tx),
-                f.bus.0,
-                &f.data,
-            );
+            wire::encode_into(&mut self.records, base_ts_us, f);
         }
         self.seq = self.seq.wrapping_add(1);
         let seq = self.seq;
@@ -219,8 +212,19 @@ impl BatchSink for ForwardSink {
         let ack =
             proto::parse_hello_ack(&frame.body).map_err(|e| SinkError(format!("forward: {e}")))?;
         if ack.status != proto::HELLO_OK {
+            // The version case names both sides: it is the one an operator
+            // meets mid-upgrade, and "status=2" does not say which end.
+            let why = if ack.status == proto::HELLO_BAD_VERSION {
+                format!(
+                    ": this server speaks protocol v{}, the gateway v{}; upgrade the gateway first",
+                    proto::PROTO_VERSION,
+                    ack.accepted_version
+                )
+            } else {
+                String::new()
+            };
             return Err(SinkError(format!(
-                "forward: HELLO rejected (status={})",
+                "forward: HELLO rejected (status={}){why}",
                 ack.status
             )));
         }
@@ -239,7 +243,7 @@ impl BatchSink for ForwardSink {
         Ok(())
     }
 
-    async fn write_batch(&mut self, batch: &[Arc<CanSample>]) -> SinkResult {
+    async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> SinkResult {
         let mut rest = batch;
         while !rest.is_empty() {
             let (chunk, tail) = rest.split_at(batch_len(rest));
@@ -276,7 +280,7 @@ mod tests {
     use crate::settings::Batching;
     use std::path::PathBuf;
     use tokio::net::TcpListener;
-    use wiretap_model::SourceId;
+    use wiretap_model::{CanSample, Direction, ModbusSample, SourceId};
 
     /// What one connection to the fake gateway saw.
     #[derive(Debug, Default)]
@@ -383,8 +387,8 @@ mod tests {
         })
     }
 
-    fn sample(ts_us: i64, arb_id: u32) -> Arc<CanSample> {
-        Arc::new(CanSample {
+    fn can(ts_us: i64, arb_id: u32) -> CanSample {
+        CanSample {
             ts_us,
             arb_id,
             extended: false,
@@ -392,7 +396,23 @@ mod tests {
             data: vec![1, 2, 3],
             bus: SourceId(0),
             dir: Direction::Rx,
-        })
+        }
+    }
+
+    fn sample(ts_us: i64, arb_id: u32) -> Arc<Sample> {
+        Arc::new(Sample::Can(can(ts_us, arb_id)))
+    }
+
+    /// The longest message the wire allows.
+    fn modbus(ts_us: i64) -> Arc<Sample> {
+        Arc::new(Sample::Modbus(ModbusSample {
+            ts_us,
+            bus: SourceId(2),
+            unit: 1,
+            func: 0x04,
+            crc_valid: true,
+            raw: vec![0x01; proto::RecordKind::Modbus.max_payload()],
+        }))
     }
 
     #[tokio::test]
@@ -420,6 +440,22 @@ mod tests {
         let _ = gateway.await;
     }
 
+    /// The refusal an un-upgraded gateway gives has to say which end is
+    /// behind, because the operator reading it is mid-upgrade.
+    #[tokio::test]
+    async fn a_version_rejection_names_both_versions() {
+        let (port, gateway) = fake_gateway(Script {
+            hello_status: proto::HELLO_BAD_VERSION,
+            ..Script::default()
+        })
+        .await;
+        let err = sink(port, "").connect().await.unwrap_err().to_string();
+        assert!(err.contains("status=2"), "{err}");
+        assert!(err.contains("speaks protocol v2"), "{err}");
+        assert!(err.contains("upgrade the gateway first"), "{err}");
+        let _ = gateway.await;
+    }
+
     /// The frames the gateway receives have to be the frames that were
     /// captured — timestamps rebuilt from the base, flags in the ingest
     /// protocol's positions rather than GVRET's.
@@ -432,13 +468,23 @@ mod tests {
 
         let frames = vec![
             sample(BASE, 0x123),
-            Arc::new(CanSample {
+            Arc::new(Sample::Can(CanSample {
                 extended: true,
                 is_fd: true,
                 dir: Direction::Tx,
                 bus: SourceId(3),
-                ..(*sample(BASE + 1_500, 0x456)).clone()
-            }),
+                ..can(BASE + 1_500, 0x456)
+            })),
+            Arc::new(Sample::Modbus(ModbusSample {
+                ts_us: BASE + 2_000,
+                bus: SourceId(2),
+                unit: 1,
+                func: 0x20,
+                crc_valid: true,
+                raw: vec![
+                    0x01, 0x20, 0x01, 0xC8, 0x03, 0x11, 0x1A, 0x00, 0x02, 0xE4, 0xCA,
+                ],
+            })),
         ];
         s.write_batch(&frames).await.expect("acknowledged");
         s.close().await;
@@ -450,6 +496,7 @@ mod tests {
         assert_eq!(batch.records[0].delta_us, 0);
         assert_eq!(batch.records[0].payload, [1, 2, 3]);
         assert_eq!(batch.records[0].id_flags, 0x123, "no flags set");
+        assert_eq!(batch.records[0].kind, proto::RecordKind::Can);
 
         let second = &batch.records[1];
         assert_eq!(second.delta_us, 1_500, "measured from the batch's base");
@@ -458,6 +505,20 @@ mod tests {
         assert!(second.id_flags & proto::ID_EXTENDED != 0);
         assert!(second.id_flags & proto::ID_FD != 0);
         assert!(second.id_flags & proto::ID_TX != 0, "a transmitted frame");
+
+        // A Modbus message goes as kind 1 with the CRC verdict in its flags
+        // and the unit and function code packed into the id word.
+        let third = &batch.records[2];
+        assert_eq!(third.kind, proto::RecordKind::Modbus);
+        assert_eq!(third.flags, proto::FLAG_CRC_VALID);
+        assert_eq!(third.bus, 2);
+        assert_eq!(proto::modbus_unit_func(third.id_flags), (1, 0x20));
+        assert_eq!(third.id_flags & proto::ID_TX, 0, "a tap transmits nothing");
+        assert_eq!(
+            third.payload,
+            [0x01, 0x20, 0x01, 0xC8, 0x03, 0x11, 0x1A, 0x00, 0x02, 0xE4, 0xCA],
+            "the whole message, CRC included"
+        );
     }
 
     /// Two bus readers feed one queue, so a batch's first frame is not always
@@ -480,13 +541,13 @@ mod tests {
         let (port, gateway) = fake_gateway(Script::default()).await;
         let mut s = sink(port, "");
         s.connect().await.unwrap();
-        let frames: Vec<Arc<CanSample>> = queued
+        let frames: Vec<Arc<Sample>> = queued
             .iter()
             .map(|(t, bus)| {
-                Arc::new(CanSample {
+                Arc::new(Sample::Can(CanSample {
                     bus: *bus,
-                    ..(*sample(*t, 0x123)).clone()
-                })
+                    ..can(*t, 0x123)
+                }))
             })
             .collect();
         s.write_batch(&frames).await.expect("acknowledged");
@@ -518,7 +579,7 @@ mod tests {
         let (port, gateway) = fake_gateway(Script::default()).await;
         let mut s = sink(port, "");
         s.connect().await.unwrap();
-        let frames: Vec<Arc<CanSample>> = ts.iter().map(|t| sample(*t, 0x123)).collect();
+        let frames: Vec<Arc<Sample>> = ts.iter().map(|t| sample(*t, 0x123)).collect();
         s.write_batch(&frames).await.expect("acknowledged");
         s.close().await;
 
@@ -544,7 +605,7 @@ mod tests {
         let mut s = sink(port, "");
         s.connect().await.unwrap();
 
-        let frames: Vec<Arc<CanSample>> = (0..600).map(|i| sample(i64::from(i), i)).collect();
+        let frames: Vec<Arc<Sample>> = (0..600).map(|i| sample(i64::from(i), i)).collect();
         s.write_batch(&frames).await.unwrap();
         s.close().await;
 
@@ -555,6 +616,39 @@ mod tests {
         assert_eq!(seen.batches[1].base_ts_us, 256);
         let seqs: Vec<u32> = seen.batches.iter().map(|b| b.seq).collect();
         assert_eq!(seqs, [1, 2, 3]);
+    }
+
+    /// The frame's length field is a `u16`, and 256 full-size Modbus messages
+    /// overrun it. A cache drain after an outage on a line full of long read
+    /// responses is exactly that batch, so it has to split by bytes as well as
+    /// by count — and every message has to arrive whole.
+    #[tokio::test]
+    async fn a_batch_of_full_size_modbus_messages_is_split_by_bytes() {
+        let (port, gateway) = fake_gateway(Script::default()).await;
+        let mut s = sink(port, "");
+        s.connect().await.unwrap();
+
+        let frames: Vec<Arc<Sample>> = (0..300).map(modbus).collect();
+        s.write_batch(&frames)
+            .await
+            .expect("every chunk fitted its frame");
+        s.close().await;
+
+        let seen = gateway.await.unwrap();
+        let per_batch = proto::MAX_BODY.saturating_sub(proto::BATCH_HEADER)
+            / proto::record_wire_len(proto::RecordKind::Modbus, 256);
+        assert!(
+            per_batch < proto::MAX_BATCH_RECORDS,
+            "the byte bound is the tighter one"
+        );
+        let sizes: Vec<usize> = seen.batches.iter().map(|b| b.records.len()).collect();
+        assert_eq!(sizes[0], per_batch);
+        assert_eq!(sizes.iter().sum::<usize>(), 300);
+        assert!(seen
+            .batches
+            .iter()
+            .flat_map(|b| &b.records)
+            .all(|r| r.payload.len() == proto::RecordKind::Modbus.max_payload()));
     }
 
     /// A gateway that says it cannot keep up must be believed: failing here is

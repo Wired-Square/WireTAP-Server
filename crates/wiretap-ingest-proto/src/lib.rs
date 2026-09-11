@@ -11,8 +11,13 @@
 //!
 //! Message types are grouped by who sends them, not by name: a client sends
 //! `HELLO`, `BATCH` and `PING`; a server answers `HELLO_ACK`, `ACK` and `PONG`.
+//!
+//! Version 2 changed the `BATCH` record in place so it can carry more than a
+//! CAN frame: each record names its [`RecordKind`]. The v1 layout is still
+//! parsed, through [`batch_parser`], so a gateway can take a daemon that has
+//! not been upgraded yet.
 
-pub const PROTO_VERSION: u8 = 1;
+pub const PROTO_VERSION: u8 = 2;
 pub const MAGIC: &[u8; 4] = b"WTAP";
 
 pub const MSG_HELLO: u8 = 0x01;
@@ -40,16 +45,73 @@ pub const ACK_OVERLOADED: u8 = 3;
 // two repositories and the framing below is not.
 pub use wiretap_protocol::ingest::{ID_ARB_MASK, ID_EXTENDED, ID_FD, ID_TX};
 
-/// The largest payload a record can carry: one CAN FD frame. The length is a
-/// single byte on the wire, but 64 is the real limit and both ends enforce it.
-pub const MAX_PAYLOAD: usize = 64;
+/// A Modbus record's flag byte: bit 0 is whether the message's CRC matched.
+/// A CAN record's flags are all in its `id_flags` word and its byte is 0.
+pub const FLAG_CRC_VALID: u8 = 0x01;
+
+/// What a record's `id_flags` and payload mean. The discriminant is the wire
+/// byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RecordKind {
+    /// `id_flags` is the arbitration id with [`ID_EXTENDED`], [`ID_FD`] and
+    /// [`ID_TX`] packed in; the payload is one frame's data.
+    Can = 0,
+    /// `id_flags` is [`modbus_id`] — unit and function code — with [`ID_TX`]
+    /// meaning this server sent it; the payload is the whole message, CRC
+    /// included.
+    Modbus = 1,
+}
+
+impl RecordKind {
+    pub fn from_wire(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(RecordKind::Can),
+            1 => Some(RecordKind::Modbus),
+            _ => None,
+        }
+    }
+
+    /// The largest payload the kind can carry: one CAN FD frame, or the
+    /// longest Modbus RTU message. Both ends enforce it.
+    pub fn max_payload(self) -> usize {
+        match self {
+            RecordKind::Can => 64,
+            RecordKind::Modbus => 256,
+        }
+    }
+}
 
 /// Records per `BATCH`. A client must chunk at this, because it is the default
 /// a gateway checks against — over it, the batch is NACKed as malformed rather
 /// than accepted and truncated.
 pub const MAX_BATCH_RECORDS: usize = 256;
 
+/// The largest body a message can carry: the length field is a `u16` that
+/// counts the type byte too. A batch of full-size Modbus records reaches it
+/// well before [`MAX_BATCH_RECORDS`], so a client has to chunk by bytes as
+/// well — see [`record_wire_len`]. Past it the length prefix wraps and the
+/// far end loses framing.
+pub const MAX_BODY: usize = u16::MAX as usize - 1;
+
+/// `seq u32 | base_ts_us u64 | count u16`.
+pub const BATCH_HEADER: usize = 14;
+
+/// `delta_us u32 | kind u8 | flags u8 | bus u8 | len u16 | id_flags u32`.
+pub const RECORD_HEADER: usize = 13;
+
+/// How many bytes of a `BATCH` body one record takes, once its payload is
+/// clamped as [`encode_record_into`] clamps it.
+pub fn record_wire_len(kind: RecordKind, payload_len: usize) -> usize {
+    RECORD_HEADER + payload_len.min(kind.max_payload())
+}
+
 pub fn encode_message(mtype: u8, body: &[u8]) -> Vec<u8> {
+    debug_assert!(
+        body.len() <= MAX_BODY,
+        "body of {} bytes overflows the length field",
+        body.len()
+    );
     let len = (1 + body.len()) as u16;
     let mut out = Vec::with_capacity(2 + 1 + body.len() + 4);
     out.extend_from_slice(&len.to_le_bytes());
@@ -150,8 +212,10 @@ pub fn encode_ack(seq: u32, status: u8, queue_pct: u8) -> Vec<u8> {
 #[derive(Debug)]
 pub struct Record {
     pub delta_us: u32,
-    pub id_flags: u32,
+    pub kind: RecordKind,
+    pub flags: u8,
     pub bus: u8,
+    pub id_flags: u32,
     pub payload: Vec<u8>,
 }
 
@@ -162,10 +226,64 @@ pub struct Batch {
     pub records: Vec<Record>,
 }
 
-/// Parse a BATCH body. `Err(seq)` = malformed but seq was readable (NACK it);
-/// outer Option None = too short to even carry a seq (drop client).
-pub fn parse_batch(body: &[u8], max_frames: usize) -> Option<Result<Batch, u32>> {
-    if body.len() < 14 {
+/// A BATCH parser: `Err(seq)` = malformed but seq was readable (NACK it);
+/// outer `None` = too short to even carry a seq (drop client).
+pub type BatchParser = fn(&[u8], usize) -> Option<Result<Batch, u32>>;
+
+/// The parser for the version a client announced, or `None` for a version
+/// nothing here speaks — which is the whole of a server's version check.
+///
+/// Version 1 is accepted for one release, so a capture daemon that has not
+/// been upgraded keeps flowing through a gateway that has. Remove its arm
+/// with the next bump.
+pub fn batch_parser(version: u8) -> Option<BatchParser> {
+    match version {
+        PROTO_VERSION => Some(parse_batch),
+        1 => Some(parse_batch_v1),
+        _ => None,
+    }
+}
+
+/// A record header as read from the body: everything but the payload, and
+/// how long the payload is.
+type RecordHeader = fn(&[u8]) -> Option<(Record, usize)>;
+
+fn v2_header(b: &[u8]) -> Option<(Record, usize)> {
+    let kind = RecordKind::from_wire(b[4])?;
+    let plen = u16::from_le_bytes(b[7..9].try_into().unwrap()) as usize;
+    let record = Record {
+        delta_us: u32::from_le_bytes(b[0..4].try_into().unwrap()),
+        kind,
+        flags: b[5],
+        bus: b[6],
+        id_flags: u32::from_le_bytes(b[9..13].try_into().unwrap()),
+        payload: Vec::new(),
+    };
+    Some((record, plen))
+}
+
+/// `delta_us u32 | id_flags u32 | bus u8 | len u8`: CAN only, so every record
+/// comes back as [`RecordKind::Can`] and a gateway handles both versions
+/// through one path.
+fn v1_header(b: &[u8]) -> Option<(Record, usize)> {
+    let record = Record {
+        delta_us: u32::from_le_bytes(b[0..4].try_into().unwrap()),
+        kind: RecordKind::Can,
+        flags: 0,
+        bus: b[8],
+        id_flags: u32::from_le_bytes(b[4..8].try_into().unwrap()),
+        payload: Vec::new(),
+    };
+    Some((record, b[9] as usize))
+}
+
+fn parse_records(
+    body: &[u8],
+    max_frames: usize,
+    header_len: usize,
+    header: RecordHeader,
+) -> Option<Result<Batch, u32>> {
+    if body.len() < BATCH_HEADER {
         return None;
     }
     let seq = u32::from_le_bytes(body[0..4].try_into().unwrap());
@@ -175,25 +293,17 @@ pub fn parse_batch(body: &[u8], max_frames: usize) -> Option<Result<Batch, u32>>
         return Some(Err(seq));
     }
     let mut records = Vec::with_capacity(count);
-    let mut off = 14;
+    let mut off = BATCH_HEADER;
     for _ in 0..count {
-        if body.len() < off + 10 {
+        let Some((mut record, plen)) = body.get(off..off + header_len).and_then(header) else {
+            return Some(Err(seq));
+        };
+        off += header_len;
+        if plen > record.kind.max_payload() || body.len() < off + plen {
             return Some(Err(seq));
         }
-        let delta_us = u32::from_le_bytes(body[off..off + 4].try_into().unwrap());
-        let id_flags = u32::from_le_bytes(body[off + 4..off + 8].try_into().unwrap());
-        let bus = body[off + 8];
-        let plen = body[off + 9] as usize;
-        off += 10;
-        if plen > MAX_PAYLOAD || body.len() < off + plen {
-            return Some(Err(seq));
-        }
-        records.push(Record {
-            delta_us,
-            id_flags,
-            bus,
-            payload: body[off..off + plen].to_vec(),
-        });
+        record.payload = body[off..off + plen].to_vec();
+        records.push(record);
         off += plen;
     }
     Some(Ok(Batch {
@@ -201,6 +311,16 @@ pub fn parse_batch(body: &[u8], max_frames: usize) -> Option<Result<Batch, u32>>
         base_ts_us,
         records,
     }))
+}
+
+/// Parse a BATCH body. See [`BatchParser`] for the contract.
+pub fn parse_batch(body: &[u8], max_frames: usize) -> Option<Result<Batch, u32>> {
+    parse_records(body, max_frames, RECORD_HEADER, v2_header)
+}
+
+/// Parse a version 1 BATCH body. See [`v1_header`].
+pub fn parse_batch_v1(body: &[u8], max_frames: usize) -> Option<Result<Batch, u32>> {
+    parse_records(body, max_frames, 10, v1_header)
 }
 
 // --- client side -----------------------------------------------------------
@@ -236,13 +356,9 @@ pub fn encode_hello(token: &[u8], database: &str, time_relative: bool) -> Vec<u8
 #[derive(Debug, PartialEq, Eq)]
 pub struct HelloAck {
     pub status: u8,
-    /// The highest version this gateway speaks.
-    ///
-    /// Both server implementations compare the announced version with strict
-    /// equality, so a client that bumped the byte it *sends* would lock itself
-    /// out of every un-upgraded gateway. This field is how a client discovers a
-    /// newer protocol instead: announce 1, read this back, and use the newer
-    /// message types only if it is high enough.
+    /// The version the gateway speaks. A client speaks one version and there
+    /// is no negotiation; this is reported so a refused client can say which
+    /// side is behind.
     pub accepted_version: u8,
     pub server_time_us: u64,
 }
@@ -258,7 +374,7 @@ pub fn parse_hello_ack(body: &[u8]) -> Result<HelloAck, String> {
     })
 }
 
-/// The id word a record carries: the arbitration id with its flags packed in.
+/// The id word a CAN record carries: the arbitration id with its flags packed in.
 ///
 /// Not the GVRET packing, which puts the extended bit at 31 — the same three
 /// facts, three different layouts, which is exactly why this is written once.
@@ -276,31 +392,58 @@ pub fn record_id_flags(arb_id: u32, extended: bool, is_fd: bool, transmitted: bo
     id
 }
 
-/// Append one record: `delta_us u32 | id_flags u32 | bus u8 | len u8 | payload`.
+/// The inverse of [`record_id_flags`]: `(arb_id, extended, is_fd, transmitted)`.
+pub fn record_id_fields(id_flags: u32) -> (u32, bool, bool, bool) {
+    (
+        id_flags & ID_ARB_MASK,
+        id_flags & ID_EXTENDED != 0,
+        id_flags & ID_FD != 0,
+        id_flags & ID_TX != 0,
+    )
+}
+
+/// The id word a Modbus record carries: `unit << 8 | func`, which is also the
+/// `id` the archive stores, so an inventory groups by conversation.
+pub fn modbus_id(unit: u8, func: u8) -> u32 {
+    (u32::from(unit) << 8) | u32::from(func)
+}
+
+/// The inverse of [`modbus_id`].
+pub fn modbus_unit_func(id_flags: u32) -> (u8, u8) {
+    ((id_flags >> 8) as u8, id_flags as u8)
+}
+
+/// Append one record: `delta_us u32 | kind u8 | flags u8 | bus u8 | len u16 |
+/// id_flags u32 | payload`.
 ///
 /// **The base must be the batch's earliest frame, and its span must fit a
 /// `u32` of microseconds.** Neither is checked by the wire format: a delta
 /// below the base saturates to zero and one above 71.6 minutes wraps, and both
 /// file the frame at a time it did not happen. Callers, not this function, are
 /// where those hold — see `ForwardSink::write_batch`.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_record_into(
     out: &mut Vec<u8>,
     base_ts_us: u64,
     ts_us: u64,
-    id_flags: u32,
+    kind: RecordKind,
+    flags: u8,
     bus: u8,
+    id_flags: u32,
     payload: &[u8],
 ) {
     debug_assert!(
         ts_us >= base_ts_us,
         "the base must be the batch's earliest frame: {ts_us} is before {base_ts_us}"
     );
-    let payload = &payload[..payload.len().min(MAX_PAYLOAD)];
-    out.reserve(10 + payload.len());
+    let payload = &payload[..payload.len().min(kind.max_payload())];
+    out.reserve(record_wire_len(kind, payload.len()));
     out.extend_from_slice(&(ts_us.saturating_sub(base_ts_us) as u32).to_le_bytes());
-    out.extend_from_slice(&id_flags.to_le_bytes());
+    out.push(kind as u8);
+    out.push(flags);
     out.push(bus);
-    out.push(payload.len() as u8);
+    out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    out.extend_from_slice(&id_flags.to_le_bytes());
     out.extend_from_slice(payload);
 }
 
@@ -310,7 +453,7 @@ pub fn encode_record_into(
 /// is how many went into it; they are separate because the caller is the only
 /// thing that knows both, and a record's length is not fixed.
 pub fn encode_batch(seq: u32, base_ts_us: u64, count: u16, records: &[u8]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(14 + records.len());
+    let mut body = Vec::with_capacity(BATCH_HEADER + records.len());
     body.extend_from_slice(&seq.to_le_bytes());
     body.extend_from_slice(&base_ts_us.to_le_bytes());
     body.extend_from_slice(&count.to_le_bytes());
@@ -350,6 +493,14 @@ mod tests {
         b.extend_from_slice(token);
         b.push(database.len() as u8);
         b.extend_from_slice(database.as_bytes());
+        b
+    }
+
+    fn batch_header(seq: u32, base_ts_us: u64, count: u16) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&seq.to_le_bytes());
+        b.extend_from_slice(&base_ts_us.to_le_bytes());
+        b.extend_from_slice(&count.to_le_bytes());
         b
     }
 
@@ -406,20 +557,20 @@ mod tests {
 
     #[test]
     fn batch_parse_and_limits() {
-        let mut body = Vec::new();
-        body.extend_from_slice(&7u32.to_le_bytes());
-        body.extend_from_slice(&1_000_000u64.to_le_bytes());
-        body.extend_from_slice(&2u16.to_le_bytes());
+        let mut body = batch_header(7, 1_000_000, 2);
         for (delta, id) in [(0u32, 0x123u32), (1000, 0x18FF50E5 | ID_EXTENDED)] {
             body.extend_from_slice(&delta.to_le_bytes());
-            body.extend_from_slice(&id.to_le_bytes());
+            body.push(0); // kind: CAN
+            body.push(0); // flags
             body.push(1); // bus
-            body.push(3); // len
+            body.extend_from_slice(&3u16.to_le_bytes());
+            body.extend_from_slice(&id.to_le_bytes());
             body.extend_from_slice(&[1, 2, 3]);
         }
         let batch = parse_batch(&body, 256).unwrap().unwrap();
         assert_eq!(batch.seq, 7);
         assert_eq!(batch.records.len(), 2);
+        assert_eq!(batch.records[1].kind, RecordKind::Can);
         assert_eq!(batch.records[1].id_flags & ID_ARB_MASK, 0x18FF50E5);
         assert!(batch.records[1].id_flags & ID_EXTENDED != 0);
 
@@ -427,6 +578,52 @@ mod tests {
         let mut over = body.clone();
         over[12..14].copy_from_slice(&5000u16.to_le_bytes());
         assert!(matches!(parse_batch(&over, 256), Some(Err(7))));
+    }
+
+    #[test]
+    fn an_unknown_kind_is_malformed_with_seq() {
+        let mut body = batch_header(9, 0, 1);
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.push(7); // no such kind
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(parse_batch(&body, 256), Some(Err(9))));
+    }
+
+    /// The old layout, as a v1 daemon still sends it, comes through the v1
+    /// parser as CAN records — which is what lets a gateway take both.
+    #[test]
+    fn a_v1_batch_parses_as_can_records() {
+        let mut body = batch_header(3, 500, 1);
+        body.extend_from_slice(&42u32.to_le_bytes());
+        body.extend_from_slice(&(0x7E0 | ID_TX).to_le_bytes());
+        body.push(2); // bus
+        body.push(2); // len
+        body.extend_from_slice(&[0xAA, 0xBB]);
+        let batch = parse_batch_v1(&body, 256).unwrap().unwrap();
+        let r = &batch.records[0];
+        assert_eq!((batch.seq, r.delta_us, r.bus), (3, 42, 2));
+        assert_eq!((r.kind, r.flags), (RecordKind::Can, 0));
+        assert_eq!(r.id_flags, 0x7E0 | ID_TX);
+        assert_eq!(r.payload, [0xAA, 0xBB]);
+
+        // A v1 body is not a v2 body: the v2 parser must not accept it.
+        assert!(matches!(parse_batch(&body, 256), Some(Err(3))));
+
+        // And a malformed v1 body is refused the same way a v2 one is.
+        assert!(matches!(
+            parse_batch_v1(&body[..body.len() - 1], 256),
+            Some(Err(3))
+        ));
+
+        // The version map hands out the right parser, and no parser at all
+        // for a version nothing speaks.
+        let v1 = batch_parser(1).expect("v1 is still accepted");
+        assert!(v1(&body, 256).unwrap().is_ok());
+        let v2 = batch_parser(PROTO_VERSION).expect("the current version");
+        assert!(matches!(v2(&body, 256), Some(Err(3))));
+        assert!(batch_parser(99).is_none());
     }
 
     // --- the two halves, against each other ------------------------------
@@ -465,20 +662,36 @@ mod tests {
             &mut records,
             BASE,
             BASE,
-            record_id_flags(0x123, false, false, false),
+            RecordKind::Can,
             0,
+            0,
+            record_id_flags(0x123, false, false, false),
             &[1, 2, 3],
         );
         encode_record_into(
             &mut records,
             BASE,
             BASE + 1000,
-            record_id_flags(0x18FF_50E5, true, true, true),
+            RecordKind::Can,
+            0,
             1,
+            record_id_flags(0x18FF_50E5, true, true, true),
             &[0xAA; 64],
         );
+        encode_record_into(
+            &mut records,
+            BASE,
+            BASE + 2000,
+            RecordKind::Modbus,
+            FLAG_CRC_VALID,
+            2,
+            modbus_id(1, 0x20),
+            &[
+                0x01, 0x20, 0x01, 0xC8, 0x03, 0x11, 0x1A, 0x00, 0x02, 0xE4, 0xCA,
+            ],
+        );
 
-        let mut buf = encode_batch(7, BASE, 2, &records);
+        let mut buf = encode_batch(7, BASE, 3, &records);
         let frame = take_frame(&mut buf).unwrap().unwrap();
         assert_eq!(frame.mtype, MSG_BATCH);
         assert!(frame.crc_ok);
@@ -493,11 +706,27 @@ mod tests {
         let second = &batch.records[1];
         assert_eq!(second.delta_us, 1000);
         assert_eq!(second.bus, 1);
+        assert_eq!(second.kind, RecordKind::Can);
         assert_eq!(second.id_flags & ID_ARB_MASK, 0x18FF_50E5);
         assert!(second.id_flags & ID_EXTENDED != 0);
         assert!(second.id_flags & ID_FD != 0);
         assert!(second.id_flags & ID_TX != 0, "a frame this server sent");
-        assert_eq!(second.payload.len(), MAX_PAYLOAD);
+        assert_eq!(second.payload.len(), RecordKind::Can.max_payload());
+
+        let third = &batch.records[2];
+        assert_eq!(
+            (third.kind, third.flags, third.bus),
+            (RecordKind::Modbus, FLAG_CRC_VALID, 2)
+        );
+        assert_eq!(modbus_unit_func(third.id_flags), (1, 0x20));
+        assert_eq!(third.id_flags & ID_TX, 0, "a tap sends nothing");
+        assert_eq!(third.payload.len(), 11);
+
+        assert_eq!(
+            record_id_fields(second.id_flags),
+            (0x18FF_50E5, true, true, true),
+            "the inverse of record_id_flags"
+        );
     }
 
     /// The saturation this asserts against is what a field defect looked like:
@@ -509,17 +738,70 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "the base must be the batch's earliest frame")]
     fn a_record_before_the_base_is_a_caller_error() {
-        encode_record_into(&mut Vec::new(), 5_000, 1_000, 0x123, 0, &[]);
+        encode_record_into(
+            &mut Vec::new(),
+            5_000,
+            1_000,
+            RecordKind::Can,
+            0,
+            0,
+            0x123,
+            &[],
+        );
     }
 
-    /// A payload longer than a CAN FD frame is truncated, not refused: the
-    /// length byte could not describe it and the server would NACK the batch.
+    /// A payload longer than its kind allows is truncated on encode, not
+    /// refused — and refused on parse, so the two ends agree on the cap.
     #[test]
-    fn an_oversized_payload_is_clamped_to_one_fd_frame() {
+    fn a_modbus_payload_may_be_256_bytes_and_a_can_one_may_not() {
         let mut records = Vec::new();
-        encode_record_into(&mut records, 0, 0, 0x1, 0, &[0xFF; 200]);
-        assert_eq!(records[9] as usize, MAX_PAYLOAD);
-        assert_eq!(records.len(), 10 + MAX_PAYLOAD);
+        encode_record_into(&mut records, 0, 0, RecordKind::Can, 0, 0, 0x1, &[0xFF; 200]);
+        assert_eq!(records.len(), record_wire_len(RecordKind::Can, 200));
+        assert_eq!(u16::from_le_bytes([records[7], records[8]]), 64);
+
+        let mut records = Vec::new();
+        encode_record_into(
+            &mut records,
+            0,
+            0,
+            RecordKind::Modbus,
+            0,
+            0,
+            0x1,
+            &[0xFF; 300],
+        );
+        assert_eq!(records.len(), record_wire_len(RecordKind::Modbus, 300));
+        let batch = parse_batch(&[batch_header(1, 0, 1), records].concat(), 256)
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.records[0].payload.len(), 256);
+
+        // The same 256 bytes claimed by a CAN record are over its cap.
+        let mut body = batch_header(4, 0, 1);
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&[0, 0, 0]);
+        body.extend_from_slice(&256u16.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&[0; 256]);
+        assert!(matches!(parse_batch(&body, 256), Some(Err(4))));
+    }
+
+    /// The arithmetic `ForwardSink::batch_len` has to respect: a batch of
+    /// full-size Modbus records does not fit the length field, and a batch of
+    /// full-size CAN records does — which is why the byte bound was never hit
+    /// before there was a second kind.
+    #[test]
+    fn a_full_modbus_batch_would_not_fit_a_frame() {
+        let modbus = BATCH_HEADER + MAX_BATCH_RECORDS * record_wire_len(RecordKind::Modbus, 256);
+        let can = BATCH_HEADER + MAX_BATCH_RECORDS * record_wire_len(RecordKind::Can, 64);
+        assert!(
+            modbus > MAX_BODY,
+            "{modbus} fits, so the byte bound is dead code"
+        );
+        assert!(
+            can <= MAX_BODY,
+            "{can} does not fit, so CAN batching would have to split"
+        );
     }
 
     #[test]

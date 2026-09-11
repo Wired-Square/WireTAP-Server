@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::error;
 use tracing::{info, warn};
 #[cfg(target_os = "linux")]
-use wiretap_model::{CanSample, Direction};
+use wiretap_model::{CanSample, Direction, Sample};
 
 use crate::archive;
 #[cfg(target_os = "linux")]
@@ -331,13 +331,13 @@ fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {
 async fn read_loop(
     reader: Arc<CanReader>,
     iface: String,
-    frames: broadcast::Sender<Arc<CanSample>>,
+    frames: broadcast::Sender<Arc<Sample>>,
     archive: Option<archive::Archive>,
 ) {
     loop {
         match reader.recv().await {
             Ok(sample) => {
-                let sample = Arc::new(sample);
+                let sample = Arc::new(Sample::Can(sample));
                 // Two consumers, two disciplines: the archive's queue is
                 // bounded and spills to disk, while a send error on the
                 // broadcast only means no GVRET client is watching.
@@ -364,7 +364,7 @@ async fn read_loop(
 /// into `less` — and the reader's job is to not miss frames. This way a slow
 /// console drops its own lines and says how many, instead of stalling a runtime
 /// worker and everything queued behind it.
-async fn echo_loop(mut frames: broadcast::Receiver<Arc<CanSample>>, colour: bool) {
+async fn echo_loop(mut frames: broadcast::Receiver<Arc<Sample>>, colour: bool) {
     use broadcast::error::RecvError;
 
     let t0 = Instant::now();
@@ -372,8 +372,11 @@ async fn echo_loop(mut frames: broadcast::Receiver<Arc<CanSample>>, colour: bool
     loop {
         match frames.recv().await {
             Ok(sample) => {
+                let Sample::Can(sample) = &*sample else {
+                    continue;
+                };
                 line.clear();
-                console::format_line(&mut line, &sample, colour, t0.elapsed().as_micros() as u64);
+                console::format_line(&mut line, sample, colour, t0.elapsed().as_micros() as u64);
                 // Ignored, as the Python ignored it: a console that has gone
                 // away must not stop a capture. `Stdout` is line buffered and
                 // the line ends in a newline, so this is already flushed.
@@ -413,7 +416,7 @@ async fn transmit_loop(
         // frame is timestamped here rather than on the wire — nothing reads a
         // frame back from a socket it wrote it to.
         if let Some(archive) = &archive {
-            archive.enqueue(Arc::new(CanSample {
+            archive.enqueue(Arc::new(Sample::Can(CanSample {
                 ts_us: system_time_to_us(SystemTime::now()),
                 arb_id: t.arb_id,
                 extended: t.extended,
@@ -421,7 +424,7 @@ async fn transmit_loop(
                 data: t.data,
                 bus: t.bus,
                 dir: Direction::Tx,
-            }));
+            })));
         }
     }
 }

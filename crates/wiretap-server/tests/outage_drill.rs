@@ -22,7 +22,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use wiretap_model::{CanSample, Direction, Secret, SourceId};
+use wiretap_model::{CanSample, Direction, Sample, Secret, SourceId};
 use wiretap_server::archive;
 use wiretap_server::cache::{FrameCache, SqliteCache};
 use wiretap_server::settings::{Batching, Forward};
@@ -36,8 +36,8 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-fn sample(seq: u32, base_us: i64) -> Arc<CanSample> {
-    Arc::new(CanSample {
+fn sample(seq: u32, base_us: i64) -> Arc<Sample> {
+    Arc::new(Sample::Can(CanSample {
         // A microsecond apart, so the archive's ordering is checkable and no
         // two rows collide on a timestamp.
         ts_us: base_us + i64::from(seq),
@@ -49,7 +49,7 @@ fn sample(seq: u32, base_us: i64) -> Arc<CanSample> {
         data: seq.to_le_bytes().to_vec(),
         bus: SourceId(0),
         dir: Direction::Rx,
-    })
+    }))
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -20,7 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
-use wiretap_model::{CanSample, SourceId};
+use wiretap_model::{CanSample, Sample, SourceId};
 use wiretap_protocol::gvret::{
     encode_canbus_params, encode_dev_info, encode_frame_into, encode_keepalive, encode_num_buses,
     encode_timebase, ClientCommand, Decoder, MAX_FRAME_BYTES,
@@ -58,7 +58,7 @@ pub struct BusInfo {
 pub struct Server {
     listener: TcpListener,
     buses: Arc<BusInfo>,
-    frames: broadcast::Sender<Arc<CanSample>>,
+    frames: broadcast::Sender<Arc<Sample>>,
     transmits: mpsc::Sender<Transmit>,
 }
 
@@ -70,7 +70,7 @@ impl Server {
         host: &str,
         port: u16,
         buses: BusInfo,
-        frames: broadcast::Sender<Arc<CanSample>>,
+        frames: broadcast::Sender<Arc<Sample>>,
         transmits: mpsc::Sender<Transmit>,
     ) -> io::Result<Self> {
         Ok(Self {
@@ -128,7 +128,7 @@ struct Client {
 }
 
 impl Client {
-    async fn serve(self, mut stream: TcpStream, mut frames: broadcast::Receiver<Arc<CanSample>>) {
+    async fn serve(self, mut stream: TcpStream, mut frames: broadcast::Receiver<Arc<Sample>>) {
         let mut decoder = Decoder::new();
         let mut rx_buf = [0u8; READ_BUF];
         let mut out = Vec::with_capacity(WRITE_COALESCE + MAX_FRAME_BYTES);
@@ -219,16 +219,18 @@ fn elapsed_us(t0: Instant) -> u32 {
 /// left in the channel, so a client that connects and never handshakes does not
 /// accumulate a lag it would then be blamed for.
 async fn drain(
-    frames: &mut broadcast::Receiver<Arc<CanSample>>,
+    frames: &mut broadcast::Receiver<Arc<Sample>>,
     out: &mut Vec<u8>,
     t0: Instant,
     binary: bool,
 ) -> Option<u64> {
     use broadcast::error::{RecvError, TryRecvError};
 
+    // GVRET can carry CAN and nothing else; a serial tap's messages on the
+    // same broadcast are taken and dropped, as a pre-handshake frame is.
     let mut lagged = 0;
     match frames.recv().await {
-        Ok(s) if binary => encode(out, &s, t0),
+        Ok(s) if binary => encode_can(out, &s, t0),
         // Taken and dropped: this client has not handshaken yet.
         Ok(_) => {}
         Err(RecvError::Lagged(n)) => lagged += n,
@@ -236,7 +238,7 @@ async fn drain(
     }
     while out.len() < WRITE_COALESCE {
         match frames.try_recv() {
-            Ok(s) if binary => encode(out, &s, t0),
+            Ok(s) if binary => encode_can(out, &s, t0),
             Ok(_) => {}
             Err(TryRecvError::Lagged(n)) => lagged += n,
             // A close is reported by the next `recv`; this call still owes the
@@ -245,6 +247,12 @@ async fn drain(
         }
     }
     Some(lagged)
+}
+
+fn encode_can(out: &mut Vec<u8>, s: &Sample, t0: Instant) {
+    if let Sample::Can(c) = s {
+        encode(out, c, t0);
+    }
 }
 
 fn encode(out: &mut Vec<u8>, s: &CanSample, t0: Instant) {
@@ -265,8 +273,8 @@ mod tests {
     use wiretap_model::Direction;
     use wiretap_protocol::gvret::SYNC;
 
-    fn sample(bus: u8, arb_id: u32) -> Arc<CanSample> {
-        Arc::new(CanSample {
+    fn sample(bus: u8, arb_id: u32) -> Arc<Sample> {
+        Arc::new(Sample::Can(CanSample {
             ts_us: 0,
             arb_id,
             extended: false,
@@ -274,14 +282,14 @@ mod tests {
             data: vec![0xAA, 0xBB],
             bus: SourceId(bus),
             dir: Direction::Rx,
-        })
+        }))
     }
 
     /// A running server, plus the ends of the two channels a test drives it
     /// through.
     struct Harness {
         addr: SocketAddr,
-        frames: broadcast::Sender<Arc<CanSample>>,
+        frames: broadcast::Sender<Arc<Sample>>,
         transmits: mpsc::Receiver<Transmit>,
     }
 
@@ -459,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_capture_ends_the_connection() {
-        let (frames, mut rx) = broadcast::channel::<Arc<CanSample>>(2);
+        let (frames, mut rx) = broadcast::channel::<Arc<Sample>>(2);
         drop(frames);
         assert_eq!(
             drain(&mut rx, &mut Vec::new(), Instant::now(), true).await,

@@ -25,7 +25,7 @@ use std::time::SystemTime;
 
 use tokio::sync::broadcast;
 use tracing::warn;
-use wiretap_model::{CanSample, Direction, SourceId};
+use wiretap_model::{CanSample, Direction, Sample, SourceId};
 use wiretap_protocol::testpattern::{capability, is_test_pattern_frame, Reply, Responder};
 
 use crate::archive;
@@ -67,7 +67,7 @@ pub async fn responder_loop<S: ReplySink>(
     sink: S,
     bus: SourceId,
     can_fd: bool,
-    mut frames: broadcast::Receiver<Arc<CanSample>>,
+    mut frames: broadcast::Receiver<Arc<Sample>>,
     archive: Option<archive::Archive>,
 ) {
     // Extended is unconditional: `transmit` builds either id width and nothing
@@ -85,6 +85,9 @@ pub async fn responder_loop<S: ReplySink>(
                 continue;
             }
             Err(broadcast::error::RecvError::Closed) => return,
+        };
+        let Sample::Can(sample) = &*sample else {
+            continue;
         };
         if sample.bus != bus || !is_test_pattern_frame(sample.arb_id) {
             continue;
@@ -109,7 +112,7 @@ pub async fn responder_loop<S: ReplySink>(
             // what a broken responder looks like. Nothing reads a frame back
             // from the socket it wrote it to, so this is the only record.
             if let Some(archive) = &archive {
-                archive.enqueue(Arc::new(CanSample {
+                archive.enqueue(Arc::new(Sample::Can(CanSample {
                     ts_us: system_time_to_us(SystemTime::now()),
                     arb_id: reply.arb_id,
                     extended: reply.extended,
@@ -117,7 +120,7 @@ pub async fn responder_loop<S: ReplySink>(
                     data: reply.data,
                     bus,
                     dir: Direction::Tx,
-                }));
+                })));
             }
         }
     }
@@ -151,8 +154,8 @@ mod tests {
     const BUS: SourceId = SourceId(0);
     const RUN: u8 = 3;
 
-    fn sample(arb_id: u32, is_fd: bool, data: Vec<u8>) -> Arc<CanSample> {
-        Arc::new(CanSample {
+    fn sample(arb_id: u32, is_fd: bool, data: Vec<u8>) -> Arc<Sample> {
+        Arc::new(Sample::Can(CanSample {
             ts_us: 1_700_000_000_000_000,
             arb_id,
             extended: false,
@@ -160,16 +163,16 @@ mod tests {
             data,
             bus: BUS,
             dir: Direction::Rx,
-        })
+        }))
     }
 
-    fn framed(msg: Message) -> Arc<CanSample> {
+    fn framed(msg: Message) -> Arc<Sample> {
         let data = encode(msg, Flags::new(0, RUN)).to_vec();
         sample(msg.arb_id(), false, data)
     }
 
     /// Drive the loop over a fixed script and return what it transmitted.
-    async fn run_with(can_fd: bool, script: Vec<Arc<CanSample>>) -> Vec<Reply> {
+    async fn run_with(can_fd: bool, script: Vec<Arc<Sample>>) -> Vec<Reply> {
         let (frames, rx) = broadcast::channel(64);
         for s in script {
             frames.send(s).unwrap();
@@ -181,7 +184,7 @@ mod tests {
         sink.taken()
     }
 
-    async fn run(script: Vec<Arc<CanSample>>) -> Vec<Reply> {
+    async fn run(script: Vec<Arc<Sample>>) -> Vec<Reply> {
         run_with(true, script).await
     }
 
@@ -270,9 +273,11 @@ mod tests {
     /// though every responder subscribes to the same broadcast.
     #[tokio::test]
     async fn another_bus_is_not_answered() {
-        let mut s = (*framed(Message::Control(Command::Hello))).clone();
+        let Sample::Can(mut s) = (*framed(Message::Control(Command::Hello))).clone() else {
+            unreachable!()
+        };
         s.bus = SourceId(1);
-        let replies = run(vec![Arc::new(s)]).await;
+        let replies = run(vec![Arc::new(Sample::Can(s))]).await;
         assert!(replies.is_empty());
     }
 }

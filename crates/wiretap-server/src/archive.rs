@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
-use wiretap_model::CanSample;
+use wiretap_model::Sample;
 
 use crate::cache::{CacheError, FrameCache, SqliteCache};
 use crate::forward::ForwardSink;
@@ -85,7 +85,7 @@ pub trait BatchSink: Send {
     /// rather than being acknowledged and lost.
     fn write_batch(
         &mut self,
-        batch: &[Arc<CanSample>],
+        batch: &[Arc<Sample>],
     ) -> impl std::future::Future<Output = SinkResult> + Send;
 
     /// Called when there is nothing to write, to keep an idle connection from
@@ -128,7 +128,7 @@ fn get(field: &AtomicU64) -> u64 {
 /// reported once and not once per reader.
 #[derive(Clone)]
 pub struct Archive {
-    tx: mpsc::Sender<Arc<CanSample>>,
+    tx: mpsc::Sender<Arc<Sample>>,
     counters: Arc<Counters>,
     /// Which of the 80/95/100 buckets the queue was last reported in; -1 for
     /// "below 80", so a recovery is reported once rather than every frame.
@@ -141,7 +141,7 @@ impl Archive {
     ///
     /// Never blocks and never awaits: this is called from the capture path,
     /// where waiting on the archive is what the whole design exists to avoid.
-    pub fn enqueue(&self, sample: Arc<CanSample>) {
+    pub fn enqueue(&self, sample: Arc<Sample>) {
         match self.tx.try_send(sample) {
             Ok(()) => {
                 add(&self.counters.enqueued, 1);
@@ -235,7 +235,7 @@ impl Archive {
 
 /// The worker: batches from the queue, writes to the sink, spills to the cache.
 pub struct Batcher<S: BatchSink, C: FrameCache> {
-    rx: mpsc::Receiver<Arc<CanSample>>,
+    rx: mpsc::Receiver<Arc<Sample>>,
     /// Set once, by [`Running::shutdown`]. Level-triggered on purpose: a
     /// signal that arrives while this is mid-write or mid-backoff is still
     /// there when it next looks, which an edge-triggered notify would lose.
@@ -510,8 +510,8 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
 
     /// Collect up to `batch_size` frames, waiting `flush_interval` for the
     /// first and taking whatever else is already there.
-    async fn next_batch(&mut self) -> Vec<Arc<CanSample>> {
-        let mut batch: Vec<Arc<CanSample>> = Vec::with_capacity(self.batch_size);
+    async fn next_batch(&mut self) -> Vec<Arc<Sample>> {
+        let mut batch: Vec<Arc<Sample>> = Vec::with_capacity(self.batch_size);
         let first = {
             // Disjoint field borrows, so the queue and the stop signal can be
             // raced against each other.
@@ -592,7 +592,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
             info!("draining {pending} cached frames to database");
         }
 
-        let frames: Vec<Arc<CanSample>> = cached.iter().map(|c| Arc::clone(&c.sample)).collect();
+        let frames: Vec<Arc<Sample>> = cached.iter().map(|c| Arc::clone(&c.sample)).collect();
         self.sink.write_batch(&frames).await?;
         if let Err(e) = blocking(|| self.cache.remove(&cached)) {
             // The frames are safe; the cache now holds duplicates of them.
@@ -611,7 +611,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
 
     /// The sink failed: say so once, put `batch` somewhere durable, and empty
     /// the queue behind it so the capture keeps its own path clear.
-    async fn fail(&mut self, e: SinkError, batch: Vec<Arc<CanSample>>) {
+    async fn fail(&mut self, e: SinkError, batch: Vec<Arc<Sample>>) {
         error!("write error: {e}");
         self.sink.close().await;
         self.connected = false;
@@ -627,7 +627,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
 
     /// Store a batch on disk, or count it dropped and say why. Returns how
     /// many were stored.
-    fn cache_batch(&mut self, batch: &[Arc<CanSample>]) -> usize {
+    fn cache_batch(&mut self, batch: &[Arc<Sample>]) -> usize {
         // One region, because `is_full` stats three files and `append` writes:
         // handing the runtime two separate blocking hints for one logical
         // operation buys nothing.
@@ -660,7 +660,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     }
 
     /// Everything waiting in the queue, taken at once. Bounded by the queue.
-    fn take_queued(&mut self) -> Vec<Arc<CanSample>> {
+    fn take_queued(&mut self) -> Vec<Arc<Sample>> {
         let mut queued = Vec::new();
         while let Ok(s) = self.rx.try_recv() {
             queued.push(s);
@@ -758,10 +758,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
     use std::sync::Mutex;
-    use wiretap_model::{Direction, SourceId};
+    use wiretap_model::{CanSample, Direction, SourceId};
 
-    fn sample(arb_id: u32) -> Arc<CanSample> {
-        Arc::new(CanSample {
+    fn sample(arb_id: u32) -> Arc<Sample> {
+        Arc::new(Sample::Can(CanSample {
             ts_us: i64::from(arb_id),
             arb_id,
             extended: false,
@@ -769,7 +769,15 @@ mod tests {
             data: vec![1],
             bus: SourceId(0),
             dir: Direction::Rx,
-        })
+        }))
+    }
+
+    /// The id `sample` gave a frame, read back.
+    fn id(s: &Sample) -> u32 {
+        match s {
+            Sample::Can(c) => c.arb_id,
+            Sample::Modbus(m) => wiretap_ingest_proto::modbus_id(m.unit, m.func),
+        }
     }
 
     /// Small and quick: a batch that fills fast, a queue that is easy to fill,
@@ -822,13 +830,13 @@ mod tests {
             self.0.check()
         }
 
-        async fn write_batch(&mut self, batch: &[Arc<CanSample>]) -> SinkResult {
+        async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> SinkResult {
             self.0.check()?;
             self.0
                 .frames
                 .lock()
                 .unwrap()
-                .extend(batch.iter().map(|f| f.arb_id));
+                .extend(batch.iter().map(|f| id(f)));
             Ok(())
         }
 
@@ -862,7 +870,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|c| c.sample.arb_id)
+                .map(|c| id(&c.sample))
                 .collect()
         }
 
@@ -881,7 +889,7 @@ mod tests {
     struct FakeCache(CacheState);
 
     impl FrameCache for FakeCache {
-        fn append(&mut self, frames: &[Arc<CanSample>]) -> crate::cache::Result<usize> {
+        fn append(&mut self, frames: &[Arc<Sample>]) -> crate::cache::Result<usize> {
             self.0.check()?;
             let mut held = self.0.frames.lock().unwrap();
             for f in frames {

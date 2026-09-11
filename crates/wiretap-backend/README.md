@@ -260,5 +260,6 @@ python3 ../../tools/test_ingest_client.py --host localhost --port 9323 \
 ./smoke_test.sh http://localhost:8423 "$WIRETAP_ADMIN_KEY" vehicle_test
 ```
 
-Expect **34 passed, 0 failed**. The third argument is the seeded database and defaults to
-`vehicle_test`.
+Expect **40 passed, 0 failed**. The third argument is the seeded database and defaults to
+`vehicle_test`; the fourth is the ingest listener, `127.0.0.1:9323` by default, which the
+Modbus checks write through — it is the only path that carries a Modbus row.
