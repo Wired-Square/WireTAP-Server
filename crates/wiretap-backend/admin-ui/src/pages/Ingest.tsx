@@ -31,7 +31,6 @@ export default function Ingest() {
             <th>Database</th>
             <th>Frames</th>
             <th>Batches</th>
-            <th>Queue</th>
             <th>Connected</th>
           </tr>
         </thead>
@@ -43,13 +42,12 @@ export default function Ingest() {
               <td className="mono">{s.database}</td>
               <td>{s.frames.toLocaleString()}</td>
               <td>{s.batches.toLocaleString()}</td>
-              <td>{s.queue_pct}%</td>
               <td className="muted">{new Date(s.connected_at).toLocaleTimeString()}</td>
             </tr>
           ))}
           {sessions.length === 0 && (
             <tr>
-              <td colSpan={7} className="muted">
+              <td colSpan={6} className="muted">
                 No ingest devices connected. (Refreshes every 2 s.)
               </td>
             </tr>

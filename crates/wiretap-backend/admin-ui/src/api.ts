@@ -131,7 +131,6 @@ export interface IngestSession {
   database: string;
   frames: number;
   batches: number;
-  queue_pct: number;
   connected_at: string;
 }
 
