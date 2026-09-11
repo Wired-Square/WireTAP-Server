@@ -2487,7 +2487,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap-backend"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64",
@@ -2513,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap-build-id"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "wiretap-catalog"
@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap-ingest-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crc32fast",
  "wiretap-protocol",
@@ -2560,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2574,7 +2574,7 @@ source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.16.4#bb5
 
 [[package]]
 name = "wiretap-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "nix",
