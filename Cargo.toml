@@ -41,10 +41,10 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 # codec's golden-byte tests failed. Those tests do not run in this repo's CI,
 # and that guarantee is why they do not need to. It holds only for tags cut
 # that way; a hand-cut tag has no gate behind it.
-wiretap-protocol = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.4" }
+wiretap-protocol = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.5" }
 # The Modbus RTU framer, for the serial tap. Same tag as above: the workspace
 # releases as one, and two tags of one repository would be two checkouts.
-wiretap-catalog = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.4" }
+wiretap-catalog = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.5" }
 
 # --- CLI ---
 clap = { version = "4", default-features = false }

@@ -124,6 +124,18 @@ pub struct SerialSettings {
     pub framing: Framing,
 }
 
+impl SerialSettings {
+    /// How long `bytes` take on the wire, in microseconds: start, data,
+    /// parity and stop bits at the baud rate.
+    pub fn wire_time_us(&self, bytes: u64) -> i64 {
+        let bits = 1
+            + u64::from(self.data_bits)
+            + u64::from(self.parity != Parity::None)
+            + u64::from(self.stop_bits);
+        (bytes * bits * 1_000_000 / u64::from(self.baud)) as i64
+    }
+}
+
 impl fmt::Display for SerialSettings {
     /// `9600 8N1 modbus-rtu`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1844,6 +1856,21 @@ mod tests {
             (serial.interface.as_str(), line.baud),
             ("/dev/ttyUSB0", 9600)
         );
+    }
+
+    #[test]
+    fn wire_time_counts_start_parity_and_stop_bits() {
+        let line = |parity, stop_bits| SerialSettings {
+            baud: 9600,
+            data_bits: 8,
+            parity,
+            stop_bits,
+            framing: Framing::ModbusRtu,
+        };
+        assert_eq!(line(Parity::None, 1).wire_time_us(1), 1_041, "10 bits");
+        assert_eq!(line(Parity::None, 1).wire_time_us(96), 100_000);
+        assert_eq!(line(Parity::Even, 2).wire_time_us(1), 1_250, "12 bits");
+        assert_eq!(line(Parity::None, 1).wire_time_us(0), 0);
     }
 
     #[test]

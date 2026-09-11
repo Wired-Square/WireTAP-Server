@@ -236,7 +236,7 @@ async fn start_devices(settings: &Settings, archives: &Archives) -> Result<(), R
             d.interface.clone(),
             s.clone(),
             line,
-            RtuTap::new(d.bus),
+            RtuTap::new(d.bus, s),
             archives.handle(&d.database),
             frames.clone(),
         ));
@@ -463,8 +463,8 @@ async fn tap_loop(
                     break;
                 }
                 Ok(n) => {
-                    // One time for the read: a message is stamped as its last
-                    // byte arrives, and every message a read completed shares it.
+                    // One time per read; the tap stamps each message by the
+                    // read its last byte arrived in, which need not be this one.
                     let ts_us = system_time_to_us(SystemTime::now());
                     for m in tap.push(&buf[..n], ts_us) {
                         publish(Sample::Modbus(m), archive.as_ref(), &frames);

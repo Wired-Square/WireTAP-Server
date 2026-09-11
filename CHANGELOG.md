@@ -5,6 +5,18 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Changed
+
+- **A serial tap stamps every message when its last byte arrived**, including
+  the ones released together when the framer first syncs after an open or a
+  reopen — those used to share the clock of the read that released them, up
+  to 256 bytes of line time late. The tap remembers the clock of each read
+  and stamps by the read that delivered the message's last byte, less the
+  wire time of the bytes after it in that read; stamps never go backwards.
+  Built on `wiretap-lib-rs` v0.16.5, whose framer now reports where each
+  message ended and takes `frame_any_function()` in place of a declaration of
+  all 256 codes.
+
 ## [0.1.1] — 2026-09-12
 
 The capture server taps a Modbus RTU line as well as CAN, and the gateway
