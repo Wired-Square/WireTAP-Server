@@ -133,7 +133,10 @@ Notes:
 - The container's Postgres runs as uid 999 and chowns its data dir on first
   init, so a fresh empty dataset is fine.
 - **Upgrading**: change the `image:` tag in the app's YAML (Apps → the app →
-  Edit) and Update. Take a snapshot first if the release migrates the schema —
+  Edit) and Update. Update recreates the whole app — the database container
+  restarts too, about 20 s — so capture daemons cache through it; pulling the
+  image first (`docker pull`) keeps that window to the recreate alone. Take a
+  snapshot first if the release migrates the schema —
   the CHANGELOG says when one does, and a large archive can be refusing traffic
   for minutes while it rebuilds its rollup. Capture daemons cache to disk
   through that and drain when it clears. Data on the dataset persists across
