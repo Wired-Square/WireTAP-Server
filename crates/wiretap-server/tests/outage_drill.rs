@@ -80,7 +80,7 @@ async fn frames_survive_a_gateway_outage() {
             legacy_cache_path: None,
         },
     };
-    let running = archive::start(&forward, 2.0).expect("an archive");
+    let running = archive::start(&forward, 2.0, false).expect("an archive");
     let counters = running.frames.counters();
     let base_us = system_time_to_us(SystemTime::now());
 

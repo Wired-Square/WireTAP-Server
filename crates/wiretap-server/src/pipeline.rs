@@ -29,7 +29,9 @@ use tracing::{info, warn};
 #[cfg(target_os = "linux")]
 use wiretap_model::{CanSample, Direction, Sample};
 
-use crate::archive;
+#[cfg(target_os = "linux")]
+use crate::archive::Archive;
+use crate::archive::Archives;
 #[cfg(target_os = "linux")]
 use crate::console;
 #[cfg(target_os = "linux")]
@@ -37,8 +39,10 @@ use crate::gvret;
 use crate::ingest;
 use crate::settings::Settings;
 #[cfg(target_os = "linux")]
+use crate::settings::{Device, Mode};
+#[cfg(target_os = "linux")]
 use crate::source::{
-    bus_count, bus_for_index, index_for_bus,
+    bus_count, index_for_bus,
     socketcan::{detect_bitrates, CanReader},
     system_time_to_us, Transmit,
 };
@@ -79,12 +83,14 @@ pub enum RunError {
         path: String,
         err: String,
     },
-    /// No CAN interfaces and no ingest listener.
+    /// No devices and no ingest listener.
     NothingToDo,
     /// The ingest listener is on, but there is nowhere for pushed frames to go.
     IngestNeedsForward,
     /// CAN interfaces were configured on a platform that has no SocketCAN.
     NoCanCapture,
+    /// A serial device was configured; the tap is not in this build yet.
+    NoSerialCapture,
 }
 
 impl std::fmt::Display for RunError {
@@ -119,7 +125,7 @@ impl std::fmt::Display for RunError {
             }
             Self::NothingToDo => write!(
                 f,
-                "no CAN interfaces configured and the ingest listener is disabled; nothing to do"
+                "no devices configured and the ingest listener is disabled; nothing to do"
             ),
             // The Python refused the same combination, naming its own sink.
             // Accepting frames from a device and having nowhere to put them
@@ -135,44 +141,48 @@ impl std::fmt::Display for RunError {
                 "the ingest listener is enabled but [forward] is not: frames pushed by a \
                  device would be acknowledged and then dropped. Configure a gateway."
             ),
+            Self::NoSerialCapture => write!(f, "serial capture is not built yet"),
         }
     }
 }
 
 /// Start whatever this configuration asks for, and run until a signal.
 pub async fn run(settings: &Settings) -> Result<(), RunError> {
-    if settings.ifaces.is_empty() && settings.ingest.is_none() {
+    if settings.devices.is_empty() && settings.ingest.is_none() {
         return Err(RunError::NothingToDo);
     }
+    if settings.devices.iter().any(|d| !d.is_can()) {
+        return Err(RunError::NoSerialCapture);
+    }
 
-    // The archive first: both a CAN reader and a pushing device feed it, and
-    // neither should start before there is somewhere for frames to go. Its
+    // The archives first: every device and every pushing device feeds one,
+    // and none should start before there is somewhere for frames to go. Their
     // absence is warned about at startup and is a legitimate deployment — a
     // GVRET bridge that archives nothing.
-    let archive = settings
-        .forward
-        .as_ref()
-        .map(|forward| {
-            archive::start(forward, settings.stats_interval).map_err(|e| RunError::Cache {
-                path: forward.batching.cache_path.display().to_string(),
-                err: e.to_string(),
-            })
-        })
-        .transpose()?;
+    let archives = match &settings.forward {
+        Some(forward) => {
+            Archives::start_all(forward, &settings.databases(), settings.stats_interval).map_err(
+                |(path, err)| RunError::Cache {
+                    path: path.display().to_string(),
+                    err: err.to_string(),
+                },
+            )?
+        }
+        None => Archives::none(),
+    };
 
-    if settings.ifaces.is_empty() {
-        // An ingest-only deployment, as the Python had: no local CAN hardware,
-        // so no sockets and no GVRET listener either.
+    if settings.can_devices().is_empty() {
+        // No local CAN hardware, so no sockets and no GVRET listener either.
         info!("No CAN interfaces configured; running ingest-only");
     } else {
-        start_capture(settings, archive.as_ref().map(|a| a.frames.clone())).await?;
+        start_capture(settings, &archives).await?;
     }
 
     if let Some(ingest) = &settings.ingest {
-        let Some(running) = &archive else {
+        let Some(archive) = archives.handle(settings.default_database()) else {
             return Err(RunError::IngestNeedsForward);
         };
-        let server = ingest::Server::bind(ingest, running.frames.clone())
+        let server = ingest::Server::bind(ingest, archive)
             .await
             .map_err(|err| RunError::Bind {
                 addr: format!("{}:{}", ingest.host, ingest.port),
@@ -184,13 +194,20 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
     shutdown().await;
     info!("Shutting down");
 
-    // Dropping the producer is what tells the batcher to flush, so this has to
-    // outlive the tasks that hold clones of it — which the runtime drops when
-    // this returns. `TimeoutStopSec` in the unit is what gives the flush room.
-    if let Some(archive) = archive {
-        let _ = archive.shutdown().await;
-    }
+    // Closing the queues is what tells the batchers to flush, so this has to
+    // outlive the tasks that hold clones of the handles — which the runtime
+    // drops when this returns. `TimeoutStopSec` in the unit is what gives the
+    // flush room.
+    archives.shutdown().await;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+/// A CAN device with its socket open and its archive found.
+struct Opened {
+    device: Device,
+    reader: Arc<CanReader>,
+    archive: Option<Archive>,
 }
 
 #[cfg(target_os = "linux")]
@@ -199,29 +216,25 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
 /// Sockets first, then the listener, then the banner — the order the Python
 /// used, so a permission problem is reported before anything claims to be
 /// listening.
-async fn start_capture(
-    settings: &Settings,
-    archive: Option<archive::Archive>,
-) -> Result<(), RunError> {
-    let mut readers = Vec::with_capacity(settings.ifaces.len());
-    let mut buses = Vec::with_capacity(settings.ifaces.len());
-    let mut rates = Vec::with_capacity(settings.ifaces.len());
-    for (index, iface) in settings.ifaces.iter().enumerate() {
-        let bus = bus_for_index(index, settings.bus_offset).ok_or_else(|| RunError::OpenCan {
-            iface: iface.clone(),
-            err: io::Error::new(io::ErrorKind::InvalidInput, "bus number past 255"),
-        })?;
+async fn start_capture(settings: &Settings, archives: &Archives) -> Result<(), RunError> {
+    let mut opened = Vec::new();
+    let mut rates = Vec::new();
+    for d in settings.can_devices() {
         let reader =
-            CanReader::open(iface, bus, settings.default_dir, settings.can_fd).map_err(|err| {
+            CanReader::open(&d.interface, d.bus, settings.default_dir, d.fd()).map_err(|err| {
                 RunError::OpenCan {
-                    iface: iface.clone(),
+                    iface: d.interface.clone(),
                     err,
                 }
             })?;
-        readers.push(Arc::new(reader));
-        buses.push(bus);
-        rates.push(detect_bitrates(iface));
+        rates.push(detect_bitrates(&d.interface));
+        opened.push(Opened {
+            device: d.clone(),
+            reader: Arc::new(reader),
+            archive: archives.handle(&d.database),
+        });
     }
+    let any_fd = settings.any_fd();
 
     let (frames, _) = broadcast::channel(FRAME_BACKLOG);
     let (transmits, transmit_queue) = mpsc::channel(TRANSMIT_QUEUE);
@@ -229,7 +242,7 @@ async fn start_capture(
         &settings.host,
         settings.port,
         gvret::BusInfo {
-            count: bus_count(readers.len(), settings.bus_offset),
+            count: bus_count(opened.len(), settings.bus_offset),
             speeds: rates.iter().map(|r| r.nominal).collect(),
         },
         frames.clone(),
@@ -245,13 +258,11 @@ async fn start_capture(
         "Listening on {}:{}  mode={}  ifaces={}  rates={}{}",
         settings.host,
         settings.port,
-        if settings.can_fd { "GVRET+FD" } else { "GVRET" },
+        if any_fd { "GVRET+FD" } else { "GVRET" },
         join(
-            settings
-                .ifaces
+            opened
                 .iter()
-                .zip(&buses)
-                .map(|(n, b)| format!("{n}[{}]", b.0))
+                .map(|o| format!("{}[{}]", o.device.interface, o.device.bus.0))
         ),
         join(rates.iter().map(|r| r.nominal)),
         if rates.iter().any(|r| r.data != 0) {
@@ -261,8 +272,13 @@ async fn start_capture(
         },
     );
 
-    for (reader, iface) in readers.iter().cloned().zip(settings.ifaces.clone()) {
-        tokio::spawn(read_loop(reader, iface, frames.clone(), archive.clone()));
+    for o in &opened {
+        tokio::spawn(read_loop(
+            o.reader.clone(),
+            o.device.interface.clone(),
+            frames.clone(),
+            o.archive.clone(),
+        ));
     }
     if settings.echo_console {
         tokio::spawn(echo_loop(frames.subscribe(), settings.colour));
@@ -272,8 +288,14 @@ async fn start_capture(
         // A name that matched nothing means an operator believes a bus is armed
         // that is not, and finds out from a validation run that fails for no
         // visible reason.
-        for name in tp.ifaces.iter().filter(|n| !settings.ifaces.contains(n)) {
-            warn!("Test Pattern: no interface named {name} is being captured");
+        for name in &tp.ifaces {
+            match opened.iter().find(|o| &o.device.interface == name) {
+                None => warn!("Test Pattern: no interface named {name} is being captured"),
+                Some(o) if o.device.mode == Mode::Passive => {
+                    warn!("Test Pattern: {name} is passive, so it is not armed")
+                }
+                Some(_) => {}
+            }
         }
         if armed.is_empty() {
             // Saying ARMED here, with an empty list, would be the loudest line
@@ -285,28 +307,26 @@ async fn start_capture(
             // was armed by accident should say so in the journal's first screen.
             warn!(
                 "Test Pattern responder ARMED on {} — this transmits on the bus",
-                join(armed.iter().map(|&i| &settings.ifaces[i]))
+                join(armed.iter().map(|&i| &opened[i].device.interface))
             );
-            if !settings.can_fd {
-                warn!("Test Pattern: --can-fd is off, so only the classic sweep can be answered");
+            if !any_fd {
+                warn!(
+                    "Test Pattern: no device has fd on, so only the classic sweep can be answered"
+                );
             }
         }
         for &i in &armed {
+            let o = &opened[i];
             tokio::spawn(testpattern::responder_loop(
-                readers[i].clone(),
-                buses[i],
-                settings.can_fd,
+                o.reader.clone(),
+                o.device.bus,
+                o.device.fd(),
                 frames.subscribe(),
-                archive.clone(),
+                o.archive.clone(),
             ));
         }
     }
-    tokio::spawn(transmit_loop(
-        readers,
-        settings.bus_offset,
-        transmit_queue,
-        archive,
-    ));
+    tokio::spawn(transmit_loop(opened, settings.bus_offset, transmit_queue));
     tokio::spawn(listener.run());
     Ok(())
 }
@@ -314,10 +334,7 @@ async fn start_capture(
 /// Without SocketCAN there is nothing to capture from, but the rest of the
 /// server still runs — which is what an ingest-only deployment is.
 #[cfg(not(target_os = "linux"))]
-async fn start_capture(
-    _settings: &Settings,
-    _archive: Option<archive::Archive>,
-) -> Result<(), RunError> {
+async fn start_capture(_settings: &Settings, _archives: &Archives) -> Result<(), RunError> {
     Err(RunError::NoCanCapture)
 }
 
@@ -332,7 +349,7 @@ async fn read_loop(
     reader: Arc<CanReader>,
     iface: String,
     frames: broadcast::Sender<Arc<Sample>>,
-    archive: Option<archive::Archive>,
+    archive: Option<Archive>,
 ) {
     loop {
         match reader.recv().await {
@@ -390,21 +407,26 @@ async fn echo_loop(mut frames: broadcast::Receiver<Arc<Sample>>, colour: bool) {
 
 #[cfg(target_os = "linux")]
 /// Put what GVRET clients ask for onto the bus they named.
-async fn transmit_loop(
-    readers: Vec<Arc<CanReader>>,
-    bus_offset: u8,
-    mut queue: mpsc::Receiver<Transmit>,
-    archive: Option<archive::Archive>,
-) {
+async fn transmit_loop(opened: Vec<Opened>, bus_offset: u8, mut queue: mpsc::Receiver<Transmit>) {
     while let Some(t) = queue.recv().await {
         // A bus this server does not have is dropped in silence, as the Python
         // dropped it: a client is free to address a device with more buses.
-        let Some(index) = index_for_bus(t.bus, bus_offset, readers.len()) else {
+        let Some(o) = index_for_bus(t.bus, bus_offset, opened.len()).map(|i| &opened[i]) else {
             continue;
         };
+        // Passive is a promise the operator made about the bus; a client
+        // asking otherwise is told, once per attempt, and refused.
+        if o.device.mode == Mode::Passive {
+            warn!(
+                "transmit on bus {} refused: {} is passive",
+                t.bus.0, o.device.interface
+            );
+            continue;
+        }
         // Classic: a GVRET `F1 00` carries no FD flag, so a client cannot ask
         // for one. The Test Pattern responder owns the FD path.
-        if let Err(e) = readers[index]
+        if let Err(e) = o
+            .reader
             .transmit(t.arb_id, t.extended, false, &t.data)
             .await
         {
@@ -415,7 +437,7 @@ async fn transmit_loop(
         // from the traffic it was answering. The Python did the same, and the
         // frame is timestamped here rather than on the wire — nothing reads a
         // frame back from a socket it wrote it to.
-        if let Some(archive) = &archive {
+        if let Some(archive) = &o.archive {
             archive.enqueue(Arc::new(Sample::Can(CanSample {
                 ts_us: system_time_to_us(SystemTime::now()),
                 arb_id: t.arb_id,

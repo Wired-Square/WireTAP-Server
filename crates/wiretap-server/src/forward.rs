@@ -234,11 +234,7 @@ impl BatchSink for ForwardSink {
             "connected (forward -> {}:{} db={})",
             self.host,
             self.port,
-            if self.database.is_empty() {
-                "<default>"
-            } else {
-                &self.database
-            }
+            Forward::label_of(&self.database)
         );
         Ok(())
     }

@@ -24,7 +24,12 @@
 //! the Python counted off the queue rather than out of the cache and so printed
 //! after a write that had failed. They carry the same words and a truthful
 //! number.
+//!
+//! A server feeding more than one database runs one of these per database,
+//! and then every line here carries a ` db=<name>` tail so they can be told
+//! apart. With one pipeline the tail is empty and the lines are the Python's.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -130,6 +135,8 @@ fn get(field: &AtomicU64) -> u64 {
 pub struct Archive {
     tx: mpsc::Sender<Arc<Sample>>,
     counters: Arc<Counters>,
+    /// The ` db=<name>` tail on every log line, or nothing.
+    tag: Arc<str>,
     /// Which of the 80/95/100 buckets the queue was last reported in; -1 for
     /// "below 80", so a recovery is reported once rather than every frame.
     last_bucket: Arc<AtomicI64>,
@@ -200,10 +207,11 @@ impl Archive {
         if self.last_bucket.swap(bucket, Ordering::Relaxed) == bucket {
             return;
         }
+        let tag = &self.tag;
         if bucket == -1 {
-            info!("queue recovered: size={size} cap={cap}");
+            info!("queue recovered: size={size} cap={cap}{tag}");
         } else {
-            warn!("queue high water mark: {bucket}% (size={size} cap={cap})");
+            warn!("queue high water mark: {bucket}% (size={size} cap={cap}){tag}");
         }
     }
 
@@ -227,8 +235,9 @@ impl Archive {
 
         let (size, cap) = self.depth();
         error!(
-            "queue FULL: size={size} cap={cap} dropped_total={}",
-            get(&self.counters.dropped)
+            "queue FULL: size={size} cap={cap} dropped_total={}{}",
+            get(&self.counters.dropped),
+            self.tag
         );
     }
 }
@@ -254,6 +263,7 @@ pub struct Batcher<S: BatchSink, C: FrameCache> {
     /// Zero disables the periodic stats line.
     stats_interval: Duration,
     last_stats: Instant,
+    tag: Arc<str>,
 }
 
 /// A running archive: the handle a capture enqueues to, and the worker behind
@@ -286,15 +296,18 @@ impl Running {
 }
 
 /// Open the disk cache, adopt anything an older install left behind, and start
-/// forwarding to the gateway.
+/// forwarding to the gateway. `tagged` names the database on every log line,
+/// for a server running one of these per database.
 ///
 /// This is the archive the server actually ships, so it names [`ForwardSink`]
 /// and [`SqliteCache`] where the rest of the module is generic over both. It
 /// lives here rather than in `pipeline` because it touches no CAN socket, and
 /// `pipeline` is Linux-only — which had left the one assembly worth drilling
 /// unreachable from a test, and the drill rebuilding it by hand.
-pub fn start(forward: &Forward, stats_interval: f64) -> Result<Running, CacheError> {
+pub fn start(forward: &Forward, stats_interval: f64, tagged: bool) -> Result<Running, CacheError> {
     let batching = &forward.batching;
+    let label = tagged.then(|| forward.label());
+    let tag = label.map_or(String::new(), |l| format!(" db={l}"));
     let mut cache = SqliteCache::open(&batching.cache_path, batching.cache_max_mb)?;
 
     // Logged rather than fatal: the old cache is left where it is, to be tried
@@ -304,23 +317,71 @@ pub fn start(forward: &Forward, stats_interval: f64) -> Result<Running, CacheErr
         match cache.adopt(legacy) {
             Ok(0) => {}
             Ok(moved) => info!(
-                "adopted {moved} frames from the previous cache at {}",
+                "adopted {moved} frames from the previous cache at {}{tag}",
                 legacy.display()
             ),
             Err(e) => error!(
-                "cannot adopt the previous cache at {}: {e}; leaving it alone",
+                "cannot adopt the previous cache at {}: {e}; leaving it alone{tag}",
                 legacy.display()
             ),
         }
     }
 
-    let (frames, batcher, stop) =
-        channel(ForwardSink::new(forward), cache, batching, stats_interval);
+    let (frames, batcher, stop) = channel(
+        ForwardSink::new(forward),
+        cache,
+        batching,
+        stats_interval,
+        label,
+    );
     Ok(Running {
         frames,
         stop,
         worker: tokio::spawn(batcher.run()),
     })
+}
+
+/// The pipelines a server runs: one per database, each fed through the
+/// handle [`Archives::handle`] returns.
+pub struct Archives(Vec<(String, Running)>);
+
+impl Archives {
+    /// One [`start`] per database, tagged when there is more than one. An
+    /// error names the cache that could not be opened.
+    pub fn start_all(
+        forward: &Forward,
+        databases: &[String],
+        stats_interval: f64,
+    ) -> Result<Self, (PathBuf, CacheError)> {
+        let tagged = databases.len() > 1;
+        let mut running = Vec::with_capacity(databases.len());
+        for db in databases {
+            let fwd = forward.for_database(db);
+            let r = start(&fwd, stats_interval, tagged)
+                .map_err(|e| (fwd.batching.cache_path.clone(), e))?;
+            running.push((db.clone(), r));
+        }
+        Ok(Self(running))
+    }
+
+    pub fn none() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The handle for a database, or `None` when nothing archives.
+    pub fn handle(&self, database: &str) -> Option<Archive> {
+        self.0
+            .iter()
+            .find(|(db, _)| db == database)
+            .map(|(_, r)| r.frames.clone())
+    }
+
+    /// Stop every pipeline and wait for each to flush.
+    pub async fn shutdown(self) {
+        for (_, r) in self.0 {
+            let _ = r.shutdown().await;
+        }
+    }
 }
 
 /// Build a queue and the two ends that work it.
@@ -333,14 +394,17 @@ pub fn channel<S: BatchSink, C: FrameCache>(
     cache: C,
     batching: &crate::settings::Batching,
     stats_interval: f64,
+    label: Option<&str>,
 ) -> (Archive, Batcher<S, C>, watch::Sender<bool>) {
     let counters = Arc::new(Counters::default());
     let (tx, rx) = mpsc::channel(batching.queue_size.max(1));
     let (stop_tx, stop) = watch::channel(false);
+    let tag: Arc<str> = label.map_or_else(|| "".into(), |l| format!(" db={l}").into());
     (
         Archive {
             tx,
             counters: counters.clone(),
+            tag: Arc::clone(&tag),
             last_bucket: Arc::new(AtomicI64::new(-1)),
             last_full_log: Arc::new(Mutex::new(None)),
         },
@@ -358,6 +422,7 @@ pub fn channel<S: BatchSink, C: FrameCache>(
             draining_cache: false,
             stats_interval: Duration::from_secs_f64(stats_interval.max(0.0)),
             last_stats: Instant::now(),
+            tag,
         },
         stop_tx,
     )
@@ -382,7 +447,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                         backoff = BACKOFF_START;
                         if self.sink_down {
                             self.sink_down = false;
-                            info!("database connection restored");
+                            info!("database connection restored{}", self.tag);
                         }
                     }
                     Err(e) => {
@@ -470,7 +535,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                 get(&c.cache_recovered),
             ));
         }
-        info!("{line}");
+        info!("{line}{}", self.tag);
     }
 
     /// Nothing more will ever be enqueued, and nothing is waiting.
@@ -572,7 +637,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         let cached = match blocking(|| self.cache.oldest(batch_size)) {
             Ok(cached) => cached,
             Err(e) => {
-                error!("disk cache read error: {e}");
+                error!("disk cache read error: {e}{}", self.tag);
                 return Ok(false);
             }
         };
@@ -580,16 +645,16 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         if cached.is_empty() {
             if self.draining_cache {
                 self.draining_cache = false;
-                info!("cache drain complete, deleting cache file");
+                info!("cache drain complete, deleting cache file{}", self.tag);
                 if let Err(e) = blocking(|| self.cache.reset()) {
-                    error!("disk cache reset error: {e}");
+                    error!("disk cache reset error: {e}{}", self.tag);
                 }
             }
             return Ok(false);
         }
         if !self.draining_cache {
             self.draining_cache = true;
-            info!("draining {pending} cached frames to database");
+            info!("draining {pending} cached frames to database{}", self.tag);
         }
 
         let frames: Vec<Arc<Sample>> = cached.iter().map(|c| Arc::clone(&c.sample)).collect();
@@ -597,14 +662,15 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         if let Err(e) = blocking(|| self.cache.remove(&cached)) {
             // The frames are safe; the cache now holds duplicates of them.
             // Saying so is better than silently re-sending on the next pass.
-            error!("disk cache delete error: {e}");
+            error!("disk cache delete error: {e}{}", self.tag);
         }
         let n = frames.len() as u64;
         add(&self.counters.written, n);
         add(&self.counters.cache_recovered, n);
         debug!(
-            "batch committed, cache_recovered={}",
-            get(&self.counters.cache_recovered)
+            "batch committed, cache_recovered={}{}",
+            get(&self.counters.cache_recovered),
+            self.tag
         );
         Ok(true)
     }
@@ -612,12 +678,12 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// The sink failed: say so once, put `batch` somewhere durable, and empty
     /// the queue behind it so the capture keeps its own path clear.
     async fn fail(&mut self, e: SinkError, batch: Vec<Arc<Sample>>) {
-        error!("write error: {e}");
+        error!("write error: {e}{}", self.tag);
         self.sink.close().await;
         self.connected = false;
         if !self.sink_down {
             self.sink_down = true;
-            warn!("database unavailable, caching frames to disk");
+            warn!("database unavailable, caching frames to disk{}", self.tag);
         }
         if !batch.is_empty() {
             self.cache_batch(&batch);
@@ -652,7 +718,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                 // failing: the Python's cache-full line named it and its
                 // write-error line did not, and the write error is the one an
                 // operator meets when an upgrade leaves the cache unwritable.
-                error!("{why}, dropping {} frames", batch.len());
+                error!("{why}, dropping {} frames{}", batch.len(), self.tag);
                 add(&self.counters.dropped, batch.len() as u64);
                 0
             }
@@ -681,7 +747,10 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
             .map(|chunk| self.cache_batch(chunk))
             .sum();
         if cached > 0 {
-            info!("drained {cached} frames from queue to disk cache");
+            info!(
+                "drained {cached} frames from queue to disk cache{}",
+                self.tag
+            );
         }
     }
 
@@ -695,8 +764,9 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         let ratio = (size as f64) / (cap as f64);
         if ratio >= self.flush_threshold {
             warn!(
-                "queue at {}% ({size}/{cap}), flushing to disk cache",
-                (ratio * 100.0) as u32
+                "queue at {}% ({size}/{cap}), flushing to disk cache{}",
+                (ratio * 100.0) as u32,
+                self.tag
             );
             self.drain_queue_to_cache();
         }
@@ -705,24 +775,28 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// On the way out: everything still queued goes to the sink if it is
     /// there, and to disk if it is not.
     async fn shutdown_flush(&mut self) {
+        let tag = Arc::clone(&self.tag);
         let remaining = self.take_queued();
         if !remaining.is_empty() {
             let flushed = self.connected
                 && match self.sink.write_batch(&remaining).await {
                     Ok(()) => true,
                     Err(e) => {
-                        error!("shutdown flush to DB failed: {e}");
+                        error!("shutdown flush to DB failed: {e}{tag}");
                         false
                     }
                 };
             if flushed {
                 add(&self.counters.written, remaining.len() as u64);
-                info!("shutdown: flushed {} frames to database", remaining.len());
+                info!(
+                    "shutdown: flushed {} frames to database{tag}",
+                    remaining.len()
+                );
             } else {
                 // Same rule as the drain above.
                 let cached = self.cache_batch(&remaining);
                 if cached > 0 {
-                    info!("shutdown: flushed {cached} frames to disk cache");
+                    info!("shutdown: flushed {cached} frames to disk cache{tag}");
                 }
             }
         }
@@ -731,7 +805,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         let pending = self.cache.count().unwrap_or(0);
         let c = &self.counters;
         info!(
-            "closed: wrote={} cached={} recovered={} dropped={} pending_in_cache={pending}",
+            "closed: wrote={} cached={} recovered={} dropped={} pending_in_cache={pending}{tag}",
             get(&c.written),
             get(&c.cached),
             get(&c.cache_recovered),
@@ -959,6 +1033,7 @@ mod tests {
             FakeCache(cache.clone()),
             &batching(queue_size),
             0.0,
+            None,
         );
         Rig {
             archive,
@@ -1060,6 +1135,7 @@ mod tests {
             FakeCache(CacheState::default()),
             &batching(4),
             0.0,
+            None,
         );
         // No worker: nothing drains the queue, so it fills and stays full.
         drop(batcher);
@@ -1085,6 +1161,7 @@ mod tests {
             FakeCache(cache.clone()),
             &batching(4),
             0.0,
+            None,
         );
         let frames: Vec<_> = (0..4).map(sample).collect();
 
@@ -1113,8 +1190,13 @@ mod tests {
         let cache = CacheState::default();
         let mut cfg = batching(20);
         cfg.queue_flush_pct = 50;
-        let (archive, batcher, _stop) =
-            channel(FakeSink(sink.clone()), FakeCache(cache.clone()), &cfg, 0.0);
+        let (archive, batcher, _stop) = channel(
+            FakeSink(sink.clone()),
+            FakeCache(cache.clone()),
+            &cfg,
+            0.0,
+            None,
+        );
         let task = tokio::spawn(batcher.run());
 
         for i in 0..20 {

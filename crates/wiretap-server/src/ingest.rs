@@ -378,7 +378,7 @@ mod tests {
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (archive, batcher, stop) =
-            crate::archive::channel(RecordingSink(seen.clone()), NullCache, &batching, 0.0);
+            crate::archive::channel(RecordingSink(seen.clone()), NullCache, &batching, 0.0, None);
         tokio::spawn(batcher.run());
         // The stop signal is handed back rather than dropped here: dropping it
         // would close the queue immediately and these tests would observe an

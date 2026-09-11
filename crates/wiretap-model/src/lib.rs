@@ -18,3 +18,31 @@ pub mod secret;
 pub use config::{parse_ifaces, FileConfig};
 pub use sample::{CanSample, Direction, ModbusSample, Protocol, Sample, SourceId};
 pub use secret::Secret;
+
+/// The gateway's rule for a capture database name: a lowercase letter, then
+/// lowercase letters, digits or `_`, at most 63. Here so the capture server
+/// can refuse at `--check-config` what the gateway would refuse at HELLO.
+pub fn valid_db_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_db_name;
+
+    #[test]
+    fn db_name_validation() {
+        assert!(valid_db_name("wiretap"));
+        assert!(valid_db_name("vehicle_1"));
+        assert!(!valid_db_name(""));
+        assert!(!valid_db_name("1leading_digit"));
+        assert!(!valid_db_name("Has-Caps"));
+        assert!(!valid_db_name("name;drop table"));
+        assert!(!valid_db_name(&"x".repeat(64)));
+    }
+}

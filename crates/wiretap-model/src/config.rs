@@ -20,6 +20,8 @@ pub struct FileConfig {
     pub test_pattern: TestPatternSection,
     pub forward: ForwardSection,
     pub logging: LoggingSection,
+    /// `[[device]]` tables, in file order.
+    pub device: Vec<DeviceSection>,
     /// Top-level tables this schema does not define.
     #[serde(flatten)]
     pub unknown: toml::Table,
@@ -28,8 +30,9 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct ServerSection {
-    /// Comma-separated interface list, e.g. `can0,can1`. Empty means an
-    /// ingest-only deployment with no local CAN hardware.
+    /// Comma-separated CAN interface list, e.g. `can0,can1` — sugar for one
+    /// `[[device]]` of `kind = "can"` each, ahead of any written out. Empty
+    /// means no CAN capture.
     pub iface: Option<String>,
     pub host: Option<String>,
     pub port: Option<u16>,
@@ -119,6 +122,36 @@ pub struct ForwardSection {
     pub unknown: toml::Table,
 }
 
+/// One thing the server captures from: a CAN interface, or a serial line
+/// with a framing. `kind` and `interface` are always required; which of the
+/// rest apply — and which of those are required — depends on the kind, and
+/// the resolver says so.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct DeviceSection {
+    /// `can` | `serial`.
+    pub kind: Option<String>,
+    /// `can0`, or `/dev/ttyUSB0`.
+    pub interface: Option<String>,
+    /// `active` | `passive`; see the resolved `Mode`.
+    pub mode: Option<String>,
+    /// The gateway database this device's frames land in. Absent means
+    /// `[forward].database`.
+    pub database: Option<String>,
+    /// CAN: report FD frames. Absent means `[server].can_fd`.
+    pub fd: Option<bool>,
+    /// Serial: required.
+    pub baud: Option<u32>,
+    pub data_bits: Option<u8>,
+    /// `none` | `even` | `odd`.
+    pub parity: Option<String>,
+    pub stop_bits: Option<u8>,
+    /// Serial: `modbus-rtu`. Required.
+    pub framing: Option<String>,
+    #[serde(flatten)]
+    pub unknown: toml::Table,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct LoggingSection {
@@ -150,6 +183,9 @@ impl FileConfig {
         let mut out: Vec<String> = self.unknown.keys().cloned().collect();
         for (name, unknown) in sections {
             out.extend(unknown.keys().map(|k| format!("{name}.{k}")));
+        }
+        for (i, d) in self.device.iter().enumerate() {
+            out.extend(d.unknown.keys().map(|k| format!("device[{i}].{k}")));
         }
         out.sort();
         out
@@ -257,13 +293,16 @@ mod tests {
         // there swallows an operator's typo in silence.
         let text = "[server]\niface = \"can0\"\nnonsense = 1\n\
                     [ingest]\nnope = 1\n[test_pattern]\ncan_fd = true\n\
-                    [forward]\nnope = 1\n[logging]\nnope = 1\n\n[bogus]\nx = 2\n";
+                    [forward]\nnope = 1\n[logging]\nnope = 1\n\n[bogus]\nx = 2\n\
+                    [[device]]\nkind = \"serial\"\n[[device]]\nkind = \"can\"\nport = \"can1\"\n";
         let cfg = FileConfig::parse(text).expect("still parses");
         assert_eq!(cfg.server.iface.as_deref(), Some("can0"));
         assert_eq!(
             cfg.unknown_keys(),
             vec![
                 "bogus",
+                // The key this table deliberately does not use, to match CAN.
+                "device[1].port",
                 "forward.nope",
                 "ingest.nope",
                 "logging.nope",
@@ -273,6 +312,27 @@ mod tests {
                 "test_pattern.can_fd",
             ]
         );
+    }
+
+    #[test]
+    fn a_serial_device_table_parses() {
+        let cfg = FileConfig::parse(
+            "[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\n\
+             baud = 9600\nframing = \"modbus-rtu\"\ndatabase = \"sungrow_rs485\"\n",
+        )
+        .unwrap();
+        let d = &cfg.device[0];
+        assert_eq!(d.kind.as_deref(), Some("serial"));
+        assert_eq!(d.interface.as_deref(), Some("/dev/ttyUSB0"));
+        assert_eq!(d.baud, Some(9600));
+        assert_eq!(d.framing.as_deref(), Some("modbus-rtu"));
+        assert_eq!(d.database.as_deref(), Some("sungrow_rs485"));
+        assert!(
+            d.mode.is_none() && d.parity.is_none(),
+            "absent, not defaulted"
+        );
+        assert_eq!((d.data_bits, d.stop_bits, d.fd), (None, None, None));
+        assert!(cfg.unknown_keys().is_empty());
     }
 
     /// Typed fields must keep their coercions with `flatten` in play — a TOML

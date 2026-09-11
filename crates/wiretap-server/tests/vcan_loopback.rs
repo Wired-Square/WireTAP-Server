@@ -40,7 +40,7 @@ use wiretap_protocol::testpattern::{
     encode, sweep_payload, Command, Flags, Message, ID_CONTROL, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
 };
 use wiretap_server::pipeline;
-use wiretap_server::settings::{LogLevel, Settings, TestPattern};
+use wiretap_server::settings::{Device, DeviceKind, LogLevel, Settings, TestPattern};
 use wiretap_server::source::socketcan::{detect_bitrates, CanReader};
 use wiretap_server::source::{system_time_to_us, Bitrates};
 
@@ -115,7 +115,7 @@ impl Bus {
 /// the outage drill's subject, and these tests are about the bus and the socket.
 fn settings(port: u16, test_pattern: Option<TestPattern>) -> Settings {
     Settings {
-        ifaces: vec![iface()],
+        devices: vec![Device::can(&iface(), false, "")],
         host: "127.0.0.1".to_string(),
         port,
         bus_offset: 0,
@@ -486,7 +486,7 @@ async fn an_armed_responder_echoes_an_fd_sweep_on_the_bus() {
     );
     // Without this the reader drops every FD frame before the broadcast, so
     // the sweep below would never reach the responder at all.
-    settings.can_fd = true;
+    settings.devices[0].kind = DeviceKind::Can { fd: true };
     let _server = server_listening(settings).await;
 
     // Bind a run first: a responder echoes sweeps only inside one.

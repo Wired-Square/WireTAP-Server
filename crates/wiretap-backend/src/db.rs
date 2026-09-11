@@ -66,14 +66,7 @@ impl DbSchemaState {
     }
 }
 
-pub fn valid_db_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 63
-        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-}
+pub use wiretap_model::valid_db_name;
 
 #[derive(Clone)]
 pub struct Databases {
@@ -557,21 +550,5 @@ impl Databases {
             self.create_database(name).await?;
         }
         self.pool(name).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::valid_db_name;
-
-    #[test]
-    fn db_name_validation() {
-        assert!(valid_db_name("wiretap"));
-        assert!(valid_db_name("vehicle_1"));
-        assert!(!valid_db_name(""));
-        assert!(!valid_db_name("1leading_digit"));
-        assert!(!valid_db_name("Has-Caps"));
-        assert!(!valid_db_name("name;drop table"));
-        assert!(!valid_db_name(&"x".repeat(64)));
     }
 }

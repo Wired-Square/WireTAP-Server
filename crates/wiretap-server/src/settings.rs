@@ -14,9 +14,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use wiretap_model::{config::FileConfig, parse_ifaces, Direction, Secret};
+use wiretap_model::config::{DeviceSection, FileConfig};
+use wiretap_model::{parse_ifaces, valid_db_name, Direction, Secret, SourceId};
 
 use crate::cli::Cli;
+use crate::source::bus_for_index;
 
 /// Apply a file value over a flag value, where the file speaks.
 fn over<T>(dst: &mut T, src: Option<T>) {
@@ -34,6 +36,290 @@ pub struct Forward {
     /// Empty means the gateway's default capture database.
     pub database: String,
     pub batching: Batching,
+}
+
+impl Forward {
+    /// How a log line names the database: `<default>` for the gateway's.
+    pub fn label(&self) -> &str {
+        Self::label_of(&self.database)
+    }
+
+    pub fn label_of(database: &str) -> &str {
+        if database.is_empty() {
+            "<default>"
+        } else {
+            database
+        }
+    }
+
+    /// The same gateway, another database: its own cache file beside this
+    /// one's, and nothing to adopt — the legacy cache belongs to the default.
+    pub fn for_database(&self, database: &str) -> Forward {
+        let mut f = self.clone();
+        if database != self.database {
+            f.database = database.to_owned();
+            f.batching.cache_path = sibling_cache(&self.batching.cache_path, database);
+            f.batching.cache_origin = None;
+            f.batching.legacy_cache_path = None;
+        }
+        f
+    }
+}
+
+/// `cache.db` → `cache-<db>.db`, in the same directory.
+fn sibling_cache(path: &Path, database: &str) -> PathBuf {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("cache");
+    let name = match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{stem}-{database}.{ext}"),
+        None => format!("{stem}-{database}"),
+    };
+    path.with_file_name(name)
+}
+
+/// One thing the server captures from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Device {
+    /// `can0`, or `/dev/ttyUSB0`.
+    pub interface: String,
+    pub mode: Mode,
+    /// The gateway database its frames land in; empty is the gateway's
+    /// default.
+    pub database: String,
+    /// CAN devices are numbered first, in order, so GVRET's bus arithmetic
+    /// holds; serial devices take the numbers after.
+    pub bus: SourceId,
+    pub kind: DeviceKind,
+}
+
+/// Whether the server may transmit on the device. Passive is enforced, not
+/// promised: a CAN bus refuses GVRET transmits and is never armed for the
+/// Test Pattern responder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Active,
+    Passive,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Active => "active",
+            Mode::Passive => "passive",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeviceKind {
+    Can { fd: bool },
+    Serial(SerialSettings),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SerialSettings {
+    pub baud: u32,
+    pub data_bits: u8,
+    pub parity: Parity,
+    pub stop_bits: u8,
+    pub framing: Framing,
+}
+
+impl fmt::Display for SerialSettings {
+    /// `9600 8N1 modbus-rtu`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {}{}{} {}",
+            self.baud,
+            self.data_bits,
+            self.parity.letter(),
+            self.stop_bits,
+            self.framing.as_str()
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Parity {
+    None,
+    Even,
+    Odd,
+}
+
+impl Parity {
+    fn letter(self) -> char {
+        match self {
+            Parity::None => 'N',
+            Parity::Even => 'E',
+            Parity::Odd => 'O',
+        }
+    }
+}
+
+/// How a serial line's bytes become messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Framing {
+    ModbusRtu,
+}
+
+impl Framing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Framing::ModbusRtu => "modbus-rtu",
+        }
+    }
+}
+
+/// The rates a serial device may be configured at.
+pub const SUPPORTED_BAUDS: &[u32] = &[
+    1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600,
+];
+
+impl Device {
+    /// A CAN device as `[server].iface` sugar declares it: active, on bus 0
+    /// until numbered.
+    pub fn can(interface: &str, fd: bool, database: &str) -> Self {
+        Self {
+            interface: interface.to_owned(),
+            mode: Mode::Active,
+            database: database.to_owned(),
+            bus: SourceId(0),
+            kind: DeviceKind::Can { fd },
+        }
+    }
+
+    /// A `[[device]]` table, checked. `can_fd` and `database` are the
+    /// defaults a table may leave to the file.
+    fn from_table(t: &DeviceSection, can_fd: bool, database: &str) -> Result<Self, String> {
+        let need = |v: &Option<String>, key: &str| {
+            v.clone()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| format!("{key} is required"))
+        };
+        let only_for = |set: bool, key: &str, kind: &str| {
+            if set {
+                Err(format!("{key} applies to a {kind} device"))
+            } else {
+                Ok(())
+            }
+        };
+        let interface = need(&t.interface, "interface")?;
+        let database = t.database.clone().unwrap_or_else(|| database.to_owned());
+        let mode = match t.mode.as_deref() {
+            None => None,
+            Some("active") => Some(Mode::Active),
+            Some("passive") => Some(Mode::Passive),
+            Some(other) => return Err(format!("mode must be active or passive, got {other:?}")),
+        };
+        let (kind, mode) = match need(&t.kind, "kind")?.as_str() {
+            "can" => {
+                only_for(t.baud.is_some(), "baud", "serial")?;
+                only_for(t.data_bits.is_some(), "data_bits", "serial")?;
+                only_for(t.parity.is_some(), "parity", "serial")?;
+                only_for(t.stop_bits.is_some(), "stop_bits", "serial")?;
+                only_for(t.framing.is_some(), "framing", "serial")?;
+                (
+                    DeviceKind::Can {
+                        fd: t.fd.unwrap_or(can_fd),
+                    },
+                    mode.unwrap_or(Mode::Active),
+                )
+            }
+            "serial" => {
+                only_for(t.fd.is_some(), "fd", "CAN")?;
+                if mode == Some(Mode::Active) {
+                    return Err(
+                        "an active serial device (a Modbus master) is not built; use passive"
+                            .into(),
+                    );
+                }
+                let baud = t.baud.ok_or("baud is required")?;
+                if !SUPPORTED_BAUDS.contains(&baud) {
+                    return Err(format!("baud {baud} is not one of {SUPPORTED_BAUDS:?}"));
+                }
+                let data_bits = t.data_bits.unwrap_or(8);
+                if !(5..=8).contains(&data_bits) {
+                    return Err(format!("data_bits must be 5 to 8, got {data_bits}"));
+                }
+                let parity = match t.parity.as_deref().unwrap_or("none") {
+                    "none" => Parity::None,
+                    "even" => Parity::Even,
+                    "odd" => Parity::Odd,
+                    other => {
+                        return Err(format!("parity must be none, even or odd, got {other:?}"))
+                    }
+                };
+                let stop_bits = t.stop_bits.unwrap_or(1);
+                if !(1..=2).contains(&stop_bits) {
+                    return Err(format!("stop_bits must be 1 or 2, got {stop_bits}"));
+                }
+                let framing = match need(&t.framing, "framing")?.as_str() {
+                    "modbus-rtu" => Framing::ModbusRtu,
+                    other => return Err(format!("framing must be \"modbus-rtu\", got {other:?}")),
+                };
+                (
+                    DeviceKind::Serial(SerialSettings {
+                        baud,
+                        data_bits,
+                        parity,
+                        stop_bits,
+                        framing,
+                    }),
+                    Mode::Passive,
+                )
+            }
+            other => return Err(format!("kind must be \"can\" or \"serial\", got {other:?}")),
+        };
+        Ok(Self {
+            interface,
+            mode,
+            database,
+            bus: SourceId(0),
+            kind,
+        })
+    }
+
+    pub fn is_can(&self) -> bool {
+        matches!(self.kind, DeviceKind::Can { .. })
+    }
+
+    /// Whether FD frames are reported. A serial device has none.
+    pub fn fd(&self) -> bool {
+        matches!(self.kind, DeviceKind::Can { fd: true })
+    }
+}
+
+impl fmt::Display for Device {
+    /// `can0 [bus 0] can, active, fd off → sungrow`, as `--check-config`
+    /// shows it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} [bus {}] ", self.interface, self.bus.0)?;
+        match &self.kind {
+            DeviceKind::Can { fd } => write!(
+                f,
+                "can, {}, fd {}",
+                self.mode.as_str(),
+                if *fd { "on" } else { "off" }
+            )?,
+            DeviceKind::Serial(s) => write!(f, "serial, {}, {s}", self.mode.as_str())?,
+        }
+        write!(f, " → {}", database_label(&self.database))
+    }
+}
+
+/// The gateway's own name for the empty database, in reports.
+fn database_label(database: &str) -> &str {
+    if database.is_empty() {
+        "(gateway default)"
+    } else {
+        database
+    }
+}
+
+/// The gateway's rule, checked here so a bad name fails `--check-config`
+/// rather than every HELLO. Empty is the gateway's default.
+fn valid_database(name: &str) -> bool {
+    name.is_empty() || valid_db_name(name)
 }
 
 /// How frames are grouped on the way to the gateway, and where they wait when
@@ -228,7 +514,9 @@ impl Forward {
 /// Everything the server needs to run, with every source already applied.
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub ifaces: Vec<String>,
+    /// Exactly what the flags and the file named: `[server].iface` sugar
+    /// first, then each `[[device]]`. Nothing is implied by a file.
+    pub devices: Vec<Device>,
     pub host: String,
     pub port: u16,
     pub bus_offset: u8,
@@ -293,6 +581,13 @@ pub enum SettingsError {
     },
     /// The config file is not valid TOML, or a value has the wrong type.
     Parse(String),
+    /// A device could not be resolved; `index` is its position in the list,
+    /// sugar included.
+    Device {
+        index: usize,
+        what: String,
+    },
+    BadDatabase(String),
 }
 
 impl fmt::Display for SettingsError {
@@ -316,6 +611,12 @@ impl fmt::Display for SettingsError {
             }
             Self::Io { path, err } => write!(f, "cannot read {path}: {err}"),
             Self::Parse(e) => write!(f, "{e}"),
+            Self::Device { index, what } => write!(f, "device[{index}]: {what}"),
+            Self::BadDatabase(d) => write!(
+                f,
+                "database name {d:?} is not what the gateway accepts: \
+                 a lowercase letter, then lowercase letters, digits or _, at most 63"
+            ),
         }
     }
 }
@@ -331,7 +632,7 @@ pub enum Warning {
     RetiredFlags(Vec<&'static str>),
     /// A config key no section defines.
     UnknownKey(String),
-    /// Neither a CAN interface nor an ingest listener.
+    /// No device and no ingest listener.
     NoCaptureSource,
     /// Capturing, but with nowhere to archive to.
     NoForwardSink,
@@ -363,7 +664,7 @@ impl fmt::Display for Warning {
             ),
             Self::NoCaptureSource => write!(
                 f,
-                "no CAN interfaces and no ingest listener: this server will capture nothing"
+                "no devices and no ingest listener: this server will capture nothing"
             ),
             Self::NoForwardSink => write!(
                 f,
@@ -448,7 +749,7 @@ impl Settings {
         }
 
         let mut s = Settings {
-            ifaces: parse_ifaces(&cli.iface),
+            devices: Vec::new(),
             host: cli.host.clone(),
             port: cli.port,
             bus_offset: cli.bus_offset,
@@ -467,6 +768,13 @@ impl Settings {
             warnings.extend(f.unknown_keys().into_iter().map(Warning::UnknownKey));
             s.apply_file(cli, env, f)?;
         }
+        // The CAN sugar, in precedence order: `[server].iface`, then `-i`,
+        // then `can0` — but only with no file at all, as the Python's hand run
+        // behaved. A file's device set is what the file says.
+        let sugar = file
+            .and_then(|f| f.server.iface.as_deref())
+            .or(cli.iface.as_deref())
+            .unwrap_or(if file.is_some() { "" } else { "can0" });
 
         // `--pg-dir` last, and so above even the file: the Python resolved
         // `args.pg_dir or args.default_dir` in `main`, after the config merge
@@ -495,13 +803,20 @@ impl Settings {
             // Last, because it depends on where the cache ended up, and every
             // source has now had its say about that.
             fwd.batching.legacy_cache_path = legacy_cache_path(&fwd.batching.cache_path, env);
+            if !valid_database(&fwd.database) {
+                return Err(SettingsError::BadDatabase(fwd.database.clone()));
+            }
         }
+
+        // Devices last: their defaults — `can_fd`, the database, the bus
+        // offset — are whatever every source above settled on.
+        s.devices = s.build_devices(&parse_ifaces(sugar), file.map_or(&[][..], |f| &f.device))?;
 
         if cli.test_pattern_enable && s.test_pattern.is_none() {
             warnings.push(Warning::TestPatternDisarmedByFile);
         }
 
-        if s.ifaces.is_empty() && s.ingest.is_none() {
+        if s.devices.is_empty() && s.ingest.is_none() {
             warnings.push(Warning::NoCaptureSource);
         }
         match &s.forward {
@@ -519,7 +834,6 @@ impl Settings {
     /// File values over flag values, matching `apply_config_overrides`.
     fn apply_file(&mut self, cli: &Cli, env: &Env, f: &FileConfig) -> Result<(), SettingsError> {
         let srv = &f.server;
-        over(&mut self.ifaces, srv.iface.as_deref().map(parse_ifaces));
         over(&mut self.host, srv.host.clone());
         over(&mut self.port, srv.port);
         over(&mut self.bus_offset, srv.bus_offset);
@@ -589,21 +903,109 @@ impl Settings {
         Ok(())
     }
 
-    /// Which captured interfaces the responder answers on, as indices into
-    /// [`Self::ifaces`].
+    /// The sugar, then the tables, checked and numbered.
+    fn build_devices(
+        &self,
+        sugar: &[String],
+        tables: &[DeviceSection],
+    ) -> Result<Vec<Device>, SettingsError> {
+        let database = self.default_database();
+        let mut devices: Vec<Device> = sugar
+            .iter()
+            .map(|name| Device::can(name, self.can_fd, database))
+            .collect();
+        for (i, t) in tables.iter().enumerate() {
+            let index = sugar.len() + i;
+            let d = Device::from_table(t, self.can_fd, database)
+                .map_err(|what| SettingsError::Device { index, what })?;
+            if !valid_database(&d.database) {
+                return Err(SettingsError::BadDatabase(d.database));
+            }
+            devices.push(d);
+        }
+        // Two readers on one line split its bytes between them; two sockets
+        // on one bus archive it twice.
+        for (i, d) in devices.iter().enumerate() {
+            if devices[..i].iter().any(|e| e.interface == d.interface) {
+                return Err(SettingsError::Device {
+                    index: i,
+                    what: format!("{} is already a device", d.interface),
+                });
+            }
+        }
+        // Numbered as `Device::bus` says: CAN first, then serial.
+        let mut n = 0;
+        for can in [true, false] {
+            for (index, d) in devices
+                .iter_mut()
+                .enumerate()
+                .filter(|(_, d)| d.is_can() == can)
+            {
+                d.bus = bus_for_index(n, self.bus_offset).ok_or_else(|| SettingsError::Device {
+                    index,
+                    what: "bus number past 255".into(),
+                })?;
+                n += 1;
+            }
+        }
+        Ok(devices)
+    }
+
+    /// The database a device lands in when it names none: `[forward]`'s, which
+    /// is the gateway's own default when that is empty too.
+    pub fn default_database(&self) -> &str {
+        self.forward.as_ref().map_or("", |f| f.database.as_str())
+    }
+
+    /// Whether any CAN device reports FD frames.
+    pub fn any_fd(&self) -> bool {
+        self.devices.iter().any(Device::fd)
+    }
+
+    /// The CAN devices, in bus order.
+    pub fn can_devices(&self) -> Vec<&Device> {
+        self.devices.iter().filter(|d| d.is_can()).collect()
+    }
+
+    pub fn serial_devices(&self) -> Vec<&Device> {
+        self.devices.iter().filter(|d| !d.is_can()).collect()
+    }
+
+    /// The databases frames go to, one archive pipeline each: the default
+    /// first when anything feeds it — the ingest listener always does — then
+    /// the rest in device order. A database nothing feeds gets no pipeline.
+    pub fn databases(&self) -> Vec<String> {
+        let default = self.default_database();
+        let mut out: Vec<String> = Vec::new();
+        if self.ingest.is_some() || self.devices.iter().any(|d| d.database == default) {
+            out.push(default.to_owned());
+        }
+        for d in &self.devices {
+            if !out.contains(&d.database) {
+                out.push(d.database.clone());
+            }
+        }
+        out
+    }
+
+    /// Which CAN devices the responder answers on, as indices into
+    /// [`Self::can_devices`].
     ///
     /// One definition because two things read it — `start_capture`, to spawn a
     /// responder per interface, and `--check-config`, to say what will
     /// transmit. Reporting the *configured* names instead would tell an
-    /// operator a bus was armed that is not being captured at all.
+    /// operator a bus was armed that is not being captured at all. A passive
+    /// device is never armed: passive means it transmits nothing.
     ///
-    /// Naming none arms every interface: `--test-pattern-enable` on its own
-    /// that armed nothing would be a silent no-op.
+    /// Naming none arms every active interface: `--test-pattern-enable` on its
+    /// own that armed nothing would be a silent no-op.
     pub fn armed_indices(&self, tp: &TestPattern) -> Vec<usize> {
-        self.ifaces
+        self.can_devices()
             .iter()
             .enumerate()
-            .filter(|(_, name)| tp.ifaces.is_empty() || tp.ifaces.contains(name))
+            .filter(|(_, d)| {
+                d.mode == Mode::Active && (tp.ifaces.is_empty() || tp.ifaces.contains(&d.interface))
+            })
             .map(|(i, _)| i)
             .collect()
     }
@@ -611,18 +1013,16 @@ impl Settings {
     /// Label/value pairs for `--check-config`. Env render through
     /// [`Secret`]'s redacting `Display`, so this cannot echo one.
     fn rows(&self) -> Vec<(&'static str, String)> {
-        let mut r = vec![
-            (
-                "interfaces",
-                if self.ifaces.is_empty() {
-                    "(none)".into()
-                } else {
-                    self.ifaces.join(", ")
-                },
-            ),
+        let mut r = Vec::new();
+        if self.devices.is_empty() {
+            r.push(("devices", "(none)".to_string()));
+        }
+        for d in &self.devices {
+            r.push(("device", d.to_string()));
+        }
+        r.extend([
             ("gvret listen", format!("{}:{}", self.host, self.port)),
             ("bus offset", self.bus_offset.to_string()),
-            ("can fd", self.can_fd.to_string()),
             ("direction", self.default_dir.to_string()),
             (
                 "console echo",
@@ -630,7 +1030,7 @@ impl Settings {
             ),
             ("log level", self.log_level.as_str().into()),
             ("stats interval", format!("{}s", self.stats_interval)),
-        ];
+        ]);
         match &self.ingest {
             Some(i) => {
                 r.push(("ingest listen", format!("{}:{}", i.host, i.port)));
@@ -664,21 +1064,21 @@ impl Settings {
                 // answered "ARMED on can9" for a box capturing can0 would be
                 // wrong in exactly the configuration someone opened this report
                 // to check. `start_capture` intersects the same two lists.
-                Some(tp) => match self.armed_indices(tp) {
-                    armed if armed.is_empty() => {
-                        "enabled, but no captured interface matches; nothing is armed".into()
+                Some(tp) => match (self.can_devices(), self.armed_indices(tp)) {
+                    (_, armed) if armed.is_empty() => {
+                        "enabled, but no active captured interface matches; nothing is armed".into()
                     }
-                    armed => format!(
+                    (can, armed) => format!(
                         "ARMED, transmits on {}{}",
                         armed
                             .iter()
-                            .map(|&i| self.ifaces[i].as_str())
+                            .map(|&i| can[i].interface.as_str())
                             .collect::<Vec<_>>()
                             .join(", "),
-                        if self.can_fd {
+                        if self.any_fd() {
                             ""
                         } else {
-                            " (classic sweep only; can_fd is off)"
+                            " (classic sweep only; no device has fd on)"
                         }
                     ),
                 },
@@ -687,14 +1087,7 @@ impl Settings {
         match &self.forward {
             Some(f) => {
                 r.push(("forward to", format!("{}:{}", f.host, f.port)));
-                r.push((
-                    "forward db",
-                    if f.database.is_empty() {
-                        "(gateway default)".into()
-                    } else {
-                        f.database.clone()
-                    },
-                ));
+                r.push(("forward db", database_label(&f.database).to_owned()));
                 r.push((
                     "forward auth",
                     if f.api_key.is_empty() {
@@ -711,17 +1104,20 @@ impl Settings {
                         b.size, b.flush_interval, b.queue_size, b.queue_flush_pct
                     ),
                 ));
-                r.push((
-                    "disk cache",
-                    match b.cache_origin {
-                        Some(origin) => format!(
-                            "{} (max {} MB), {origin}",
-                            b.cache_path.display(),
-                            b.cache_max_mb
-                        ),
-                        None => format!("{} (max {} MB)", b.cache_path.display(), b.cache_max_mb),
-                    },
-                ));
+                // One cache per pipeline; the limit applies to each.
+                let databases = self.databases();
+                for db in &databases {
+                    let c = &f.for_database(db).batching;
+                    let mut line =
+                        format!("{} (max {} MB)", c.cache_path.display(), c.cache_max_mb);
+                    if databases.len() > 1 {
+                        line += &format!(" for {}", database_label(db));
+                    }
+                    if let Some(origin) = c.cache_origin {
+                        line += &format!(", {origin}");
+                    }
+                    r.push(("disk cache", line));
+                }
                 if let Some(legacy) = &b.legacy_cache_path {
                     r.push(("adopt on start", legacy.display().to_string()));
                 }
@@ -770,10 +1166,18 @@ mod tests {
         Settings::resolve(&cli(args), parsed.as_ref(), &Env::default())
     }
 
+    /// The CAN interfaces, in bus order.
+    fn ifaces(s: &Settings) -> Vec<&str> {
+        s.can_devices()
+            .iter()
+            .map(|d| d.interface.as_str())
+            .collect()
+    }
+
     #[test]
     fn flags_alone_resolve() {
         let r = resolve(&["-i", "can0,can1", "-p", "2323"], None).unwrap();
-        assert_eq!(r.settings.ifaces, ["can0", "can1"]);
+        assert_eq!(ifaces(&r.settings), ["can0", "can1"]);
         assert_eq!(r.settings.port, 2323);
         assert_eq!(r.settings.default_dir, Direction::Rx);
     }
@@ -787,7 +1191,7 @@ mod tests {
             Some("[server]\niface = \"can0\"\nport = 23\n"),
         )
         .unwrap();
-        assert_eq!(r.settings.ifaces, ["can0"], "file wins over -i");
+        assert_eq!(ifaces(&r.settings), ["can0"], "file wins over -i");
         assert_eq!(r.settings.port, 23, "file wins over -p");
     }
 
@@ -799,7 +1203,7 @@ mod tests {
             Some("[server]\niface = \"can1\"\n"),
         )
         .unwrap();
-        assert_eq!(r.settings.ifaces, ["can1"]);
+        assert_eq!(ifaces(&r.settings), ["can1"]);
         assert_eq!(r.settings.port, 2323, "untouched by the file");
         assert!(r.settings.can_fd, "untouched by the file");
     }
@@ -1282,14 +1686,17 @@ mod tests {
     /// guess from an empty list.
     #[test]
     fn check_config_says_what_the_responder_will_transmit_on() {
-        let row = |args: &[&str]| {
-            let s = resolve(args, None).unwrap().settings;
-            s.rows()
+        let row_with = |args: &[&str], toml: Option<&str>| {
+            resolve(args, toml)
+                .unwrap()
+                .settings
+                .rows()
                 .into_iter()
                 .find(|(label, _)| *label == "test pattern")
                 .expect("a test pattern row, armed or not")
                 .1
         };
+        let row = |args: &[&str]| row_with(args, None);
 
         assert_eq!(row(&["-i", "can0"]), "disabled");
         // Named, not "every interface": the report says which buses will carry
@@ -1306,7 +1713,16 @@ mod tests {
                 "--test-pattern-ifaces",
                 "can1",
             ]),
-            "ARMED, transmits on can1 (classic sweep only; can_fd is off)"
+            "ARMED, transmits on can1 (classic sweep only; no device has fd on)"
+        );
+        // A device's own `fd` is what the responder runs with, so the row
+        // reads it from the devices rather than from the global default.
+        assert_eq!(
+            row_with(
+                &["--test-pattern-enable"],
+                Some("[[device]]\nkind = \"can\"\ninterface = \"can0\"\nfd = true\n")
+            ),
+            "ARMED, transmits on can0"
         );
         // The case the row used to get wrong: a name matching no captured
         // interface arms nothing, and saying "ARMED on can9" for a box
@@ -1319,7 +1735,15 @@ mod tests {
                 "--test-pattern-ifaces",
                 "can9",
             ]),
-            "enabled, but no captured interface matches; nothing is armed"
+            "enabled, but no active captured interface matches; nothing is armed"
+        );
+        // A passive bus is never armed, however it is named.
+        assert_eq!(
+            row_with(
+                &["--test-pattern-enable"],
+                Some("[[device]]\nkind = \"can\"\ninterface = \"can0\"\nmode = \"passive\"\n")
+            ),
+            "enabled, but no active captured interface matches; nothing is armed"
         );
     }
 
@@ -1350,5 +1774,271 @@ mod tests {
             err.to_string().contains("/nonexistent/wiretap.toml"),
             "{err}"
         );
+    }
+
+    // --- devices --------------------------------------------------------
+
+    const SERIAL: &str = "[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\n\
+                          baud = 9600\nframing = \"modbus-rtu\"\n";
+
+    #[test]
+    fn iface_sugar_becomes_can_devices_ahead_of_device_tables() {
+        let r = resolve(
+            &["--can-fd"],
+            Some(&format!(
+                "[server]\niface = \"can0,can1\"\n[forward]\nenable = true\n\
+                 database = \"site\"\n{SERIAL}[[device]]\nkind = \"can\"\ninterface = \"can2\"\n\
+                 fd = false\nmode = \"passive\"\ndatabase = \"other\"\n"
+            )),
+        )
+        .unwrap();
+        let d = &r.settings.devices;
+        assert_eq!(d.len(), 4);
+        assert_eq!(
+            (
+                d[0].interface.as_str(),
+                d[0].mode,
+                &d[0].kind,
+                d[0].database.as_str()
+            ),
+            ("can0", Mode::Active, &DeviceKind::Can { fd: true }, "site"),
+            "sugar takes the file's can_fd and the forward database"
+        );
+        assert_eq!(d[1].interface, "can1");
+        assert_eq!(d[2].interface, "/dev/ttyUSB0", "tables follow the sugar");
+        assert_eq!(
+            (d[3].mode, &d[3].kind, d[3].database.as_str()),
+            (Mode::Passive, &DeviceKind::Can { fd: false }, "other"),
+            "a table overrides both defaults"
+        );
+    }
+
+    #[test]
+    fn serial_devices_take_bus_numbers_after_can() {
+        let r = resolve(
+            &["--bus-offset", "10"],
+            Some(&format!(
+                "{SERIAL}[[device]]\nkind = \"can\"\ninterface = \"can0\"\n\
+                 [[device]]\nkind = \"can\"\ninterface = \"can1\"\n"
+            )),
+        )
+        .unwrap();
+        let bus = |i: usize| r.settings.devices[i].bus.0;
+        assert_eq!(
+            (bus(1), bus(2)),
+            (10, 11),
+            "CAN is numbered first, in order"
+        );
+        assert_eq!(
+            bus(0),
+            12,
+            "serial takes the numbers after, wherever it sat"
+        );
+        assert_eq!(ifaces(&r.settings), ["can0", "can1"]);
+        assert_eq!(r.settings.serial_devices()[0].interface, "/dev/ttyUSB0");
+    }
+
+    #[test]
+    fn a_passive_serial_device_defaults_and_active_is_refused() {
+        let r = resolve(&[], Some(SERIAL)).unwrap();
+        let d = &r.settings.devices[0];
+        assert_eq!(d.mode, Mode::Passive);
+        assert_eq!(
+            d.kind,
+            DeviceKind::Serial(SerialSettings {
+                baud: 9600,
+                data_bits: 8,
+                parity: Parity::None,
+                stop_bits: 1,
+                framing: Framing::ModbusRtu,
+            }),
+            "8N1 unless told otherwise"
+        );
+        assert_eq!(
+            d.to_string(),
+            "/dev/ttyUSB0 [bus 0] serial, passive, 9600 8N1 modbus-rtu → (gateway default)"
+        );
+
+        let err = resolve(&[], Some(&format!("{SERIAL}mode = \"active\"\n"))).unwrap_err();
+        assert!(
+            matches!(&err, SettingsError::Device { index: 0, what } if what.contains("not built")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_broken_device_table_names_the_key() {
+        for (broken, expect) in [
+            ("[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nframing = \"modbus-rtu\"\n", "baud is required"),
+            (&format!("{SERIAL}parity = \"mark\"\n"), "parity must be"),
+            ("[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nbaud = 9600\n", "framing is required"),
+            ("[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nbaud = 9601\nframing = \"modbus-rtu\"\n", "baud 9601 is not one of"),
+            (&format!("{SERIAL}fd = true\n"), "fd applies to a CAN device"),
+            ("[[device]]\nkind = \"can\"\ninterface = \"can0\"\nbaud = 9600\n", "baud applies to a serial device"),
+            ("[[device]]\nkind = \"tty\"\ninterface = \"x\"\n", "kind must be"),
+            ("[[device]]\nkind = \"can\"\n", "interface is required"),
+        ] {
+            let err = resolve(&[], Some(broken)).unwrap_err().to_string();
+            assert!(err.starts_with("device[0]: ") && err.contains(expect), "{broken:?} -> {err}");
+        }
+    }
+
+    #[test]
+    fn a_duplicate_interface_is_refused() {
+        // Sugar and a table naming the same bus: the trap is two readers on
+        // one line, and it must not depend on which spelling was used.
+        let err = resolve(
+            &[],
+            Some("[server]\niface = \"can0\"\n[[device]]\nkind = \"can\"\ninterface = \"can0\"\n"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, SettingsError::Device { index: 1, what } if what.contains("already a device")),
+            "{err}"
+        );
+    }
+
+    /// A serial-only box: no `iface` line and one serial table means no CAN
+    /// device at all — nothing to open, nothing to bridge.
+    #[test]
+    fn a_serial_only_file_has_no_can_device_at_all() {
+        let r = resolve(&[], Some(SERIAL)).unwrap();
+        assert!(r.settings.can_devices().is_empty());
+        assert_eq!(r.settings.devices.len(), 1);
+        assert!(!r.warnings.contains(&Warning::NoCaptureSource));
+    }
+
+    /// A file's device set is what it says: no `iface` key means no CAN,
+    /// even though a hand run with no file would capture `can0`.
+    #[test]
+    fn a_file_without_iface_implies_no_can0() {
+        let r = resolve(&[], Some("[logging]\nlevel = \"INFO\"\n")).unwrap();
+        assert!(r.settings.devices.is_empty());
+        assert!(r.warnings.contains(&Warning::NoCaptureSource));
+
+        // An explicit `-i` still seeds the sugar under a file that is silent.
+        let r = resolve(&["-i", "can3"], Some("[logging]\nlevel = \"INFO\"\n")).unwrap();
+        assert_eq!(ifaces(&r.settings), ["can3"]);
+    }
+
+    #[test]
+    fn no_flags_and_no_file_still_capture_can0() {
+        let r = resolve(&[], None).unwrap();
+        assert_eq!(ifaces(&r.settings), ["can0"], "the Python's default");
+        assert_eq!(r.settings.devices[0].mode, Mode::Active);
+        let r = resolve(&["-i", ""], None).unwrap();
+        assert!(r.settings.devices.is_empty(), "and an empty -i means none");
+    }
+
+    #[test]
+    fn pipelines_are_grouped_by_database_and_the_default_only_when_fed() {
+        let toml = format!(
+            "[server]\niface = \"can0,can1\"\n[forward]\nenable = true\ndatabase = \"site\"\n\
+             {SERIAL}database = \"rs485\"\n"
+        );
+        let r = resolve(&[], Some(&toml)).unwrap();
+        assert_eq!(
+            r.settings.databases(),
+            ["site", "rs485"],
+            "the default first, then in device order"
+        );
+
+        // Nothing feeds the default: the serial device names its own database
+        // and there is no ingest listener, so no pipeline for it.
+        let r = resolve(
+            &[],
+            Some(&format!(
+                "[forward]\nenable = true\n{SERIAL}database = \"rs485\"\n"
+            )),
+        )
+        .unwrap();
+        assert_eq!(r.settings.databases(), ["rs485"]);
+
+        // The ingest listener always feeds the default.
+        let r = resolve(
+            &["--ingest-enable"],
+            Some(&format!(
+                "[forward]\nenable = true\n{SERIAL}database = \"rs485\"\n"
+            )),
+        )
+        .unwrap();
+        assert_eq!(r.settings.databases(), ["", "rs485"]);
+    }
+
+    /// The gateway's rule, applied where `--check-config` can report it.
+    #[test]
+    fn a_database_name_the_gateway_would_refuse_is_refused_here() {
+        let err = resolve(
+            &[],
+            Some(&format!(
+                "[forward]\nenable = true\n{SERIAL}database = \"RS485\"\n"
+            )),
+        )
+        .unwrap_err();
+        assert_eq!(err, SettingsError::BadDatabase("RS485".into()));
+        let err = resolve(&[], Some("[forward]\nenable = true\ndatabase = \"1st\"\n")).unwrap_err();
+        assert_eq!(err, SettingsError::BadDatabase("1st".into()));
+    }
+
+    #[test]
+    fn a_second_database_gets_a_sibling_cache_and_adopts_nothing() {
+        let env = Env {
+            state_dir: Some("/var/lib/wiretap-server".into()),
+            ..Env::default()
+        };
+        let cfg = FileConfig::parse("[forward]\nenable = true\ndatabase = \"site\"\n").unwrap();
+        let f = Settings::resolve(&cli(&[]), Some(&cfg), &env)
+            .unwrap()
+            .settings
+            .forward
+            .unwrap();
+        let other = f.for_database("rs485");
+        assert_eq!(other.database, "rs485");
+        assert_eq!(
+            other.batching.cache_path,
+            PathBuf::from("/var/lib/wiretap-server/cache-rs485.db")
+        );
+        assert_eq!(other.batching.legacy_cache_path, None);
+        assert_eq!(
+            f.for_database("site").batching.cache_path,
+            f.batching.cache_path,
+            "the default keeps its own"
+        );
+        assert_eq!(
+            sibling_cache(Path::new("/home/pi/.wiretap-server-cache.db"), "x"),
+            PathBuf::from("/home/pi/.wiretap-server-cache-x.db")
+        );
+    }
+
+    #[test]
+    fn check_config_lists_devices_and_caches() {
+        let toml = format!(
+            "[server]\niface = \"can0\"\n[forward]\nenable = true\ndatabase = \"site\"\n\
+             {SERIAL}database = \"rs485\"\n"
+        );
+        let rows = resolve(&[], Some(&toml)).unwrap().settings.rows();
+        let of = |label: &str| -> Vec<String> {
+            rows.iter()
+                .filter(|(l, _)| *l == label)
+                .map(|(_, v)| v.clone())
+                .collect()
+        };
+        assert_eq!(
+            of("device"),
+            [
+                "can0 [bus 0] can, active, fd off → site",
+                "/dev/ttyUSB0 [bus 1] serial, passive, 9600 8N1 modbus-rtu → rs485",
+            ]
+        );
+        let caches = of("disk cache");
+        assert_eq!(caches.len(), 2, "one per pipeline: {caches:?}");
+        assert!(caches[0].contains(" for site"), "{caches:?}");
+        assert!(
+            caches[1].contains("cache-rs485.db") && caches[1].contains(" for rs485"),
+            "{caches:?}"
+        );
+
+        let rows = resolve(&["-i", ""], None).unwrap().settings.rows();
+        assert!(rows.contains(&("devices", "(none)".to_string())));
     }
 }

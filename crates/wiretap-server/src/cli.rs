@@ -18,9 +18,10 @@ use clap::Parser;
     version = crate::VERSION
 )]
 pub struct Cli {
-    /// CAN interface(s), comma-separated. Empty for an ingest-only deployment.
-    #[arg(short, long, default_value = "can0")]
-    pub iface: String,
+    /// CAN interface(s), comma-separated. Empty for a deployment with no CAN
+    /// hardware. With no -i and no config file at all, `can0`.
+    #[arg(short, long)]
+    pub iface: Option<String>,
 
     /// GVRET listen address.
     #[arg(long, default_value = "0.0.0.0")]
@@ -186,7 +187,10 @@ mod tests {
     #[test]
     fn defaults_match_the_python() {
         let c = Cli::parse_from(["wiretap-server"]);
-        assert_eq!(c.iface, "can0");
+        // The Python's `can0` default is applied by `Settings::resolve`, and
+        // only when no config file speaks — a file's device set is what it
+        // says and nothing more.
+        assert_eq!(c.iface, None);
         assert_eq!(c.host, "0.0.0.0");
         assert_eq!(c.port, 23);
         assert_eq!(c.bus_offset, 0);
@@ -212,7 +216,7 @@ mod tests {
     #[test]
     fn short_flags_are_preserved() {
         let c = Cli::parse_from(["wiretap-server", "-i", "can1", "-p", "2323", "-e", "-c"]);
-        assert_eq!(c.iface, "can1");
+        assert_eq!(c.iface.as_deref(), Some("can1"));
         assert_eq!(c.port, 2323);
         assert!(c.echo_console);
         assert!(c.colour);
