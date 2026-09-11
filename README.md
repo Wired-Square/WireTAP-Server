@@ -61,6 +61,24 @@ to, so it never has to be argued about.
 listener and the archive. `--help` lists the rest; the ones worth knowing are
 `--can-fd`, `--ingest-enable`, `--echo-console` and `--test-pattern-enable`.
 
+Anything `iface` cannot say is a `[[device]]` table — a serial line tapped for
+Modbus RTU, a CAN bus that must never be transmitted on, a device whose frames
+belong in a different gateway database:
+
+```toml
+[[device]]
+kind = "serial"
+interface = "/dev/ttyUSB0"
+baud = 9600
+framing = "modbus-rtu"
+database = "sungrow_rs485"
+```
+
+A serial device is opened read-only and every function code is framed, so a
+line full of a vendor's own codes is captured without knowing them first. The
+shipped config documents every key, and `--check-config` lists each device with
+its bus number and database.
+
 Port 23 is the GVRET default and needs `CAP_NET_BIND_SERVICE`; the packaged unit
 grants it.
 

@@ -73,7 +73,16 @@ Independent captures (a vehicle, a site, a bench rig) each get their own
 database — drop a finished capture with `DROP DATABASE`, back them up
 independently, and keep a runaway experiment from polluting the archive. Same
 *system* with multiple CAN buses stays in one database, separated by the `bus`
-column.
+column; so does a system with a CAN bus and a Modbus line, separated by the
+`protocol` column — one time axis, so a command on one can be lined up against
+the traffic it caused on the other. A capture daemon names a database per
+device, so either is a configuration choice.
+
+**Every read defaults to `protocol = can`.** `inventory`, `time-bounds` and
+`frames` take `?protocol=modbus` to see the rest; without it a deployed desktop
+sees exactly what it always did. A Modbus row's `id` is `unit << 8 | func`, its
+`dlc` the message length, and `unit`, `func` and `crc_valid` are its own
+columns.
 
 A database is created when: an admin creates it in the UI / API; an ingest
 client names an unknown one in its HELLO (auto-create, when enabled); or a

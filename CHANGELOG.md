@@ -131,11 +131,45 @@ gateway builds from source through its own Compose stack.
   `/v1/health` and the image's `org.opencontainers.image.revision`. A `0.1.0`
   on its own identifies nothing.
 
+- **A passive Modbus RTU tap.** A `[[device]]` of `kind = "serial"` opens the
+  line read-only — `O_RDONLY`, and the packaged unit allows the adapter with `r`
+  alone — and frames what it reads with `wiretap-catalog`'s `ModbusRtuStream`,
+  every function code searchable and broadcast allowed, so a line full of a
+  vendor's own codes is captured without knowing them first. Messages are stored
+  whole, CRC included, keyed by `unit << 8 | func`. The line is reopened when it
+  goes away.
+
+- **Configuration per device.** `[[device]]` tables name a kind, an interface,
+  a mode and the gateway database the device's frames land in, and the daemon
+  runs one archive pipeline — its own queue, cache file and gateway session —
+  per database. `[server] iface` stays as shorthand for CAN devices, so deployed
+  files are untouched. `mode = "passive"` on a CAN device refuses GVRET
+  transmits on that bus and never arms the responder there.
+
+- **Ingest protocol v2.** The `BATCH` record names its kind and carries up to
+  256 bytes, so a Modbus message crosses the wire whole; a CAN record's id word
+  is bit-identical to v1's. The gateway accepts v1 sessions **for this release
+  only**, so a capture daemon still on v1 keeps flowing while the gateway is
+  upgraded first — upgrade in that order. The daemon's own listener speaks v2
+  only. `docs/ingest-protocol.md` is rewritten for it.
+
+- **Reading the archive by protocol.** `inventory`, `time-bounds` and `frames`
+  take `?protocol=`, defaulting to `can` so every deployed desktop sees exactly
+  what it did; a misspelt protocol is a 400 rather than an empty result.
+
+### Changed
+
+- A config file's device set is exactly what it names. A file with no
+  `[server] iface` and no `[[device]]` used to capture `can0` by default; it now
+  captures nothing and says so. A hand run with no config file still captures
+  `can0`. Every shipped and deployed file names `iface`, so none is affected.
+
 ### Notes
 
 - The capture server is a **read-only tap** except for the Test Pattern
   responder, which is disabled by default. `tx_packets` on the interface is the
-  proof, and it is worth checking after any session on a live bus.
+  proof, and it is worth checking after any session on a live bus. A serial tap
+  is read-only by construction: the descriptor cannot be written.
 - Verified on a real Debian 13 host reading two live 250 kbit/s buses for 3 days
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
