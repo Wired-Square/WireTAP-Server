@@ -291,7 +291,7 @@ jobs:
 
           ingest_server "$CONFORMANCE_DB"
           python3 tools/test_ingest_client.py \
-            --host 127.0.0.1 --port 9400 --token tok --conformance
+            --host 127.0.0.1 --port 9400 --token tok --conformance --daemon
           kill -TERM "$server"; wait "$server" || true
 
           # And that pushed frames reach the archive, which is what proves the

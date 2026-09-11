@@ -8,6 +8,9 @@ oversize payload, HELLO ordering:
 
   ./test_ingest_client.py --host 127.0.0.1 --port 9323 --token SECRET --conformance
 
+Add --daemon when the listener is a capture daemon's rather than a gateway's:
+the daemon refuses a v1 HELLO where the gateway still accepts one.
+
 Live mode sends synthetic batches, which can then be checked in the archive:
 
   ./test_ingest_client.py --host pi.local --port 9323 --token SECRET --count 200
@@ -146,9 +149,11 @@ class ReferenceClient:
         return mtype == MSG_PONG
 
 
-def conformance(host: str, port: int, token: str, database: str) -> int:
-    """Protocol conformance against a LIVE server (Python or Rust gateway).
-    Exercises the protocol against a running server, over a real socket."""
+def conformance(host: str, port: int, token: str, database: str,
+                daemon: bool = False) -> int:
+    """Protocol conformance against a LIVE server, over a real socket.
+    `daemon` says the listener is a capture daemon's rather than a gateway's:
+    the one place the two answer differently is a v1 HELLO."""
     failures = 0
 
     def check(name, cond):
@@ -230,15 +235,20 @@ def conformance(host: str, port: int, token: str, database: str) -> int:
     check("time-relative batch acked", status == 0)
     c.close()
 
-    # A v1 daemon, not yet upgraded, against this gateway: accepted for one
-    # release so a remote capture box keeps flowing between the two upgrades.
+    # A v1 daemon, not yet upgraded. A gateway accepts it for one release so a
+    # remote capture box keeps flowing between the two upgrades; a daemon's own
+    # listener refuses it, since nothing older than v2 ever pushed there.
     c = ReferenceClient(host, port, token=token, database=database,
                         timeout=5.0, version=1)
     status, version, _ = c.hello()
-    check("v1 hello still accepted", status == 0 and version == PROTO_VERSION)
-    v1_record = struct.pack("<IIBB", 0, 0x123, 0, 3) + b"\x01\x02\x03"
-    seq, status, _ = c.send_batch(1, [v1_record], base_ts_us=base_us)
-    check("v1 batch acked", (seq, status) == (1, 0))
+    if daemon:
+        check("v1 hello refused, naming v2", status == 2 and version == PROTO_VERSION)
+        check("connection closed after v1 hello", c.recv_message() is None)
+    else:
+        check("v1 hello still accepted", status == 0 and version == PROTO_VERSION)
+        v1_record = struct.pack("<IIBB", 0, 0x123, 0, 3) + b"\x01\x02\x03"
+        seq, status, _ = c.send_batch(1, [v1_record], base_ts_us=base_us)
+        check("v1 batch acked", (seq, status) == (1, 0))
     c.close()
 
     print(f"\n{'PASS' if failures == 0 else f'{failures} FAILURE(S)'}")
@@ -277,13 +287,19 @@ def main():
     ap.add_argument("--count", type=int, default=5, help="Batches in live mode")
     ap.add_argument("--conformance", action="store_true",
                     help="Run the protocol conformance suite against a live server")
+    ap.add_argument("--daemon", action="store_true",
+                    help="The listener is a capture daemon's, which refuses a v1 "
+                         "HELLO; a gateway (the default) still accepts one")
     args = ap.parse_args()
 
     if not args.host:
         ap.error("--host is required; the in-process selftest went with the "
                  "Python server it drove")
+    if args.daemon and not args.conformance:
+        ap.error("--daemon only changes what --conformance expects")
     if args.conformance:
-        sys.exit(conformance(args.host, args.port, args.token, args.database))
+        sys.exit(conformance(args.host, args.port, args.token, args.database,
+                             daemon=args.daemon))
     live_send(args.host, args.port, args.token, args.count, args.database)
 
 
