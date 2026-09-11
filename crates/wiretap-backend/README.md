@@ -17,7 +17,7 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
   - **HTTP API** (8423) — the analytical query surface the desktop uses, plus
     capture import, database management and health.
   - **Admin UI** at `/admin` — API keys, databases, live ingest sessions,
-    activity, health.
+    activity, the recent server log, health.
 - **pgBackRest** (optional) — scheduled physical backups with PITR.
 
 ```
@@ -96,8 +96,11 @@ actively ingesting into it (409) and for the default/meta database
 | `WIRETAP_AUTO_MIGRATE` | `true` | Migrate capture databases to the current schema on start |
 | `RUST_LOG` | `wiretap_backend=info` | Log filter |
 
-Full list (listen addresses, ingest keepalive/batch caps) is in
+Full list (listen addresses, ingest keepalive/batch caps, log buffer size) is in
 [src/config.rs](src/config.rs).
+
+The Logging tab shows the newest `WIRETAP_LOG_BUFFER` records (2000) from
+memory; stdout remains the durable log.
 
 ## Optional: pgBackRest backups
 
@@ -257,5 +260,5 @@ python3 ../../tools/test_ingest_client.py --host localhost --port 9323 \
 ./smoke_test.sh http://localhost:8423 "$WIRETAP_ADMIN_KEY" vehicle_test
 ```
 
-Expect **29 passed, 0 failed**. The third argument is the seeded database and defaults to
+Expect **34 passed, 0 failed**. The third argument is the seeded database and defaults to
 `vehicle_test`.

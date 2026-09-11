@@ -94,6 +94,17 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" -H "Content-Type: applicat
 curl -fsS -H "$A" "$BASE/v1/db/$DB/activity" | grep -q queries; check "activity" $?
 curl -fsS -H "$A" "$BASE/v1/admin/ingest-sessions" | grep -q sessions; check "ingest-sessions" $?
 
+# --- logs ---
+curl -fsS -H "$A" "$BASE/v1/admin/logs" | grep -q records; check "logs" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/admin/logs")
+[ "$code" = "401" ]; check "logs: no token -> 401" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" "$BASE/v1/admin/logs")
+[ "$code" = "403" ]; check "logs: read key -> 403" $?
+# Every request above should have left an access-log line.
+curl -fsS -H "$A" "$BASE/v1/admin/logs?limit=500" | grep -q '/v1/db/'; check "access log records a request" $?
+# Polled routes sit below INFO; filtering at INFO makes this independent of RUST_LOG.
+! curl -fsS -H "$A" "$BASE/v1/admin/logs?level=INFO&limit=500" | grep -q '/v1/health'; check "health checks are not in the INFO stream" $?
+
 # --- revocation ---
 kid=$(curl -fsS -H "$A" "$BASE/v1/admin/keys" | python3 -c 'import sys,json;ks=json.load(sys.stdin)["keys"];print([k["id"] for k in ks if k["name"]=="smoke-read" and not k["revoked"]][-1])')
 curl -fsS -X POST -H "$A" "$BASE/v1/admin/keys/$kid/revoke" | grep -q revoked; check "revoke read key" $?

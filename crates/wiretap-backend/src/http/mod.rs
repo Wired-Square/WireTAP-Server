@@ -6,14 +6,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, MethodRouter};
 use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::db;
@@ -49,7 +49,10 @@ fn forbidden(msg: &str) -> ApiError {
 pub fn router(state: St) -> Router {
     let authed = Router::new()
         // databases
-        .route("/v1/databases", get(list_databases).post(create_database))
+        .route(
+            "/v1/databases",
+            polled(get(list_databases)).merge(post(create_database)),
+        )
         .route("/v1/databases/{db}", delete(delete_database))
         .route("/v1/databases/{db}/rollup/refresh", post(refresh_rollup))
         .route("/v1/db/{db}/time-bounds", get(time_bounds))
@@ -71,7 +74,7 @@ pub fn router(state: St) -> Router {
         .route("/v1/db/{db}/query/pattern-search", post(q_pattern_search))
         .route("/v1/queries/{id}", delete(cancel_query))
         // activity (admin)
-        .route("/v1/db/{db}/activity", get(activity))
+        .route("/v1/db/{db}/activity", polled(get(activity)))
         .route("/v1/db/{db}/activity/{pid}/cancel", post(activity_cancel))
         .route("/v1/db/{db}/activity/{pid}", delete(activity_terminate))
         // capture import
@@ -81,7 +84,8 @@ pub fn router(state: St) -> Router {
         .route("/v1/admin/keys/{id}", delete(keys_delete))
         .route("/v1/admin/keys/{id}/revoke", post(keys_revoke))
         .route("/v1/admin/keys/{id}/restore", post(keys_restore))
-        .route("/v1/admin/ingest-sessions", get(ingest_sessions))
+        .route("/v1/admin/ingest-sessions", polled(get(ingest_sessions)))
+        .route("/v1/admin/logs", polled(get(logs)))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw));
 
     // Admin SPA: static files with index.html fallback (client-side tabs).
@@ -94,11 +98,65 @@ pub fn router(state: St) -> Router {
         tower_http::services::ServeFile::new(admin_dir.join("index.html")),
     );
 
-    Router::new()
-        .route("/v1/health", get(health))
-        .merge(authed)
+    // The bundle is polled too: every SPA load pulls it.
+    let admin = Router::new()
         .nest_service("/admin", admin)
+        .layer(middleware::from_fn(mark_routine));
+
+    Router::new()
+        .route("/v1/health", polled(get(health)))
+        .merge(authed)
+        .merge(admin)
+        // Outermost, so it wraps `auth_mw` and sees the 401s too.
+        .layer(middleware::from_fn(access_log_mw))
         .with_state(state)
+}
+
+/// Polled rather than requested — a healthcheck, a tab refreshing itself — so
+/// a success is logged at DEBUG. Declared on the route, because which routes
+/// are polled is the route table's to know.
+#[derive(Clone, Copy)]
+struct Routine;
+
+async fn mark_routine(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    response.extensions_mut().insert(Routine);
+    response
+}
+
+fn polled(routes: MethodRouter<St>) -> MethodRouter<St> {
+    routes.layer(middleware::from_fn(mark_routine))
+}
+
+/// Method, path, status, duration, peer, key *name*. Never a header.
+async fn access_log_mw(
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let started = Instant::now();
+
+    let response = next.run(req).await;
+
+    let status = response.status().as_u16();
+    let ms = started.elapsed().as_millis();
+    let key = response
+        .extensions()
+        .get::<KeyInfo>()
+        .map_or("-", |k| k.name.as_str());
+    let routine = response.extensions().get::<Routine>().is_some();
+    if status >= 500 {
+        tracing::error!("{method} {uri} {status} {ms}ms peer={peer} key={key}");
+    } else if status >= 400 {
+        tracing::warn!("{method} {uri} {status} {ms}ms peer={peer} key={key}");
+    } else if routine {
+        tracing::debug!("{method} {uri} {status} {ms}ms peer={peer} key={key}");
+    } else {
+        tracing::info!("{method} {uri} {status} {ms}ms peer={peer} key={key}");
+    }
+    response
 }
 
 async fn auth_mw(
@@ -120,8 +178,12 @@ async fn auth_mw(
         .validate(key)
         .await
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid API key".into()))?;
-    req.extensions_mut().insert(info);
-    Ok(next.run(req).await)
+    req.extensions_mut().insert(info.clone());
+    let mut response = next.run(req).await;
+    // Also on the response: `access_log_mw` wraps this one, so by the time it
+    // logs, the request it could have read this from is gone.
+    response.extensions_mut().insert(info);
+    Ok(response)
 }
 
 /// Database access for read-style endpoints: role must allow reads and a
@@ -758,6 +820,36 @@ async fn ingest_sessions(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     check_admin(&key)?;
     Ok(Json(json!({ "sessions": state.sessions.list().await })))
+}
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    level: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct LogsResponse {
+    records: Vec<crate::logbuf::LogRecord>,
+    capacity: usize,
+}
+
+/// Recent log records, newest first.
+async fn logs(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Query(q): Query<LogsQuery>,
+) -> Result<Json<LogsResponse>, ApiError> {
+    check_admin(&key)?;
+    let level = q
+        .level
+        .as_deref()
+        .map(|s| s.parse().map_err(|_| format!("unknown level '{s}'")))
+        .transpose()?;
+    Ok(Json(LogsResponse {
+        records: state.logs.snapshot(level, q.limit.unwrap_or(200)),
+        capacity: state.logs.capacity(),
+    }))
 }
 
 #[cfg(test)]

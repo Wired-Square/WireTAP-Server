@@ -13,6 +13,7 @@ mod db;
 mod http;
 mod ingest;
 mod keys;
+mod logbuf;
 mod running;
 mod schema;
 mod sql;
@@ -22,35 +23,51 @@ mod types;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
 use config::Config;
 use db::Databases;
 use ingest::{IngestServer, Sessions};
 use keys::KeyStore;
+use logbuf::LogBuffer;
 use state::AppState;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    // Config first: it sizes the log buffer, and nothing in it logs.
+    let config = match Config::from_env() {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            eprintln!("wiretap-backend {VERSION}: fatal: {e}");
+            std::process::exit(1);
+        }
+    };
+    // One filter over both layers: the admin UI sees exactly what stdout sees,
+    // and `RUST_LOG` governs both.
+    let logs = LogBuffer::new(config.log_buffer);
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "wiretap_backend=info".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(logs.clone())
         .init();
 
-    if let Err(e) = run().await {
+    if let Err(e) = run(config, logs).await {
         tracing::error!("fatal: {e}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<(), String> {
+async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
     // Before anything that can fail or retry. /v1/health carries this too, but
     // only once the listener is up: a gateway looping in the Postgres wait
     // below, or one that never binds, would otherwise be a container with no
     // way to say which build it is.
     tracing::info!("wiretap-backend {VERSION}");
 
-    let config = Arc::new(Config::from_env()?);
     let dbs = Databases::new(config.clone());
 
     // Wait for Postgres (compose healthcheck usually beats us here, but a
@@ -98,6 +115,7 @@ async fn run() -> Result<(), String> {
         dbs: dbs.clone(),
         keys,
         sessions,
+        logs,
     });
     let listener = tokio::net::TcpListener::bind(&config.http_listen)
         .await
@@ -113,7 +131,11 @@ async fn run() -> Result<(), String> {
     // failure, which is the same path as a gateway outage: cache to disk, retry,
     // drain. Nothing is lost, but nothing is written either until this finishes.
     tokio::spawn(async move { dbs.migrate_all().await });
-    axum::serve(listener, http::router(app_state))
-        .await
-        .map_err(|e| format!("http server: {e}"))
+    // `with_connect_info` so the access log can name the peer.
+    axum::serve(
+        listener,
+        http::router(app_state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|e| format!("http server: {e}"))
 }

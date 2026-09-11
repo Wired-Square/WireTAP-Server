@@ -102,6 +102,24 @@ gateway builds from source through its own Compose stack.
   The migration itself is 5.3 s for 87.8 M compressed rows and decompresses
   nothing.
 
+- **An access log, and the Logging tab that reads it.** Every request is logged
+  with its method, path, status, duration and peer — and its key's *name*, never
+  the key. Until now a request that was served, refused or never arrived left no
+  trace at all, and the difference between those three had to be established by
+  replaying the query by hand on the host.
+
+  The level follows the outcome: 5xx at ERROR, 4xx at WARN, the rest at INFO. The
+  traffic nobody asks about — the 15-second container healthcheck, the admin
+  bundle, every route the admin tabs poll — goes to DEBUG on success, because
+  at INFO it would evict everything worth reading within minutes. Which routes
+  those are is declared on the route table, so the next polled endpoint cannot
+  be forgotten by a list somewhere else. `RUST_LOG` still governs.
+
+  The same records fill a bounded in-memory ring that `/v1/admin/logs` serves to
+  the admin UI, so the recent log is readable without a shell on the host. It is
+  a tail, not an archive: `WIRETAP_LOG_BUFFER` records (2000 by default), lost on
+  restart, with the container's stdout still the durable copy.
+
 - **Debian packaging.** A `.deb` for amd64 and arm64, a hardened systemd unit,
   and maintainer scripts that handle upgrading from a pre-packaging deployment —
   the old unit is moved aside and the daemon deliberately left stopped so

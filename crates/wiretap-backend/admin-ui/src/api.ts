@@ -134,6 +134,16 @@ export interface IngestSession {
   connected_at: string;
 }
 
+export interface LogRecord {
+  seq: number;
+  ts: string;
+  level: string;
+  target: string;
+  message: string;
+  /** `database=x elapsed_ms=n` — structured fields, empty when there are none. */
+  fields: string;
+}
+
 export interface Activity {
   pid: number;
   username: string | null;

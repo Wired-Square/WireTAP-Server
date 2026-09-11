@@ -5,8 +5,9 @@ import Databases from "./pages/Databases";
 import Health from "./pages/Health";
 import Ingest from "./pages/Ingest";
 import Keys from "./pages/Keys";
+import Logging from "./pages/Logging";
 
-const TABS = ["Keys", "Databases", "Ingest", "Activity", "Health"] as const;
+const TABS = ["Keys", "Databases", "Ingest", "Activity", "Logging", "Health"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function App() {
@@ -45,6 +46,7 @@ export default function App() {
       {tab === "Databases" && <Databases />}
       {tab === "Ingest" && <Ingest />}
       {tab === "Activity" && <Activity />}
+      {tab === "Logging" && <Logging />}
       {tab === "Health" && <Health />}
     </>
   );

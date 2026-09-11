@@ -120,6 +120,11 @@ input:focus, select:focus { outline: 1px solid var(--accent); }
 .badge.migrating,
 .badge.behind { color: var(--brand); border-color: var(--brand); }
 
+/* The Logging tab reuses .revoked/.behind/.pending for ERROR/WARN/INFO. */
+.badge.debug { color: var(--text-muted); opacity: 0.7; }
+
+.clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .error { color: var(--danger); margin: 0.5rem 0; }
 
 .login {

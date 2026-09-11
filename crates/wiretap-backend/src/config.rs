@@ -29,6 +29,8 @@ pub struct Config {
     pub auto_migrate: bool,
     pub ingest_keepalive_secs: f64,
     pub ingest_max_batch_frames: usize,
+    /// Log records held in memory for the admin UI's Logging tab.
+    pub log_buffer: usize,
 }
 
 fn var_or(name: &str, default: &str) -> String {
@@ -63,6 +65,7 @@ impl Config {
             auto_migrate: parse_or("WIRETAP_AUTO_MIGRATE", true),
             ingest_keepalive_secs: parse_or("WIRETAP_INGEST_KEEPALIVE_SECS", 30.0),
             ingest_max_batch_frames: parse_or("WIRETAP_INGEST_MAX_BATCH_FRAMES", 256),
+            log_buffer: parse_or("WIRETAP_LOG_BUFFER", 2000),
         })
     }
 
