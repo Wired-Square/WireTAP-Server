@@ -12,7 +12,8 @@ All notable changes to this project are documented here. Entries go under
   reopen — those used to share the clock of the read that released them, up
   to 256 bytes of line time late. The tap remembers the clock of each read
   and stamps by the read that delivered the message's last byte, less the
-  wire time of the bytes after it in that read; stamps never go backwards.
+  wire time of the bytes after it in that read — never reaching behind a read
+  the tap has already seen return, so a line's stamps never go backwards.
   Built on `wiretap-lib-rs` v0.16.5, whose framer now reports where each
   message ended and takes `frame_any_function()` in place of a declaration of
   all 256 codes.

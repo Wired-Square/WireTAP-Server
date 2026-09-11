@@ -125,8 +125,8 @@ pub struct SerialSettings {
 }
 
 impl SerialSettings {
-    /// How long `bytes` take on the wire, in microseconds: start, data,
-    /// parity and stop bits at the baud rate.
+    /// How long `bytes` take on the wire, in whole microseconds: start,
+    /// data, parity and stop bits at the baud rate.
     pub fn wire_time_us(&self, bytes: u64) -> i64 {
         let bits = 1
             + u64::from(self.data_bits)

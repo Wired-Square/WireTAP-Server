@@ -14,15 +14,16 @@
 
 use std::collections::VecDeque;
 
+use wiretap_catalog::modbus::MAX_RTU_LEN;
 use wiretap_catalog::ModbusRtuStream;
 use wiretap_model::{ModbusSample, SourceId};
 
 use crate::settings::SerialSettings;
 
-/// Reads remembered for stamping. The framer holds at most 512 bytes, so a
-/// message can never end in a read older than 512 reads back; past this the
-/// oldest kept read stands in, which stamps late and never early.
-const MAX_READS: usize = 1024;
+/// Reads remembered for stamping. The framer buffers at most `2 * MAX_RTU_LEN`
+/// bytes, so a message never ends in a read older than that many reads back;
+/// should one, the oldest kept read stands in, late and never early.
+const MAX_READS: usize = 4 * MAX_RTU_LEN;
 
 /// Every function code framed: a modelled one keeps its length rules, so this
 /// is "search for anything the table does not know".
@@ -32,26 +33,23 @@ fn framer() -> ModbusRtuStream {
         .allow_broadcast()
 }
 
-/// One read, as the stamping needs it: the stream cursor after it, its clock,
-/// and the clock of the read before it — a byte in this read arrived after
-/// that one returned.
+/// One read: the stream cursor after it, and its clock.
 struct ReadEnd {
     end: u64,
     ts_us: i64,
-    floor_us: i64,
 }
 
 /// One serial line's framer, the bus number its messages carry, and the reads
-/// that fed it, so each message is stamped by the read that delivered its
-/// last byte rather than the one that released it.
+/// that fed it.
 pub struct RtuTap {
     stream: ModbusRtuStream,
     bus: SourceId,
     line: SerialSettings,
-    /// Reads not yet passed by a message, oldest first.
+    /// The newest `MAX_READS` reads no message has passed yet, oldest first.
     reads: VecDeque<ReadEnd>,
-    /// The newest stamp handed out; the archive wants them monotonic.
-    last_stamp_us: i64,
+    /// The newest clock of a read that has left `reads`, or of a stamp handed
+    /// out: a stamp never reaches behind either.
+    floor_us: i64,
 }
 
 impl RtuTap {
@@ -61,7 +59,7 @@ impl RtuTap {
             bus,
             line: line.clone(),
             reads: VecDeque::new(),
-            last_stamp_us: i64::MIN,
+            floor_us: i64::MIN,
         }
     }
 
@@ -72,10 +70,9 @@ impl RtuTap {
         self.reads.push_back(ReadEnd {
             end: self.stream.bytes_fed(),
             ts_us,
-            floor_us: self.reads.back().map_or(i64::MIN, |r| r.ts_us),
         });
         if self.reads.len() > MAX_READS {
-            self.reads.pop_front();
+            self.forget_oldest();
         }
         messages
             .into_iter()
@@ -91,26 +88,34 @@ impl RtuTap {
     }
 
     /// When the byte at `end_offset - 1` arrived: the clock of the read that
-    /// delivered it, less the wire time of the bytes after it in that read —
-    /// never before the read preceding it, never before the previous message.
-    /// Messages come out in stream order, so earlier reads are done with.
+    /// delivered it, less the wire time of the bytes after it in that read,
+    /// and never behind the floor. Messages come out in stream order, so the
+    /// reads before that one are done with.
     fn stamp(&mut self, end_offset: u64) -> i64 {
         while self.reads.len() > 1 && self.reads[0].end < end_offset {
-            self.reads.pop_front();
+            self.forget_oldest();
         }
         let read = &self.reads[0];
         let ts = (read.ts_us - self.line.wire_time_us(read.end.saturating_sub(end_offset)))
-            .max(read.floor_us)
-            .max(self.last_stamp_us);
-        self.last_stamp_us = ts;
+            .max(self.floor_us);
+        self.floor_us = ts;
         ts
+    }
+
+    fn forget_oldest(&mut self) {
+        if let Some(read) = self.reads.pop_front() {
+            self.floor_us = self.floor_us.max(read.ts_us);
+        }
     }
 
     /// Forget a half-read message: the line has been reopened and the bytes
     /// on either side of the gap do not join. The reads go with the framer,
-    /// whose cursor restarts with it.
+    /// whose cursor restarts with it; the floor keeps their newest clock.
     pub fn reset(&mut self) {
         self.stream = framer();
+        if let Some(read) = self.reads.back() {
+            self.floor_us = self.floor_us.max(read.ts_us);
+        }
         self.reads.clear();
     }
 }
@@ -118,6 +123,7 @@ impl RtuTap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{Framing, Parity};
 
     /// CRC-16/MODBUS, low byte first, as it goes on the wire.
     fn with_crc(body: &[u8]) -> Vec<u8> {
@@ -144,9 +150,9 @@ mod tests {
             &SerialSettings {
                 baud: 9600,
                 data_bits: 8,
-                parity: crate::settings::Parity::None,
+                parity: Parity::None,
                 stop_bits: 1,
-                framing: crate::settings::Framing::ModbusRtu,
+                framing: Framing::ModbusRtu,
             },
         )
     }
@@ -156,6 +162,14 @@ mod tests {
             .iter()
             .map(|s| (s.unit, s.func, s.raw.len()))
             .collect()
+    }
+
+    fn stamps(samples: &[ModbusSample]) -> Vec<i64> {
+        samples.iter().map(|s| s.ts_us).collect()
+    }
+
+    fn increasing(stamps: &[i64]) -> bool {
+        stamps.windows(2).all(|w| w[0] < w[1])
     }
 
     #[test]
@@ -241,17 +255,15 @@ mod tests {
         assert!(joined.push(&request, 1).is_empty(), "lost, and holding");
     }
 
-    /// A line opened mid-message: the half message is a false head the framer
-    /// holds until the buffer fills, then every message buffered behind it
-    /// comes out of one read. Each must carry the clock of the read that
+    /// A line opened mid-message: the half message leaves a false head the
+    /// framer holds until the buffer fills, then every message buffered behind
+    /// it comes out of one read. Each must carry the clock of the read that
     /// delivered its last byte, not the read that released it.
     #[test]
     fn a_sync_burst_is_stamped_by_the_read_each_message_arrived_in() {
         let request = with_crc(&[0x01, 0x03, 0x00, 0x00, 0x00, 0x01]);
         let mut line = request[..5].to_vec();
-        for _ in 0..40 {
-            line.extend_from_slice(&request);
-        }
+        line.extend_from_slice(&request.repeat(40));
 
         // One byte a read, a millisecond apart, as a slow line is read.
         let mut tap = tap_on_9600_8n1(SourceId(0));
@@ -263,25 +275,17 @@ mod tests {
             }
         }
 
-        let burst = &released[0];
         assert!(
-            burst.len() > 1,
+            released[0].len() > 1,
             "the sync released {} message(s)",
-            burst.len()
+            released[0].len()
         );
-        let stamps: Vec<i64> = released.iter().flatten().map(|s| s.ts_us).collect();
-        assert!(stamps.windows(2).all(|w| w[0] < w[1]), "{stamps:?}");
+        let got = stamps(&released.concat());
+        assert_eq!(got.len(), 40, "every message framed");
         // Message k's last byte is at line offset 5 + 8k + 7, in the read of
         // that index — a millisecond each.
-        let expected: Vec<i64> = (0..stamps.len())
-            .map(|k| (12 + 8 * k as i64) * 1000)
-            .collect();
-        assert_eq!(stamps, expected);
-        assert_eq!(
-            released.iter().flatten().count(),
-            40,
-            "every message framed"
-        );
+        let expected: Vec<i64> = (0..40).map(|k| (12 + 8 * k) * 1000).collect();
+        assert_eq!(got, expected);
     }
 
     /// Several messages in one read are spread by the time their bytes took
@@ -293,58 +297,45 @@ mod tests {
         let mut tap = tap_on_9600_8n1(SourceId(0));
         assert_eq!(tap.push(&request, 1_000_000).len(), 1);
 
-        let chunk: Vec<u8> = request.iter().copied().cycle().take(10 * 8).collect();
-        let stamps: Vec<i64> = tap
-            .push(&chunk, 1_100_000)
-            .iter()
-            .map(|s| s.ts_us)
-            .collect();
+        let stamps = stamps(&tap.push(&request.repeat(10), 1_100_000));
         assert_eq!(stamps.len(), 10);
-        assert_eq!(
-            *stamps.last().unwrap(),
-            1_100_000,
-            "the last byte is the read's"
-        );
+        assert_eq!(stamps[9], 1_100_000, "the last byte is the read's");
         assert_eq!(
             stamps[8],
             1_100_000 - 8_333,
             "one message of wire time earlier"
         );
         assert_eq!(stamps[0], 1_100_000 - 75_000, "72 bytes of wire time");
-        assert!(stamps.windows(2).all(|w| w[0] < w[1]));
+        assert!(increasing(&stamps));
     }
 
-    /// The floors. Wire time cannot reach back past the previous read, whose
-    /// return proves those bytes had not arrived; and neither a clock stepped
-    /// backwards nor a reopen may hand the archive a stamp below the last.
+    /// The floor: wire time cannot reach back past a read the tap has seen
+    /// return — whether it completed a message, completed nothing, or was
+    /// discarded by a reopen — nor past a stamp already handed out.
     #[test]
-    fn a_stamp_never_precedes_the_previous_read_or_the_previous_message() {
+    fn a_stamp_never_reaches_behind_a_read_the_tap_has_seen() {
         let request = with_crc(&[0x01, 0x03, 0x00, 0x00, 0x00, 0x01]);
-        let chunk: Vec<u8> = request.iter().copied().cycle().take(10 * 8).collect();
+        let ten = request.repeat(10);
 
-        // Ten messages of wire time (75 ms) in a read half a millisecond
-        // after the previous one: all but the last pin to that read.
+        // Half a message at t, the rest and nine more half a millisecond
+        // later: 75 ms of wire time, floored at t. Nothing was stamped
+        // before, so the read alone is the floor.
         let mut tap = tap_on_9600_8n1(SourceId(0));
-        tap.push(&request, 1_000_000);
-        let stamps: Vec<i64> = tap
-            .push(&chunk, 1_000_500)
-            .iter()
-            .map(|s| s.ts_us)
-            .collect();
-        assert_eq!(&stamps[..9], &[1_000_000; 9]);
-        assert_eq!(stamps[9], 1_000_500);
+        assert!(tap.push(&request[..5], 1_000_000).is_empty());
+        let got = stamps(&tap.push(&ten[5..], 1_000_500));
+        assert_eq!(&got[..9], &[1_000_000; 9]);
+        assert_eq!(got[9], 1_000_500);
 
-        // The clock steps back between reads.
+        // A read that completed nothing, then a reopen: still the floor.
+        let mut tap = tap_on_9600_8n1(SourceId(0));
+        assert!(tap.push(&request[..5], 2_000_000).is_empty());
+        tap.reset();
+        assert_eq!(stamps(&tap.push(&ten, 2_000_500))[0], 2_000_000);
+
+        // The clock steps back between reads: the stamp is held.
         let mut tap = tap_on_9600_8n1(SourceId(0));
         assert_eq!(tap.push(&request, 2_000_000)[0].ts_us, 2_000_000);
-        assert_eq!(
-            tap.push(&request, 1_000_000)[0].ts_us,
-            2_000_000,
-            "held, not reversed"
-        );
-
-        // A reopen restarts the framer's cursor and the reads with it; the
-        // floor on what the archive has been given survives.
+        assert_eq!(tap.push(&request, 1_000_000)[0].ts_us, 2_000_000);
         tap.reset();
         assert_eq!(tap.push(&request, 1_500_000)[0].ts_us, 2_000_000);
         assert_eq!(tap.push(&request, 2_500_000)[0].ts_us, 2_500_000);
@@ -366,30 +357,19 @@ mod tests {
             let mut samples = Vec::new();
             let mut burst = 0;
             for (i, c) in bytes.chunks(chunk).enumerate() {
-                // Read as fast as a 9600 8N1 line can deliver a chunk.
-                let ts_us = ((i + 1) * chunk) as i64 * 10 * 1_000_000 / 9600;
-                let batch = tap.push(c, ts_us);
-                if burst == 0 && !batch.is_empty() {
+                // Read as fast as the line can deliver a chunk.
+                let batch = tap.push(c, tap.line.wire_time_us(((i + 1) * chunk) as u64));
+                if burst == 0 {
                     burst = batch.len();
                 }
                 samples.extend(batch);
             }
-            let stamps: Vec<i64> = samples.iter().map(|s| s.ts_us).collect();
+            // Strictly, so the burst the sync releases shares no stamp.
             assert!(
-                stamps.windows(2).all(|w| w[0] < w[1]),
+                increasing(&stamps(&samples)),
                 "{chunk}-byte reads: stamps not increasing"
             );
-            let first: std::collections::BTreeSet<i64> =
-                stamps.iter().take(burst).copied().collect();
-            eprintln!(
-                "{chunk}-byte reads: the sync released {burst} messages, {} distinct stamps",
-                first.len()
-            );
-            assert_eq!(
-                first.len(),
-                burst,
-                "{chunk}-byte reads: the sync burst shares stamps"
-            );
+            eprintln!("{chunk}-byte reads: the sync released {burst} messages");
             let framed: usize = samples.iter().map(|s| s.raw.len()).sum();
             let coverage = framed as f64 / bytes.len() as f64;
             eprintln!(
