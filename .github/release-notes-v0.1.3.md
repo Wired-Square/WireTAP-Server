@@ -31,7 +31,19 @@ and one CHECK refuses a row whose columns disagree with its protocol.
 
 ### Upgrading
 
-Pull the gateway image and restart it; the migration runs on start. A
+**Check your TimescaleDB first: this release needs 2.28.1 or later.**
+`ALTER TABLE … ADD CONSTRAINT` on a compressed hypertable has a use-after-free
+before that ([timescale/timescaledb#10094](https://github.com/timescale/timescaledb/pull/10094))
+which fails the v3 migration at random and leaves the database half-migrated
+and marked *failed*. `SELECT extversion FROM pg_extension WHERE extname =
+'timescaledb'` tells you; if it is older, move the engine first, under the
+gateway you already run — pin `timescale/timescaledb:2.29.2-pg16`, recreate,
+run `ALTER EXTENSION timescaledb UPDATE` in every database that carries the
+extension, restart the gateway — and only then move the gateway's tag. The
+[README](https://github.com/Wired-Square/WireTAP-Server/blob/main/crates/wiretap-backend/README.md#migrating-an-existing-archive-into-the-container)
+has the steps. TimescaleDB does not downgrade; snapshot first.
+
+Then pull the gateway image and restart it; the migration runs on start. A
 database being migrated refuses reads and writes and a capture daemon caches
 to disk through it — budget **seconds per 100 million rows**: the CHECK in
 `0003` validates every chunk once, measured at ~18 M rows/s on compressed

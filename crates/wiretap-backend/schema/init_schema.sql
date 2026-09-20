@@ -3,9 +3,11 @@
 -- Schema for raw capture frames + decoded signals (TimescaleDB hypertable).
 -- CAN, Modbus and serial share one table, discriminated by `protocol`.
 --
--- Requires the timescaledb extension (PostgreSQL 14+):
+-- Requires the timescaledb extension, 2.28.1 or later, on PostgreSQL 14+:
 --   - add timescaledb to shared_preload_libraries and restart Postgres
 --   - CREATE EXTENSION needs superuser
+--   - older TimescaleDB has a use-after-free in ADD CONSTRAINT on compressed
+--     hypertables (timescale/timescaledb#10094) that 0003's CHECK trips
 -- Existing pre-TimescaleDB databases should be migrated with
 -- migrate_to_timescale.py rather than re-running this file.
 

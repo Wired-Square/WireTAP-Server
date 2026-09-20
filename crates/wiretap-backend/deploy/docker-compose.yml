@@ -13,7 +13,10 @@ name: wiretap-backend
 
 services:
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
+    # Pinned, as the gateway is: the schema needs 2.28.1 or later, and an
+    # engine upgrade should be a deliberate edit. This is the version the
+    # schema was measured on.
+    image: timescale/timescaledb:2.29.2-pg16
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     command: postgres -c shared_preload_libraries=timescaledb

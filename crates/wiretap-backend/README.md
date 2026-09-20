@@ -5,8 +5,8 @@ fronts it with an API, so **nothing connects to PostgreSQL directly** — not th
 WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
 `wiretap-server`. The stack is:
 
-- **TimescaleDB** (PostgreSQL 16 + TimescaleDB) — capture storage, one database
-  per capture. Not published to the network.
+- **TimescaleDB** (PostgreSQL 16 + TimescaleDB **2.28.1 or later**) — capture
+  storage, one database per capture. Not published to the network.
 - **`wiretap-backend`** (Rust / axum) — the only process that talks to Postgres.
   Two listeners plus a built-in admin UI:
   - **Binary ingest** (TCP 9323) — the protocol in
@@ -169,6 +169,29 @@ Two things to know when it does:
   last case is why the check looks at the *earliest* stored bucket: a holed
   rollup has recent data and a small lag, so it reads as healthy on every obvious
   measure while omitting everything below the hole.
+
+**Schema v3 needs TimescaleDB 2.28.1 or later.** Its migration adds a CHECK
+to a compressed hypertable, and `ALTER TABLE … ADD CONSTRAINT` on older
+TimescaleDB has a use-after-free (fixed by
+[timescale/timescaledb#10094](https://github.com/timescale/timescaledb/pull/10094)
+in 2.28.1) that fails the statement at random with `unrecognized node type`,
+leaving the database half-migrated and marked *failed* — and, since the
+`events` reshape runs first, without its `events` table. Check before
+upgrading a gateway that carries it:
+
+```bash
+docker compose exec timescaledb psql -U postgres -tAc \
+  "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"
+```
+
+If it is older, move the engine **first, under the gateway you already run**:
+pin `timescale/timescaledb:2.29.2-pg16` (what the schema was measured on) in
+the compose, recreate the stack, then in *every* database that carries the
+extension — `postgres`, `template1`, the default database and each capture
+database — run `ALTER EXTENSION timescaledb UPDATE` with `psql -X`, and restart
+the gateway. Its start re-applies the schema through TimescaleDB functions,
+which refuse a version mismatch until that `ALTER` has run. TimescaleDB does
+not downgrade; snapshot first. Only then move the gateway's tag.
 
 **An archive at schema v1** (any database the gateway has run since
 2026-09-10) is taken to v3 in one pass:

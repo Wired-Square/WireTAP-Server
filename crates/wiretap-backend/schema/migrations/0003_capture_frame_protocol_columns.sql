@@ -17,6 +17,11 @@
 --
 -- One file, two runners, as 0001 and 0002.
 --
+-- **Needs TimescaleDB 2.28.1 or later.** Before that, ADD CONSTRAINT on a
+-- compressed hypertable reads freed memory (timescale/timescaledb#10094) and
+-- fails at random with `unrecognized node type`; on 2.27.2 three of five
+-- adds failed. Upgrade the engine first — the README says how.
+--
 -- Measured before it was written, on a copy of a real archive — 83.6 M rows
 -- over 5 compressed chunks, TimescaleDB 2.29 — because both statements touch a
 -- compressed hypertable: the NOT NULL drop is 2 ms and catalogue-only; the

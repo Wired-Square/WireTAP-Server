@@ -10,6 +10,13 @@ Two services: TimescaleDB (Postgres, not published) and the backend gateway
 (HTTP API + admin UI on 8423, binary ingest on 9323). Database backups are
 left to the host — on TrueNAS, a ZFS snapshot task on the data dataset.
 
+The gateway needs **TimescaleDB 2.28.1 or later** (schema v3 and up; the
+[backend README](../README.md#migrating-an-existing-archive-into-the-container)
+says why and how to move an older engine). The compose files here pin
+`timescale/timescaledb:2.29.2-pg16`, the version the schema was measured on,
+for the same reason the gateway image is pinned: an engine upgrade should be
+an edit you made, not a badge you clicked.
+
 ## 1. Get the image
 
 TrueNAS (and most NAS app systems) install from a prebuilt image, not a
@@ -93,7 +100,7 @@ curl -fsS http://localhost:8423/v1/health
 ```yaml
 services:
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:2.29.2-pg16
     environment:
       POSTGRES_PASSWORD: CHANGE_ME
     command: postgres -c shared_preload_libraries=timescaledb
@@ -138,9 +145,19 @@ Notes:
   image first (`docker pull`) keeps that window to the recreate alone. Take a
   snapshot first if the release migrates the schema —
   the CHANGELOG says when one does, and a large archive can be refusing traffic
-  for minutes while it rebuilds its rollup. Capture daemons cache to disk
-  through that and drain when it clears. Data on the dataset persists across
-  container replacement; the old image stays in `docker images` for a rollback.
+  for minutes while it migrates (measured: about two minutes for 1.9 billion
+  rows at v3). Capture daemons cache to disk through that and drain when it
+  clears. Data on the dataset persists across container replacement; the old
+  image stays in `docker images` for a rollback.
+- **"Update available" on the Apps page is not a gateway release.** For a
+  Custom App it means an image digest moved for *some* tag your YAML names;
+  with both tags pinned it stays quiet. If the release needs a newer
+  TimescaleDB, upgrade the engine first, under the gateway you already run:
+  change only the `timescaledb` image line, Update, then run
+  `ALTER EXTENSION timescaledb UPDATE` (`psql -X`) in every database that has
+  the extension — `postgres`, `template1`, `wiretap` and each capture
+  database — and restart the backend container. Then change the gateway's tag.
+  TimescaleDB does not downgrade; the snapshot is the way back.
 - **Upgrade the gateway before the capture daemons.** A gateway still accepts
   the previous ingest protocol; a daemon speaking a newer one than its gateway
   is refused, and caches to disk until the gateway catches up.

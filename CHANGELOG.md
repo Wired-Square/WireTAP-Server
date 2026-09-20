@@ -37,7 +37,8 @@ belong to which protocol; the capture daemon is unchanged.
   over it. Measured on a copy of a real archive: the NOT NULL drop is
   catalogue-only, and the CHECK validates compressed chunks in place at
   roughly 18 M rows/s — expect seconds per 100 M rows of refused traffic,
-  about two minutes on the largest deployed archive.
+  about two minutes on the largest deployed archive. **Needs TimescaleDB
+  2.28.1 or later** — see Notes.
 
 - **A migration rebuilds the hourly rollup only when it has to.** The rebuild
   after a migration now runs only if the rollup no longer covers the archive
@@ -45,6 +46,19 @@ belong to which protocol; the capture daemon is unchanged.
   `0002` leaves it alone. Without this, bringing the largest deployed archive
   to v2 would have refused its traffic for the twenty-odd minutes the previous
   migration's rebuild took, for a change that never touched the aggregate.
+
+### Notes
+
+- **Schema v3 needs TimescaleDB 2.28.1 or later.** `ALTER TABLE … ADD
+  CONSTRAINT` on a compressed hypertable has a use-after-free before that
+  ([timescale/timescaledb#10094](https://github.com/timescale/timescaledb/pull/10094))
+  which fails the migration at random with `unrecognized node type`, leaving
+  the database half-migrated and marked *failed*. Found on a deployment
+  running 2.27.2 by probing a throwaway database before the archives; the
+  engine was moved to 2.29.2 first. Check
+  `SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'` before
+  upgrading a gateway to this release; the README says how to move the
+  engine. The shipped compose files now pin `timescale/timescaledb:2.29.2-pg16`.
 
 ## [0.1.2] — 2026-09-12
 
