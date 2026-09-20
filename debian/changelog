@@ -1,3 +1,11 @@
+wiretap-server (0.1.3) bookworm; urgency=medium
+
+  * No change to the daemon. Republished alongside the gateway, which gains
+    per-database events and schema v3, so the two halves stay on one version.
+    A 0.1.2 daemon is served by a 0.1.3 gateway without complaint.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Sun, 20 Sep 2026 20:13:12 +1000
+
 wiretap-server (0.1.2) bookworm; urgency=medium
 
   * A serial tap stamps each message when its last byte arrived, including

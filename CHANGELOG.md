@@ -5,6 +5,11 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-09-20
+
+The gateway gains per-database events and a schema that says which columns
+belong to which protocol; the capture daemon is unchanged.
+
 ### Added
 
 - **Events: a user's annotations on a capture database.** A moment or a span
@@ -259,7 +264,8 @@ through its own Compose stack.
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
 
-[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Wired-Square/WireTAP-Server/releases/tag/v0.1.0
