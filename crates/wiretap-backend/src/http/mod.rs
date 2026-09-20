@@ -10,13 +10,14 @@ use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, MethodRouter};
+use axum::routing::{delete, get, patch, post, MethodRouter};
 use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::db;
+use crate::events;
 use crate::ingest::proto;
 use crate::ingest::writer::FrameRow;
 use crate::keys::{KeyInfo, Role};
@@ -46,6 +47,10 @@ fn forbidden(msg: &str) -> ApiError {
     ApiError(StatusCode::FORBIDDEN, msg.to_string())
 }
 
+fn not_found(msg: impl Into<String>) -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, msg.into())
+}
+
 pub fn router(state: St) -> Router {
     let authed = Router::new()
         // databases
@@ -59,6 +64,12 @@ pub fn router(state: St) -> Router {
         .route("/v1/db/{db}/inventory", get(inventory))
         .route("/v1/db/{db}/frames", get(frames))
         .route("/v1/db/{db}/payloads", post(payloads))
+        // events: a user's annotations on one database
+        .route("/v1/db/{db}/events", get(events_list).post(events_create))
+        .route(
+            "/v1/db/{db}/events/{id}",
+            patch(events_update).delete(events_delete),
+        )
         // analytical queries
         .route("/v1/db/{db}/query/byte-changes", post(q_byte_changes))
         .route("/v1/db/{db}/query/frame-changes", post(q_frame_changes))
@@ -208,11 +219,7 @@ fn check_admin(key: &KeyInfo) -> Result<(), ApiError> {
 }
 
 async fn client_for(state: &St, db: &str) -> Result<deadpool_postgres::Object, ApiError> {
-    let pool = state
-        .dbs
-        .pool(db)
-        .await
-        .map_err(|e| ApiError(StatusCode::NOT_FOUND, e))?;
+    let pool = state.dbs.pool(db).await.map_err(not_found)?;
     pool.get()
         .await
         .map_err(|e| ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("pool: {e}")))
@@ -504,6 +511,77 @@ async fn payloads(
 }
 
 // ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+// Gated by `check_read`, writes included: annotating an archive is a user's
+// act, users hold read keys, and the alternative is handing every desktop an
+// admin key. A pinned read key annotates only its own database, as it reads
+// only that.
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    start: Option<String>,
+    end: Option<String>,
+    limit: Option<u32>,
+}
+
+async fn events_list(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(db): Path<String>,
+    Query(q): Query<EventsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_read(&key, &db)?;
+    let client = client_for(&state, &db).await?;
+    // Uncapped, unlike `frames`: there is no cursor here, so a cap would
+    // override the client's limit in silence.
+    let events = events::list(&client, q.start, q.end, q.limit.unwrap_or(1000)).await?;
+    Ok(Json(json!({ "events": events })))
+}
+
+async fn events_create(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(db): Path<String>,
+    Json(new): Json<events::NewEvent>,
+) -> Result<(StatusCode, Json<events::Event>), ApiError> {
+    check_read(&key, &db)?;
+    let client = client_for(&state, &db).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(events::create(&client, &new).await?),
+    ))
+}
+
+async fn events_update(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path((db, id)): Path<(String, i64)>,
+    Json(patch): Json<events::EventPatch>,
+) -> Result<Json<events::Event>, ApiError> {
+    check_read(&key, &db)?;
+    let client = client_for(&state, &db).await?;
+    events::update(&client, id, &patch)
+        .await?
+        .map(Json)
+        .ok_or_else(|| not_found("event not found"))
+}
+
+async fn events_delete(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path((db, id)): Path<(String, i64)>,
+) -> Result<StatusCode, ApiError> {
+    check_read(&key, &db)?;
+    let client = client_for(&state, &db).await?;
+    if events::delete(&client, id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(not_found("event not found"))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Analytical queries — one handler per type, sharing the guard pattern
 // ---------------------------------------------------------------------------
 
@@ -598,10 +676,7 @@ async fn cancel_query(
     if cancelled {
         Ok(Json(json!({ "cancelled": id })))
     } else {
-        Err(ApiError(
-            StatusCode::NOT_FOUND,
-            format!("query not found: {id}"),
-        ))
+        Err(not_found(format!("query not found: {id}")))
     }
 }
 
@@ -679,7 +754,7 @@ async fn import_capture(
         .dbs
         .ensure_database(&db, q.create)
         .await
-        .map_err(|e| ApiError(StatusCode::NOT_FOUND, e))?;
+        .map_err(not_found)?;
 
     let mut stream = req.into_body().into_data_stream();
     let mut pending: Vec<u8> = Vec::with_capacity(65536);
@@ -786,10 +861,7 @@ async fn keys_revoke(
     if state.keys.revoke(id).await? {
         Ok(Json(json!({ "revoked": id })))
     } else {
-        Err(ApiError(
-            StatusCode::NOT_FOUND,
-            format!("key not found or already revoked: {id}"),
-        ))
+        Err(not_found(format!("key not found or already revoked: {id}")))
     }
 }
 
@@ -802,10 +874,7 @@ async fn keys_restore(
     if state.keys.unrevoke(id).await? {
         Ok(Json(json!({ "restored": id })))
     } else {
-        Err(ApiError(
-            StatusCode::NOT_FOUND,
-            format!("key not found or not revoked: {id}"),
-        ))
+        Err(not_found(format!("key not found or not revoked: {id}")))
     }
 }
 
@@ -818,10 +887,7 @@ async fn keys_delete(
     if state.keys.delete(id).await? {
         Ok(Json(json!({ "deleted": id })))
     } else {
-        Err(ApiError(
-            StatusCode::NOT_FOUND,
-            format!("key not found: {id}"),
-        ))
+        Err(not_found(format!("key not found: {id}")))
     }
 }
 

@@ -73,6 +73,25 @@ q mux-statistics '{"frame_id":2016,"mux_selector_byte":0,"include_16bit":true,"p
 q pattern-search '{"pattern":[0],"pattern_mask":[0]}' | grep -q results; check "query pattern-search (match-all mask)" $?
 q mirror-validation '{"mirror_frame_id":2016,"source_frame_id":2017,"tolerance_ms":100}' | grep -q results; check "query mirror-validation" $?
 
+# --- events: a user's annotations on the database; a read key may write them ---
+# 1700000000000000 us is 2023-11-14T22:13:20Z.
+resp=$(curl -s -w '\n%{http_code}' -H "$R" -H "$J" -d '{"ts_us":1700000000000000,"duration_us":2500000,"note":"smoke"}' "$BASE/v1/db/$DB/events")
+[ "${resp##*$'\n'}" = "201" ]; check "create event -> 201" $?
+eid=$(printf '%s' "${resp%$'\n'*}" | python3 -c 'import sys,json;e=json.load(sys.stdin);assert (e["ts_us"],e["duration_us"],e["note"])==(1700000000000000,2500000,"smoke");print(e["id"])')
+[ -n "$eid" ]; check "created event echoes its fields exactly" $?
+curl -fsS -H "$R" "$BASE/v1/db/$DB/events?start=2023-11-14T00:00:00Z&end=2023-11-15T00:00:00Z" | grep -q "\"id\":$eid,"; check "events in range lists it" $?
+! curl -fsS -H "$R" "$BASE/v1/db/$DB/events?end=2023-11-14T00:00:00Z" | grep -q "\"id\":$eid,"; check "events outside the range hide it" $?
+curl -fsS -X PATCH -H "$R" -H "$J" -d '{"note":"smoke edited"}' "$BASE/v1/db/$DB/events/$eid" \
+    | python3 -c 'import sys,json;e=json.load(sys.stdin);assert e["note"]=="smoke edited" and e["updated_at_us"]>e["created_at_us"]'; check "patch changes the note and moves updated_at" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H "$R" -H "$J" -d '{}' "$BASE/v1/db/$DB/events/$eid")
+[ "$code" = "400" ]; check "an empty patch is a 400" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" -H "$J" -d '{"ts_us":1,"duration_us":-1}' "$BASE/v1/db/$DB/events")
+[ "$code" = "400" ]; check "a negative duration is a 400" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$R" "$BASE/v1/db/$DB/events/$eid")
+[ "$code" = "204" ]; check "delete event -> 204" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$R" "$BASE/v1/db/$DB/events/$eid")
+[ "$code" = "404" ]; check "delete again -> 404" $?
+
 # --- import: 1000 synthetic records into a fresh auto-created db ---
 # Unique db name per run so the count assertion is idempotent.
 IMPORT_DB="smoke_import_$(date +%s)"

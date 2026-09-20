@@ -126,9 +126,16 @@ END $$;
 -- init_schema.sql creates, and all of it is CREATE OR REPLACE / IF NOT EXISTS.
 -- Restating any of it here would only let the two drift.
 --
+-- Reached through the *next* migration rather than directly: init_schema.sql
+-- refuses a database that any later migration has not yet reshaped, so each
+-- migration's foot `\ir`s its successor and only the newest one `\ir`s
+-- init_schema.sql. Under psql this file therefore takes a v0 archive all the
+-- way to the current version; the gateway drops every `\ir` and runs the
+-- bodies in order itself.
+--
 -- `\ir` rather than a note telling the operator to run a second command:
 -- between step 1 and that command the database is genuinely wrong — no
--- public.can_frame at all — so the last third of the work belongs inside this
+-- public.can_frame at all — so the rest of the work belongs inside this
 -- script's exit code. `\ir` resolves relative to this file, and psql without
 -- `-1` does not wrap it in a transaction, so the aggregate is still created
 -- outside one.
@@ -137,7 +144,7 @@ END $$;
 -- its first job may still be running when the GRANTs land on the aggregate,
 -- which can fail with `tuple concurrently updated`. It is a race, not a fault —
 -- observed once in testing and never on a retry. Re-run this file if you see it.
-\ir ../init_schema.sql
+\ir 0002_events_annotations.sql
 
 -- 6. Materialise the rollup, now that the aggregate above exists again. In its
 -- own file because only psql should run it from here — see that file.

@@ -21,7 +21,7 @@ const INIT_SCHEMA: &str = include_str!("../schema/init_schema.sql");
 /// The version `init_schema.sql` creates. [`MIGRATIONS`] takes an older database
 /// up to it. Kept in step with the `schema_version` row that file inserts —
 /// `the_schema_seeds_the_version_it_claims` holds the two together.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 pub struct Migration {
     pub version: i32,
@@ -32,11 +32,18 @@ pub struct Migration {
 /// Each entry takes a database from `version - 1` to `version`. Embedded rather
 /// than read from disk: the container has no schema directory, and an operator
 /// running the same file by hand must be running the same bytes.
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "capture_frame: one table per protocol, discriminated by protocol",
-    sql: include_str!("../schema/migrations/0001_capture_frame.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "capture_frame: one table per protocol, discriminated by protocol",
+        sql: include_str!("../schema/migrations/0001_capture_frame.sql"),
+    },
+    Migration {
+        version: 2,
+        description: "events: a user's annotations on the archive",
+        sql: include_str!("../schema/migrations/0002_events_annotations.sql"),
+    },
+];
 
 /// What version a database is at, or `None` when it holds no capture schema at
 /// all and [`apply_capture_schema`] will create it at [`SCHEMA_VERSION`].
@@ -44,8 +51,10 @@ const MIGRATIONS: &[Migration] = &[Migration {
 /// Three cases, because two of them predate the version table: a database with
 /// `schema_version` answers for itself; one with `can_frame` as a *table* is
 /// version 0; one with `capture_frame` was migrated before this scheme existed
-/// and is version 1. That last case is why this fingerprints rather than
-/// assuming an absent table means "old".
+/// and is version 1 — exactly 1, not [`SCHEMA_VERSION`], because the version
+/// that introduced the table stamps every database from then on. That last
+/// case is why this fingerprints rather than assuming an absent table means
+/// "old".
 pub async fn detect_version(client: &Client) -> Result<Option<i32>, String> {
     let row = client
         .query_one(
@@ -72,7 +81,7 @@ pub async fn detect_version(client: &Client) -> Result<Option<i32>, String> {
     }
     Ok(match (legacy, renamed) {
         (Some(true), _) => Some(0),
-        (_, true) => Some(SCHEMA_VERSION),
+        (_, true) => Some(1),
         _ => None,
     })
 }
@@ -96,10 +105,13 @@ pub async fn migrate(client: &Client, from: Option<i32>) -> Result<(), String> {
             m.description
         );
         for stmt in split_statements(m.sql) {
-            client
-                .batch_execute(&stmt)
-                .await
-                .map_err(|e| format!("migration {} failed: {e}\nstatement: {stmt}", m.version))?;
+            client.batch_execute(&stmt).await.map_err(|e| {
+                format!(
+                    "migration {} failed: {}",
+                    m.version,
+                    failed_statement(&e, &stmt)
+                )
+            })?;
         }
     }
     apply_capture_schema(client).await
@@ -190,8 +202,8 @@ pub async fn rollup_status(client: &Client) -> Result<RollupState, String> {
 ///
 /// Cannot run inside a transaction, which is why it is a statement of its own
 /// rather than part of a migration file. Minutes on a very large archive —
-/// measured at 16 s per 88 M compressed rows — and unavoidable after a
-/// migration: see the note at the call site in `db.rs`.
+/// measured at 16 s per 88 M compressed rows — and owed after any migration
+/// that leaves the aggregate uncovered: `db.rs` asks before running it.
 pub async fn refresh_rollup(client: &Client) -> Result<(), String> {
     // Retried once, and only for a collision. Creating the aggregate also creates
     // its maintenance policy, and that job can be refreshing while this runs;
@@ -224,15 +236,23 @@ const REFRESH_SQL: &str =
     "CALL refresh_continuous_aggregate('public.capture_frame_hourly', NULL, NULL)";
 
 async fn refresh_rollup_once(client: &Client) -> Result<(), String> {
-    client.batch_execute(REFRESH_SQL).await.map_err(|e| {
-        // tokio_postgres' Display is just "db error"; the server's message is
-        // the only part worth reading.
-        let detail = e
-            .as_db_error()
-            .map(|d| format!("{}: {}", d.severity(), d.message()))
-            .unwrap_or_else(|| e.to_string());
-        format!("rollup refresh failed: {detail}")
-    })
+    client
+        .batch_execute(REFRESH_SQL)
+        .await
+        .map_err(|e| format!("rollup refresh failed: {}", db_error_detail(&e)))
+}
+
+/// tokio_postgres' Display is just "db error"; the server's message is the
+/// only part worth reading — and for a guard's RAISE it is the operator's
+/// instruction.
+pub fn db_error_detail(e: &tokio_postgres::Error) -> String {
+    e.as_db_error()
+        .map(|d| format!("{}: {}", d.severity(), d.message()))
+        .unwrap_or_else(|| e.to_string())
+}
+
+fn failed_statement(e: &tokio_postgres::Error, stmt: &str) -> String {
+    format!("{}\nstatement: {stmt}", db_error_detail(e))
 }
 
 /// Apply the full capture schema to an (empty or already-initialised)
@@ -242,14 +262,18 @@ pub async fn apply_capture_schema(client: &Client) -> Result<(), String> {
         client
             .batch_execute(&stmt)
             .await
-            .map_err(|e| format!("schema statement failed: {e}\nstatement: {stmt}"))?;
+            .map_err(|e| format!("schema statement failed: {}", failed_statement(&e, &stmt)))?;
     }
     Ok(())
 }
 
 /// Split an SQL script into statements on top-level semicolons, respecting
-/// dollar-quoted bodies ($$ … $$ / $tag$ … $tag$), quoted strings and
-/// line comments. Good enough for our own schema file; not a general parser.
+/// dollar-quoted bodies ($$ … $$ / $tag$ … $tag$) and quoted strings. Good
+/// enough for our own schema file; not a general parser.
+///
+/// Line comments are dropped, so a statement is only its SQL: an error names
+/// the `DO $$` that fired rather than the file header above it, and a test's
+/// `contains` cannot be satisfied by a comment naming what it asserts.
 ///
 /// psql meta-commands (`\set`, `\ir`, …) are dropped. The migrations are written
 /// to be runnable by psql *and* by this, and the two need different things: psql
@@ -269,8 +293,8 @@ pub fn split_statements(sql: &str) -> Vec<String> {
 
     while let Some((i, c)) = chars.next() {
         if in_comment {
-            current.push(c);
             if c == '\n' {
+                current.push(c);
                 in_comment = false;
                 at_line_start = true;
             }
@@ -309,10 +333,7 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             at_line_start = true;
         }
         match c {
-            '-' if bytes.get(i + 1) == Some(&b'-') => {
-                in_comment = true;
-                current.push(c);
-            }
+            '-' if bytes.get(i + 1) == Some(&b'-') => in_comment = true,
             '\'' => {
                 in_single = true;
                 current.push(c);
@@ -341,7 +362,7 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             }
             ';' => {
                 let stmt = current.trim();
-                if !stmt.is_empty() && !is_only_comments(stmt) {
+                if !stmt.is_empty() {
                     out.push(stmt.to_string());
                 }
                 current.clear();
@@ -350,17 +371,10 @@ pub fn split_statements(sql: &str) -> Vec<String> {
         }
     }
     let stmt = current.trim();
-    if !stmt.is_empty() && !is_only_comments(stmt) {
+    if !stmt.is_empty() {
         out.push(stmt.to_string());
     }
     out
-}
-
-fn is_only_comments(stmt: &str) -> bool {
-    stmt.lines().all(|l| {
-        let l = l.trim();
-        l.is_empty() || l.starts_with("--")
-    })
 }
 
 #[cfg(test)]
@@ -407,16 +421,10 @@ mod tests {
     /// CAGG inside a transaction. Dropping BEGIN/COMMIT would silently undo that.
     #[test]
     fn the_migration_keeps_its_transaction_boundaries() {
-        // Comments preceding a statement are carried with it, so these end with
-        // the keyword rather than being it.
         let stmts = split_statements(MIGRATIONS[0].sql);
-        let ends = |s: &String, kw: &str| s.trim_end().ends_with(kw);
-        assert!(stmts.iter().any(|s| ends(s, "BEGIN")), "BEGIN was dropped");
-        assert!(
-            stmts.iter().any(|s| ends(s, "COMMIT")),
-            "COMMIT was dropped"
-        );
-        let commit = stmts.iter().position(|s| ends(s, "COMMIT")).unwrap();
+        assert!(stmts.iter().any(|s| s == "BEGIN"), "BEGIN was dropped");
+        assert!(stmts.iter().any(|s| s == "COMMIT"), "COMMIT was dropped");
+        let commit = stmts.iter().position(|s| s == "COMMIT").unwrap();
         let cagg = stmts
             .iter()
             .position(|s| s.contains("DROP MATERIALIZED VIEW"))
@@ -441,9 +449,18 @@ mod tests {
             post.contains(REFRESH_SQL.trim_end_matches(';')),
             "the psql post-step no longer refreshes"
         );
+        let sql = MIGRATIONS[0].sql;
+        let post_step = sql
+            .find("\\ir 0001_capture_frame_post.sql")
+            .expect("the migration no longer includes its post step");
+        // The refresh needs the aggregate init_schema.sql recreates, which
+        // psql reaches through the chain: the post-step must come after it.
+        let chain = sql
+            .find("\\ir 0002_events_annotations.sql")
+            .expect("the migration no longer chains to its successor");
         assert!(
-            MIGRATIONS[0].sql.contains("0001_capture_frame_post.sql"),
-            "the migration no longer includes its post step"
+            chain < post_step,
+            "the post-step would refresh before the aggregate exists"
         );
         // Nothing above runs under Rust: the splitter drops `\ir`, and the
         // gateway refreshes at its own moment, after init_schema recreates the
@@ -453,6 +470,93 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("refresh_continuous_aggregate")),
             "the gateway would run the refresh before the aggregate exists"
+        );
+    }
+
+    /// 0002 drops a table, and the only thing standing between that and a
+    /// deployment which had written to it is the guard. It must reach the
+    /// database in one piece — a splitter that broke the `DO $$ … $$` body on
+    /// its inner semicolon would run the RAISE as a statement of its own — and
+    /// it must run *before* the drop.
+    #[test]
+    fn the_events_migration_guards_before_it_drops() {
+        let stmts = split_statements(MIGRATIONS[1].sql);
+        let guard = stmts
+            .iter()
+            .position(|s| s.contains("refusing to reshape"))
+            .expect("the row guard is in this migration");
+        assert!(
+            stmts[guard].trim_end().ends_with("END $$"),
+            "the guard body was split: {}",
+            stmts[guard]
+        );
+        let drop = stmts
+            .iter()
+            .position(|s| s.contains("DROP TABLE IF EXISTS public.events"))
+            .expect("the drop is in this migration");
+        assert!(guard < drop, "the drop must not run before the guard");
+        // The re-create is init_schema's, reached by `\ir` under psql and by
+        // `apply_capture_schema` under the gateway — never restated here.
+        assert!(
+            !stmts.iter().any(|s| s.contains("CREATE TABLE")),
+            "the migration restates what init_schema.sql creates"
+        );
+    }
+
+    /// The reshaped table, and none of the sketch it replaces. `CREATE TABLE IF
+    /// NOT EXISTS` would step over the old shape in silence, which is what the
+    /// precondition guard beside `can_frame`'s is for — so that guard has to
+    /// name the migration that fixes it, in the text the operator sees.
+    #[test]
+    fn the_schema_holds_the_annotation_shaped_events_table() {
+        let stmts = split_statements(INIT_SCHEMA);
+        let table = stmts
+            .iter()
+            .find(|s| s.starts_with("CREATE TABLE IF NOT EXISTS public.events"))
+            .expect("events table present");
+        for col in ["ts ", "duration_us", "note ", "created_at", "updated_at"] {
+            assert!(table.contains(col), "events lacks {col}");
+        }
+        for col in ["kind", "source", "value_json", "meta"] {
+            assert!(!table.contains(col), "events still has the sketch's {col}");
+        }
+        let guard = stmts
+            .iter()
+            .find(|s| s.contains("attname = 'kind'"))
+            .expect("the events shape guard is present");
+        assert!(
+            guard.contains("RAISE EXCEPTION 'public.events has its pre-2026-09-20 shape")
+                && guard.contains("0002_events_annotations.sql first'"),
+            "the events shape guard does not name its migration in the RAISE text"
+        );
+    }
+
+    /// Under psql each migration `\ir`s its successor and only the newest one
+    /// `\ir`s init_schema.sql — that file refuses a database any later migration
+    /// has not reshaped, so an older file reaching it directly would fail after
+    /// its own destructive steps. The gateway drops every `\ir`, so nothing else
+    /// holds the chain. Adding a migration means editing the previous one's
+    /// foot; this is the test that says so.
+    #[test]
+    fn the_psql_chain_runs_every_migration_before_init_schema() {
+        let files = ["0001_capture_frame.sql", "0002_events_annotations.sql"];
+        assert_eq!(files.len(), MIGRATIONS.len(), "name the new migration here");
+        let reaches_init = |m: &Migration| m.sql.contains("\\ir ../init_schema.sql");
+        for (m, next) in MIGRATIONS.iter().zip(&files[1..]) {
+            assert!(
+                m.sql.contains(&format!("\\ir {next}")),
+                "migration {} does not chain to {next}",
+                m.version
+            );
+            assert!(
+                !reaches_init(m),
+                "migration {} reaches init_schema.sql before {next} has run",
+                m.version
+            );
+        }
+        assert!(
+            reaches_init(MIGRATIONS.last().unwrap()),
+            "the newest migration does not reach init_schema.sql"
         );
     }
 
@@ -504,12 +608,19 @@ mod tests {
     }
 
     #[test]
-    fn handles_tagged_dollar_quotes_and_comments() {
+    fn handles_tagged_dollar_quotes_and_drops_comments() {
         let sql = "-- leading comment; with semicolon\n\
-                   CREATE FUNCTION g() AS $fn$ SELECT 1; $fn$ LANGUAGE sql;\nSELECT 2;";
-        let stmts = split_statements(sql);
-        assert_eq!(stmts.len(), 2);
-        assert!(stmts[0].contains("$fn$ SELECT 1; $fn$"));
+                   CREATE FUNCTION g() AS $fn$ SELECT 1; $fn$ LANGUAGE sql; -- trailing\nSELECT 2;";
+        assert_eq!(
+            split_statements(sql),
+            [
+                "CREATE FUNCTION g() AS $fn$ SELECT 1; $fn$ LANGUAGE sql",
+                "SELECT 2"
+            ]
+        );
+        // A `--` inside a string is data, not a comment.
+        let stmts = split_statements("SELECT 'a -- b';");
+        assert_eq!(stmts, ["SELECT 'a -- b'"]);
     }
 
     #[test]

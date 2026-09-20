@@ -15,7 +15,8 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
     before the device is acknowledged, so a database outage back-pressures the
     device into its own disk cache (nothing is buffered in gateway RAM).
   - **HTTP API** (8423) — the analytical query surface the desktop uses, plus
-    capture import, database management and health.
+    events (a user's annotations on the archive), capture import, database
+    management and health.
   - **Admin UI** at `/admin` — API keys, databases, live ingest sessions,
     activity, the recent server log, health.
 - **pgBackRest** (optional) — scheduled physical backups with PITR.
@@ -59,7 +60,7 @@ revoked from the UI.
 
 | Role | Can |
 |------|-----|
-| `read` | run queries, list databases, stream frames |
+| `read` | run queries, list databases, stream frames, annotate the archive with events |
 | `ingest` | push frames (TCP or import); optionally pinned to one database |
 | `admin` | everything, plus key/database management and activity control |
 
@@ -83,6 +84,17 @@ device, so either is a configuration choice.
 sees exactly what it always did. A Modbus row's `id` is `unit << 8 | func`, its
 `dlc` the message length, and `unit`, `func` and `crc_valid` are its own
 columns.
+
+**Each database carries its own events** — a user's annotations, a moment or a
+span with a note, kept beside the frames they describe and independent of
+protocol. `GET /v1/db/{db}/events?start=&end=&limit=` lists them oldest first
+(`start`/`end` are ISO strings and both bounds are inclusive on `ts` — unlike
+`frames`, whose `end` is exclusive; default limit 1000, no cap);
+`POST /v1/db/{db}/events` with `{"ts_us", "duration_us"?, "note"?}` creates one
+(201); `PATCH /v1/db/{db}/events/{id}` changes any of the three (200, 404 if
+missing); `DELETE /v1/db/{db}/events/{id}` removes it (204, 404 if missing).
+Times cross the wire as microseconds since the epoch, as `time-bounds` and
+`frames` already do. A key that can read a database can annotate it.
 
 A database is created when: an admin creates it in the UI / API; an ingest
 client names an unknown one in its HELLO (auto-create, when enabled); or a
@@ -142,7 +154,7 @@ still compressed afterwards.
 
 Two things to know when it does:
 
-- **The hourly rollup is rebuilt as part of the migration**, which is why a
+- **The hourly rollup is rebuilt as part of that migration**, which is why a
   migration takes longer than the schema change alone — 16 s per 88 M compressed
   rows, minutes on a very large archive. It is not optional: the aggregate comes
   back empty, and its maintenance policy would then materialise only a recent
@@ -158,21 +170,32 @@ Two things to know when it does:
   rollup has recent data and a small lag, so it reads as healthy on every obvious
   measure while omitting everything below the hole.
 
+**An archive at schema v1** (any database the gateway has run since
+2026-09-10) is taken to v2 by
+[schema/migrations/0002_events_annotations.sql](schema/migrations/0002_events_annotations.sql),
+which reshapes the never-used `events` table into the annotations table and
+touches nothing else — milliseconds, and the rollup is left alone because the
+gateway checks whether it still covers the archive rather than rebuilding it
+after every migration. The migration refuses to run if that table holds a row,
+and says so in the admin UI.
+
 To do it by hand instead — worth it if you want to snapshot 30 GB first — start
-the gateway with `WIRETAP_AUTO_MIGRATE=false` and run
-[schema/migrations/0001_capture_frame.sql](schema/migrations/0001_capture_frame.sql)
-against the *source* archive, with `-f` and from its own directory:
+the gateway with `WIRETAP_AUTO_MIGRATE=false` and run the migration for the
+version the archive is *at* against the *source* archive, with `-f` and from
+its own directory; each migration `\ir`s the next, so one command reaches the
+current version from wherever it starts:
 
 ```bash
 cd schema/migrations
-psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0001_capture_frame.sql
+psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0001_capture_frame.sql   # from v0
+psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0002_events_annotations.sql   # from v1
 ```
 
 `-f`, not `< 0001_capture_frame.sql` and not `docker compose exec … psql`: the
-file ends in `\ir ../init_schema.sql`, which psql resolves relative to the script
-it is reading. Fed on stdin there is no such path, and inside the container the
-file is not there at all. It sets its own `ON_ERROR_STOP`, so a non-zero exit
-means it did not finish.
+files end in `\ir` lines that psql resolves relative to the script it is
+reading. Fed on stdin there is no such path, and inside the container the file
+is not there at all. Each sets its own `ON_ERROR_STOP`, so a non-zero exit means
+it did not finish.
 
 ```bash
 # 1. Bring the stack up (creates the target database + schema)
@@ -269,6 +292,6 @@ python3 ../../tools/test_ingest_client.py --host localhost --port 9323 \
 ./smoke_test.sh http://localhost:8423 "$WIRETAP_ADMIN_KEY" vehicle_test
 ```
 
-Expect **40 passed, 0 failed**. The third argument is the seeded database and defaults to
+Expect **49 passed, 0 failed**. The third argument is the seeded database and defaults to
 `vehicle_test`; the fourth is the ingest listener, `127.0.0.1:9323` by default, which the
 Modbus checks write through — it is the only path that carries a Modbus row.

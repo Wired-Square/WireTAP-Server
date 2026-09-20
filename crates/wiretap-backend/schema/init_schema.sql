@@ -1,5 +1,5 @@
 -- wiretap-schema-postgres.sql
--- Version: 20260910
+-- Version: 20260920
 -- Schema for raw capture frames + decoded signals (TimescaleDB hypertable).
 -- CAN, Modbus and serial share one table, discriminated by `protocol`.
 --
@@ -44,6 +44,20 @@ DO $$ BEGIN
   IF (SELECT relkind FROM pg_class WHERE oid = to_regclass('public.can_frame')) = 'r' THEN
     RAISE EXCEPTION 'this database predates the capture_frame rename; apply '
                     'crates/wiretap-backend/schema/migrations/0001_capture_frame.sql first';
+  END IF;
+END $$;
+
+-- The same shape of trap for the events table: `CREATE TABLE IF NOT EXISTS`
+-- below would skip over the pre-2026-09-20 sketch and the version row at the
+-- foot would then call the database current, with every write to events
+-- failing on a column that is not there.
+DO $$ BEGIN
+  IF EXISTS (SELECT FROM pg_attribute
+             WHERE attrelid = to_regclass('public.events')
+               AND attname = 'kind' AND NOT attisdropped)
+  THEN
+    RAISE EXCEPTION 'public.events has its pre-2026-09-20 shape; apply '
+                    'crates/wiretap-backend/schema/migrations/0002_events_annotations.sql first';
   END IF;
 END $$;
 
@@ -357,25 +371,22 @@ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
 $$;
 
 -- ----------------------------------------
--- Events table
+-- Events: a user's annotations on the archive
 -- ----------------------------------------
+-- A moment or a span, with a note — "inverter tripped here", "test run 3".
+-- Per database and protocol-agnostic: the point of one is to line it up
+-- against whatever the archive holds at that time, whichever wire it came off.
+-- Written through the HTTP API, never by ingest.
 CREATE TABLE IF NOT EXISTS public.events (
-    id            BIGSERIAL PRIMARY KEY,
-    ts            TIMESTAMPTZ       NOT NULL,
-    kind          TEXT              NOT NULL,  -- e.g. 'modbus'
-    source        TEXT              NOT NULL,  -- profile-local source name
-    key           TEXT              NOT NULL,  -- signal/register identifier
-    value_json    JSONB,                        -- raw/normalized value
-    meta          JSONB                         -- arbitrary source metadata
+  id          bigserial   PRIMARY KEY,
+  ts          timestamptz NOT NULL,
+  duration_us bigint      NOT NULL DEFAULT 0 CHECK (duration_us >= 0),
+  note        text        NOT NULL DEFAULT '',
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
--- Helpful indexes (time- and id-oriented, DESC for "recent first" queries)
-CREATE INDEX IF NOT EXISTS events_ts_idx
-  ON public.events (ts DESC);
-CREATE INDEX IF NOT EXISTS events_kind_source_idx
-  ON public.events (kind, source);
-CREATE INDEX IF NOT EXISTS events_key_idx
-  ON public.events (key);
+CREATE INDEX IF NOT EXISTS events_ts_idx ON public.events (ts);
 
 -- ----------------------------------------
 -- Permissions for ingestion role
@@ -394,7 +405,7 @@ GRANT EXECUTE ON FUNCTION public.ingest_can_frame(
 ) TO wiretap;
 GRANT EXECUTE ON FUNCTION public.hex_to_int(text) TO wiretap;
 GRANT EXECUTE ON FUNCTION public.get_byte_safe(bytea, int) TO wiretap;
-GRANT INSERT, SELECT ON TABLE public.events TO wiretap;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.events TO wiretap;
 GRANT USAGE ON SEQUENCE public.events_id_seq TO wiretap;
 
 -- ----------------------------------------
@@ -403,5 +414,5 @@ GRANT USAGE ON SEQUENCE public.events_id_seq TO wiretap;
 -- Everything above exists by the time this runs, which is the point: this row
 -- is the marker that the file completed, not that it started.
 INSERT INTO public.schema_version (version, description)
-  VALUES (1, 'capture_frame: one table per protocol, discriminated by protocol')
+  VALUES (2, 'events: a user''s annotations on the archive')
   ON CONFLICT (version) DO NOTHING;

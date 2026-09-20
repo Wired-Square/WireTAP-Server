@@ -5,6 +5,31 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **Events: a user's annotations on a capture database.** A moment or a span
+  with a note — `ts_us`, `duration_us`, `note` — kept in the database it
+  describes, protocol-agnostic, and reached through
+  `GET|POST /v1/db/{db}/events` and `PATCH|DELETE /v1/db/{db}/events/{id}`.
+  Any key that may read a database may annotate it; a pinned key annotates
+  only its own. This is what the desktop's Bookmarks become for a backend
+  source.
+
+### Changed
+
+- **Schema version 2.** `public.events` — an unused sketch from the schema's
+  first version, empty on every deployment — is reshaped in place by
+  `0002_events_annotations.sql`, which refuses to run if the table holds a row.
+  The gateway applies it on start as it did `0001`; `init_schema.sql` refuses
+  the old shape by name rather than stepping over it.
+
+- **A migration rebuilds the hourly rollup only when it has to.** The rebuild
+  after a migration now runs only if the rollup no longer covers the archive
+  from its first frame — `0001` recreates the aggregate empty and so needs it;
+  `0002` leaves it alone. Without this, bringing the largest deployed archive
+  to v2 would have refused its traffic for the twenty-odd minutes the previous
+  migration's rebuild took, for a change that never touched the aggregate.
+
 ## [0.1.2] — 2026-09-12
 
 ### Changed

@@ -166,8 +166,9 @@ impl Databases {
         // that would evict its pool and refuse its reads on every sweep. But the
         // schema is still re-applied, because `apply_capture_schema` is
         // IF NOT EXISTS throughout and is what repairs a database whose first run
-        // died partway. The version row is stamped last in that file, so "v1"
-        // means it finished, and re-running it costs a few milliseconds.
+        // died partway. The version row is stamped last in that file, so a
+        // current version means it finished, and re-running it costs a few
+        // milliseconds.
         let migrating = at != Some(schema::SCHEMA_VERSION);
         let _guard = self.create_lock.lock().await;
         let since = Instant::now();
@@ -179,18 +180,31 @@ impl Databases {
         let result = async {
             let client = self.connect_raw(name).await?;
             schema::migrate(&client, at).await?;
-            // The rollup MUST be backfilled before the maintenance policy runs,
-            // and this is not a performance nicety — it is correctness.
+            // A rollup the migration left uncovered MUST be backfilled before
+            // the maintenance policy runs, and before this database serves a
+            // read — this is not a performance nicety, it is correctness.
             //
-            // The migration recreates the aggregate empty. Its policy then
-            // materialises only a recent window and advances the watermark past
-            // it, and a real-time aggregate serves buckets *below* the watermark
-            // from the materialisation table alone — it does not recompute the
-            // gaps, it omits them. Measured: a 5 760-frame archive reported 121
-            // after one policy run. On an idle archive the policy writes nothing
-            // and the fault never appears, which is why it survives testing and
+            // 0001 recreates the aggregate empty. Its policy then materialises
+            // only a recent window and advances the watermark past it, and a
+            // real-time aggregate serves buckets *below* the watermark from the
+            // materialisation table alone — it does not recompute the gaps, it
+            // omits them. Measured: a 5 760-frame archive reported 121 after
+            // one policy run. On an idle archive the policy writes nothing and
+            // the fault never appears, which is why it survives testing and
             // waits for a live capture.
-            if migrating {
+            //
+            // Asked, not assumed: a migration that leaves the aggregate alone
+            // (0002 does) must not pay for one that did not.
+            if migrating
+                && matches!(
+                    schema::rollup_status(&client).await?,
+                    schema::RollupState::Incomplete
+                )
+            {
+                tracing::warn!(
+                    database = name,
+                    "the migration left the rollup uncovered; rebuilding it"
+                );
                 schema::refresh_rollup(&client).await?;
             }
             Ok::<(), String>(())
@@ -205,7 +219,7 @@ impl Databases {
                         from = at,
                         to = schema::SCHEMA_VERSION,
                         elapsed_ms = since.elapsed().as_millis() as u64,
-                        "schema migrated and the hourly rollup rebuilt"
+                        "schema migrated"
                     );
                 }
                 self.set_state(name, DbSchemaState::current()).await;
@@ -240,9 +254,8 @@ impl Databases {
             }
         };
         // `ours` is every capture database, `behind` only those needing work.
-        // Both get the schema re-applied: an archive migrated before the version
-        // table existed has no `schema_version` to stamp until this runs, and
-        // re-applying is IF NOT EXISTS throughout and costs milliseconds.
+        // Both get the schema re-applied — `migrate_from` says why that is
+        // cheap and worth it.
         let mut ours = Vec::new();
         let mut behind = Vec::new();
         for name in &names {
@@ -306,9 +319,9 @@ impl Databases {
         // frame ingested lets the policy advance the watermark over the gap, and
         // from then on the rollup omits everything older.
         //
-        // Skipping the ones just migrated, which backfilled on their way through:
-        // probing those again is a connection and a catalogue query to be told
-        // what this loop already knows.
+        // Skipping the ones just migrated, which were checked on their way
+        // through: probing those again is a connection and a catalogue query to
+        // be told what this loop already knows.
         let migrated: std::collections::HashSet<&str> =
             behind.iter().map(|(n, _)| n.as_str()).collect();
         for (name, _) in ours.iter().filter(|(n, _)| !migrated.contains(n.as_str())) {
@@ -350,9 +363,10 @@ impl Databases {
     /// Materialise the hourly rollup over its whole range, recording it so the
     /// admin UI can show it and a second one cannot start on top.
     ///
-    /// Also run automatically — by a migration, and by the startup sweep when it
-    /// finds an archive the rollup does not cover. This entry point is the
-    /// operator's button, for a rollup that has merely fallen behind.
+    /// Also run automatically — by a migration that leaves the rollup
+    /// uncovered, and by the startup sweep when it finds an archive the rollup
+    /// does not cover. This entry point is the operator's button, for a rollup
+    /// that has merely fallen behind.
     ///
     /// Does not block reads or writes. Note that an aggregate which is *partly*
     /// materialised under-reports rather than merely running slowly — buckets

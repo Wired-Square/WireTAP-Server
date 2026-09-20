@@ -230,14 +230,11 @@ mod tests {
             tracing::warn!(
                 database = "sungrow_ben_wired",
                 elapsed_ms = 1_373_175,
-                "schema migrated and the hourly rollup rebuilt"
+                "schema migrated"
             );
         });
         let recs = buf.snapshot(None, 10);
-        assert_eq!(
-            recs[0].message,
-            "schema migrated and the hourly rollup rebuilt"
-        );
+        assert_eq!(recs[0].message, "schema migrated");
         assert_eq!(
             recs[0].fields, "database=sungrow_ben_wired elapsed_ms=1373175",
             "unquoted, and the message field is not repeated here"

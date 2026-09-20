@@ -10,6 +10,7 @@ pub const VERSION: &str = wiretap_build_id::build_version!();
 
 mod config;
 mod db;
+mod events;
 mod http;
 mod ingest;
 mod keys;
