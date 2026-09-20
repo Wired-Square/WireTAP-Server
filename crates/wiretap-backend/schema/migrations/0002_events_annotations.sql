@@ -37,7 +37,6 @@ END $$;
 DROP TABLE IF EXISTS public.events;
 
 -- The new table, its index and its grants are exactly what init_schema.sql
--- creates, and the gateway applies that file itself after this one. The newest
--- migration is the one that `\ir`s init_schema.sql; the next one will take
--- this line and this file will `\ir` it instead — see 0001's step 5.
-\ir ../init_schema.sql
+-- creates, and the gateway applies that file itself after this one. Reached
+-- through the next migration, as 0001's step 5 explains.
+\ir 0003_capture_frame_protocol_columns.sql

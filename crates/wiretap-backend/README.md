@@ -171,13 +171,18 @@ Two things to know when it does:
   measure while omitting everything below the hole.
 
 **An archive at schema v1** (any database the gateway has run since
-2026-09-10) is taken to v2 by
-[schema/migrations/0002_events_annotations.sql](schema/migrations/0002_events_annotations.sql),
-which reshapes the never-used `events` table into the annotations table and
-touches nothing else — milliseconds, and the rollup is left alone because the
-gateway checks whether it still covers the archive rather than rebuilding it
-after every migration. The migration refuses to run if that table holds a row,
-and says so in the admin UI.
+2026-09-10) is taken to v3 in one pass:
+[0002_events_annotations.sql](schema/migrations/0002_events_annotations.sql)
+reshapes the never-used `events` table into the annotations table
+(milliseconds; refuses to run if that table holds a row, and says so in the
+admin UI), then
+[0003_capture_frame_protocol_columns.sql](schema/migrations/0003_capture_frame_protocol_columns.sql)
+ties `capture_frame`'s per-protocol columns to `protocol` with a CHECK and lets
+a Modbus row leave `extended`/`is_fd` NULL; the CHECK scans every chunk once to
+validate — measured at ~18 M rows/s on compressed chunks, so seconds per 100 M
+rows, about two minutes on a 1.8 B-row archive.
+The rollup is left alone: the gateway checks whether it still covers the
+archive rather than rebuilding it after every migration.
 
 To do it by hand instead — worth it if you want to snapshot 30 GB first — start
 the gateway with `WIRETAP_AUTO_MIGRATE=false` and run the migration for the
@@ -187,8 +192,9 @@ current version from wherever it starts:
 
 ```bash
 cd schema/migrations
-psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0001_capture_frame.sql   # from v0
-psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0002_events_annotations.sql   # from v1
+psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0001_capture_frame.sql                  # from v0
+psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0002_events_annotations.sql             # from v1
+psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0003_capture_frame_protocol_columns.sql # from v2
 ```
 
 `-f`, not `< 0001_capture_frame.sql` and not `docker compose exec … psql`: the

@@ -61,6 +61,21 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- And for the per-protocol columns: a capture_frame without the CHECK below
+-- is one 0003 has not reshaped, and IF NOT EXISTS would step over it.
+-- `to_regclass`, not `::regclass`: the cast is folded when the block is
+-- planned and raises on a fresh database, before the IS NOT NULL is looked at.
+DO $$ BEGIN
+  IF to_regclass('public.capture_frame') IS NOT NULL
+     AND NOT EXISTS (SELECT FROM pg_constraint
+                     WHERE conrelid = to_regclass('public.capture_frame')
+                       AND conname = 'capture_frame_protocol_columns_check')
+  THEN
+    RAISE EXCEPTION 'public.capture_frame predates the per-protocol column check; apply '
+                    'crates/wiretap-backend/schema/migrations/0003_capture_frame_protocol_columns.sql first';
+  END IF;
+END $$;
+
 -- ----------------------------------------
 -- Schema version
 -- ----------------------------------------
@@ -117,17 +132,30 @@ CREATE TABLE IF NOT EXISTS public.capture_frame (
   protocol    text        NOT NULL DEFAULT 'can'  -- which wire this came off
                 CHECK (protocol IN ('can', 'modbus', 'serial')),
   id          integer     NOT NULL,               -- CAN arbitration id, Modbus register, serial frame id
-  extended    boolean     NOT NULL,               -- CAN: 11-bit if false or 29-bit if true
+  extended    boolean,                            -- CAN: 11-bit if false or 29-bit if true; NULL off any other wire
   dlc         smallint    NOT NULL                -- payload length: 0..8 CAN, 0..64 FD, 0..256 Modbus
                 CHECK (dlc >= 0 AND dlc <= 256),
-  is_fd       boolean     NOT NULL,               -- CAN FD flag
+  is_fd       boolean,                            -- CAN FD flag; NULL off any other wire
   data_bytes  bytea       NOT NULL,               -- raw payload
   bus         integer     NOT NULL DEFAULT 0,     -- gvret bus id / link index
   dir         text        NOT NULL DEFAULT 'rx'   -- gvret frame direction (rx/tx)
                 CHECK (dir IN ('rx', 'tx')),
   unit        smallint,                           -- Modbus slave address; NULL otherwise
   func        smallint,                           -- Modbus function code, vendor codes included; NULL otherwise
-  crc_valid   boolean                             -- Modbus: did the framer's CRC check out; NULL otherwise
+  crc_valid   boolean,                            -- Modbus: did the framer's CRC check out; NULL otherwise
+  -- Each column belongs to its protocol: a CAN row carries the CAN pair and
+  -- none of the Modbus three, a Modbus row the Modbus three, anything else
+  -- none of the Modbus three. A Modbus row's CAN pair is free, not required
+  -- NULL — rows from before 0003 hold `false` there. The constraint turns a
+  -- writer bug into an error instead of a row whose `id` disagrees with the
+  -- columns beside it.
+  CONSTRAINT capture_frame_protocol_columns_check CHECK (
+    CASE protocol
+      WHEN 'can'    THEN extended IS NOT NULL AND is_fd IS NOT NULL
+                         AND unit IS NULL AND func IS NULL AND crc_valid IS NULL
+      WHEN 'modbus' THEN unit IS NOT NULL AND func IS NOT NULL AND crc_valid IS NOT NULL
+      ELSE               unit IS NULL AND func IS NULL AND crc_valid IS NULL
+    END)
 );
 
 -- 1-day chunks: ~5-10M rows/chunk at typical capture rates, good
@@ -414,5 +442,5 @@ GRANT USAGE ON SEQUENCE public.events_id_seq TO wiretap;
 -- Everything above exists by the time this runs, which is the point: this row
 -- is the marker that the file completed, not that it started.
 INSERT INTO public.schema_version (version, description)
-  VALUES (2, 'events: a user''s annotations on the archive')
+  VALUES (3, 'capture_frame: per-protocol columns tied to protocol')
   ON CONFLICT (version) DO NOTHING;

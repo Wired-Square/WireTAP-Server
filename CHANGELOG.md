@@ -17,11 +17,22 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
-- **Schema version 2.** `public.events` — an unused sketch from the schema's
-  first version, empty on every deployment — is reshaped in place by
-  `0002_events_annotations.sql`, which refuses to run if the table holds a row.
-  The gateway applies it on start as it did `0001`; `init_schema.sql` refuses
-  the old shape by name rather than stepping over it.
+- **Schema version 3, in two migrations the gateway applies on start as it
+  did `0001`.** `0002_events_annotations.sql` reshapes `public.events` — an
+  unused sketch from the schema's first version, empty on every deployment —
+  in place, and refuses to run if the table holds a row.
+  `0003_capture_frame_protocol_columns.sql` ties `capture_frame`'s
+  per-protocol columns to `protocol` with one CHECK — a CAN row carries
+  `extended` and `is_fd` and none of `unit`/`func`/`crc_valid`, a Modbus row
+  carries those three — and drops NOT NULL from the two CAN columns, which a
+  Modbus row has no honest value for: a Modbus row written from now on stores
+  NULL there, rows written before keep the `false` the old NOT NULL demanded,
+  and the read API says `false` for both, so nothing a client parses changes.
+  `init_schema.sql` refuses either old shape by name rather than stepping
+  over it. Measured on a copy of a real archive: the NOT NULL drop is
+  catalogue-only, and the CHECK validates compressed chunks in place at
+  roughly 18 M rows/s — expect seconds per 100 M rows of refused traffic,
+  about two minutes on the largest deployed archive.
 
 - **A migration rebuilds the hourly rollup only when it has to.** The rebuild
   after a migration now runs only if the rollup no longer covers the archive

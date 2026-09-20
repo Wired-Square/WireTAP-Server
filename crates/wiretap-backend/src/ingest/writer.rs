@@ -21,16 +21,17 @@ use wiretap_model::Protocol;
 /// One row of `capture_frame`, whichever protocol it came off.
 ///
 /// Built through [`FrameRow::can`] or [`FrameRow::modbus`], which are the two
-/// readings of a wire record this gateway knows — the columns a Modbus row has
-/// no answer for take what the schema's `NOT NULL` demands.
+/// readings of a wire record this gateway knows — a column the row's protocol
+/// has no answer for is NULL, and `capture_frame_protocol_columns_check` holds
+/// each protocol to its own.
 #[derive(Debug)]
 pub struct FrameRow {
     pub ts_us: i64,
     pub protocol: Protocol,
     pub id: u32,
-    pub extended: bool,
+    pub extended: Option<bool>,
     pub dlc: u16,
-    pub is_fd: bool,
+    pub is_fd: Option<bool>,
     pub data: Vec<u8>,
     pub bus: u8,
     pub dir_tx: bool,
@@ -48,9 +49,9 @@ impl FrameRow {
             ts_us,
             protocol: Protocol::Can,
             id,
-            extended,
+            extended: Some(extended),
             dlc: u16::from(wiretap_protocol::payload_dlc(data.len(), is_fd)),
-            is_fd,
+            is_fd: Some(is_fd),
             data,
             bus,
             dir_tx,
@@ -69,9 +70,9 @@ impl FrameRow {
             ts_us,
             protocol: Protocol::Modbus,
             id: id_flags & ID_ARB_MASK,
-            extended: false,
+            extended: None,
             dlc: data.len() as u16,
-            is_fd: false,
+            is_fd: None,
             data,
             bus,
             dir_tx: id_flags & ID_TX != 0,
@@ -84,6 +85,14 @@ impl FrameRow {
 
 /// A nullable column in COPY text: the value, or `\N`.
 struct Nullable<T>(Option<T>);
+
+fn copy_bool(v: bool) -> char {
+    if v {
+        't'
+    } else {
+        'f'
+    }
+}
 
 impl<T: std::fmt::Display> std::fmt::Display for Nullable<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -126,15 +135,15 @@ pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), String> {
             ts.format("%Y-%m-%dT%H:%M:%S%.6f+00:00"),
             row.protocol.as_str(),
             row.id,
-            if row.extended { 't' } else { 'f' },
+            Nullable(row.extended.map(copy_bool)),
             row.dlc,
-            if row.is_fd { 't' } else { 'f' },
+            Nullable(row.is_fd.map(copy_bool)),
             hex::encode(&row.data),
             row.bus,
             if row.dir_tx { "tx" } else { "rx" },
             Nullable(row.unit),
             Nullable(row.func),
-            Nullable(row.crc_valid.map(|v| if v { 't' } else { 'f' })),
+            Nullable(row.crc_valid.map(copy_bool)),
         );
     }
     sink.send(Bytes::from(buf))
@@ -162,12 +171,15 @@ mod tests {
             (m.unit, m.func, m.crc_valid),
             (Some(1), Some(0x20), Some(true))
         );
-        assert!(!m.extended && !m.is_fd && !m.dir_tx);
+        assert_eq!((m.extended, m.is_fd, m.dir_tx), (None, None, false));
         assert_eq!(m.data, raw);
 
         let c = FrameRow::can(5, 0x7E0 | ID_FD | ID_TX, 0, vec![0; 12]);
         assert_eq!((c.protocol, c.id, c.dlc), (Protocol::Can, 0x7E0, 9));
-        assert!(c.is_fd && c.dir_tx && !c.extended);
+        assert_eq!(
+            (c.extended, c.is_fd, c.dir_tx),
+            (Some(false), Some(true), true)
+        );
         assert_eq!((c.unit, c.func, c.crc_valid), (None, None, None));
     }
 }

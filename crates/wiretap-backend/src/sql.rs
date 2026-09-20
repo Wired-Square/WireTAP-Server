@@ -84,12 +84,24 @@ impl FrameFilter {
             protocol_clause(args, self.protocol),
             args.add(self.frame_id as i32)
         );
-        if let Some(ext) = self.is_extended {
-            sql += &format!(" AND extended = ${}::bool", args.add(ext));
-        }
+        sql += &extended_clause(args, self.is_extended);
         sql += &time_clause(args, &self.start_time, &self.end_time);
         sql
     }
+}
+
+/// `extended` and `is_fd` as the API has always spoken them. A Modbus row
+/// stores NULL — it has no such bits — and every client parses a `bool`, so
+/// the wire keeps saying `false` for one until the desktop takes an option.
+/// [`extended_clause`] is the same reading applied to a filter.
+fn bool_column(row: &tokio_postgres::Row, col: &str) -> bool {
+    row.get::<_, Option<bool>>(col).unwrap_or(false)
+}
+
+fn extended_clause(args: &mut Args, is_extended: Option<bool>) -> String {
+    is_extended.map_or_else(String::new, |ext| {
+        format!(" AND coalesce(extended, false) = ${}::bool", args.add(ext))
+    })
 }
 
 fn time_clause(args: &mut Args, start: &Option<String>, end: &Option<String>) -> String {
@@ -251,10 +263,7 @@ pub async fn mirror_validation(
     let tolerance = args.add(p.tolerance_ms as i32);
     // Anchors both subqueries, so the protocol placeholder is added once.
     let where_protocol = protocol_clause(&mut args, p.protocol);
-    let mut extra = String::new();
-    if let Some(ext) = p.is_extended {
-        extra += &format!(" AND extended = ${}::bool", args.add(ext));
-    }
+    let mut extra = extended_clause(&mut args, p.is_extended);
     extra += &time_clause(&mut args, &p.start_time, &p.end_time);
     let query = format!(
         "WITH mirror_frames AS (\
@@ -704,7 +713,7 @@ pub async fn pattern_search(
             results.push(PatternSearchResult {
                 timestamp_us: row.get::<_, f64>("timestamp_us") as i64,
                 frame_id: row.get::<_, i32>("frame_id") as u32,
-                is_extended: row.get("extended"),
+                is_extended: bool_column(&row, "extended"),
                 payload: data_bytes,
                 match_positions,
             });
@@ -743,7 +752,7 @@ pub async fn inventory(
 ) -> Result<Vec<InventoryEntry>, String> {
     let map = |row: &tokio_postgres::Row| InventoryEntry {
         frame_id: row.get::<_, i32>("id") as u32,
-        is_extended: row.get("extended"),
+        is_extended: bool_column(row, "extended"),
         count: row.get("cnt"),
         first_us: row.get::<_, f64>("first_us") as i64,
         last_us: row.get::<_, f64>("last_us") as i64,
@@ -907,9 +916,9 @@ pub async fn frames_batch(
         .map(|row| FrameBatchRow {
             ts_us: row.get::<_, f64>("ts_us") as i64,
             id: row.get::<_, i32>("id") as u32,
-            extended: row.get("extended"),
+            extended: bool_column(row, "extended"),
             dlc: row.get::<_, i16>("dlc") as u16,
-            is_fd: row.get("is_fd"),
+            is_fd: bool_column(row, "is_fd"),
             bus: row.get::<_, i32>("bus") as u8,
             dir: row.get("dir"),
             data_hex: hex::encode(row.get::<_, Vec<u8>>("data_bytes")),
