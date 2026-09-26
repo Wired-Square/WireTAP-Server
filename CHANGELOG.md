@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Changed
+
+- **The serial tap is `wiretap-lib-rs` v0.16.12's `RtuTap`**, which the
+  server's own tap moved into. Stamps are unchanged, except after a reopen
+  that follows a backward clock step mid-message: they now hold the newest
+  clock of any earlier read, not the last read's.
+
 ## [0.1.3] — 2026-09-20
 
 The gateway gains per-database events and a schema that says which columns

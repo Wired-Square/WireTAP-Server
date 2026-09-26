@@ -465,8 +465,7 @@ async fn tap_loop(
                 Ok(n) => {
                     // One time per read; the tap stamps each message by the
                     // read its last byte arrived in, which need not be this one.
-                    let ts_us = system_time_to_us(SystemTime::now());
-                    for m in tap.push(&buf[..n], ts_us) {
+                    for m in tap.push(&buf[..n], SystemTime::now()) {
                         publish(Sample::Modbus(m), archive.as_ref(), &frames);
                     }
                 }

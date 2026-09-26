@@ -21,7 +21,7 @@ wiretap-model = { path = "../wiretap-model" }
 # codec takes scalars and this crate adapts, which is what will let the desktop
 # adopt it without touching the serde type its frontend reads.
 wiretap-protocol.workspace = true
-# `ModbusRtuStream`, which frames the serial tap's bytes. It brings the
+# `RtuTap`, which frames and stamps the serial tap's bytes. It brings the
 # catalogue's other dependencies with it; what that costs the musl binary is
 # recorded in the vault.
 wiretap-catalog.workspace = true
