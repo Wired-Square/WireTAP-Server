@@ -171,14 +171,15 @@ mod tests {
     /// the trial box: the bytes off the adapter exactly as `read` returned
     /// them, in order, with no timestamps, delimiters or headers — so message
     /// boundaries are the framer's to find, which is the point. The vault's
-    /// figure for the whole 34 MB with this framer is 99.97% of the bytes in
-    /// messages.
+    /// figure for the whole 34 MB is 99.975% of the bytes in messages, framed
+    /// the same whatever the read size.
     #[test]
     #[ignore = "needs a capture: WIRETAP_RS485_RAW=<path to rs485.raw>"]
     fn the_sungrow_capture_frames_at_the_measured_coverage() {
         let path = std::env::var("WIRETAP_RS485_RAW").expect("WIRETAP_RS485_RAW names the capture");
         let bytes = std::fs::read(&path).expect("the capture");
         let line = LineSettings::from(&line_9600(Parity::None, 1));
+        let mut first: Option<Vec<Vec<u8>>> = None;
         for chunk in [64usize, 4096] {
             let mut tap = tap_on_9600_8n1(SourceId(0));
             let mut samples = Vec::new();
@@ -217,6 +218,11 @@ mod tests {
                 );
             }
             assert!(samples.iter().all(|s| s.crc_valid));
+            let raws: Vec<Vec<u8>> = samples.into_iter().map(|s| s.raw).collect();
+            match &first {
+                None => first = Some(raws),
+                Some(f) => assert!(*f == raws, "{chunk}-byte reads framed differently"),
+            }
         }
     }
 }

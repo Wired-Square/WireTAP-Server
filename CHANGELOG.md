@@ -7,10 +7,15 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
-- **The serial tap is `wiretap-lib-rs` v0.16.12's `RtuTap`**, which the
+- **The serial tap is `wiretap-lib-rs` v0.16.15's `RtuTap`**, which the
   server's own tap moved into. Stamps are unchanged, except after a reopen
   that follows a backward clock step mid-message: they now hold the newest
   clock of any earlier read, not the last read's.
+- **The tap frames a line the same whatever its reads return.** A read
+  response and the broadcast behind it could pass their CRC as one request
+  asking for more registers than Modbus allows, depending on where a read
+  ended, and the broadcast was lost. The framer now refuses such a request:
+  66 more messages in 1.39 million on the trial line's 34 MB capture.
 
 ## [0.1.3] — 2026-09-20
 
