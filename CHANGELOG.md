@@ -16,7 +16,7 @@ All notable changes to this project are documented here. Entries go under
   asking for more registers than Modbus allows, depending on where a read
   ended, and the broadcast was lost. The framer now refuses such a request:
   66 more messages in 1.39 million on the trial line's 34 MB capture.
-- **CAN is read and written through v0.16.16's `wiretap-io`**, in place of
+- **CAN is read and written through v0.16.18's `wiretap-io`**, in place of
   the server's own SocketCAN reader. Kernel stamps, FD and remote-frame
   handling, the bitrate fallback, and refusing to start without the
   interface are unchanged. An interface that goes away is now reopened by
