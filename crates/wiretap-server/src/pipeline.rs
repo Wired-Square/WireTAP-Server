@@ -102,23 +102,29 @@ pub enum RunError {
 
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        /// The capability an operator is missing, when that is what went wrong.
-        /// Both are the first thing a hand-run server hits, and both are what
-        /// the unit will have to grant.
-        fn hint(err: &io::Error, capability: &'static str) -> &'static str {
+        /// What an operator can grant, when permission is what refused it.
+        fn hint(err: &io::Error, grant: &'static str) -> &'static str {
             if err.kind() == io::ErrorKind::PermissionDenied {
-                capability
+                grant
             } else {
                 ""
             }
         }
 
         match self {
-            Self::OpenCan { iface, err } => write!(
-                f,
-                "cannot open {iface}: {err}{}",
-                hint(err, ". Run as root, or grant CAP_NET_RAW")
-            ),
+            // No capability hint: an AF_CAN raw socket needs none.
+            Self::OpenCan { iface, err } => {
+                write!(f, "cannot open {iface}: {err}")?;
+                match err.raw_os_error() {
+                    Some(libc::ENODEV) => write!(f, ". Check `ip link show {iface}`"),
+                    Some(libc::EAFNOSUPPORT) => write!(
+                        f,
+                        ". Is the can_raw module loaded, and AF_CAN in the unit's \
+                         RestrictAddressFamilies=?"
+                    ),
+                    _ => Ok(()),
+                }
+            }
             Self::OpenSerial { path, err } => write!(
                 f,
                 "cannot open {path}: {err}{}",
@@ -580,5 +586,36 @@ async fn shutdown() {
             warn!("cannot listen for SIGTERM, only Ctrl-C will stop this: {e}");
             let _ = tokio::signal::ctrl_c().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_can(err: io::Error) -> String {
+        RunError::OpenCan {
+            iface: "can0".to_owned(),
+            err,
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn a_can_open_hints_at_the_fix_for_its_error_and_never_at_a_capability() {
+        let missing = open_can(io::Error::from_raw_os_error(libc::ENODEV));
+        assert!(
+            missing.ends_with(". Check `ip link show can0`"),
+            "{missing}"
+        );
+
+        let refused = open_can(io::Error::from_raw_os_error(libc::EAFNOSUPPORT));
+        assert!(
+            refused.contains("can_raw") && refused.contains("RestrictAddressFamilies="),
+            "{refused}"
+        );
+
+        let denied = open_can(io::ErrorKind::PermissionDenied.into());
+        assert_eq!(denied, "cannot open can0: permission denied");
     }
 }

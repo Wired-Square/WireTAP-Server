@@ -33,6 +33,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-
 # musl cross-build has nothing to find on the host.
 rusqlite = { workspace = true, features = ["bundled"] }
 subtle.workspace = true
+# Only for naming the errno an open failed with.
+libc = "0.2"
 wiretap-ingest-proto = { path = "../wiretap-ingest-proto" }
 tracing.workspace = true
 # No `env-filter`: the level comes from the config file, and RUST_LOG would

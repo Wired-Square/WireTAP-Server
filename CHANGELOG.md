@@ -28,6 +28,10 @@ All notable changes to this project are documented here. Entries go under
   A GVRET client's frame and a Test Pattern reply are still archived as
   `tx`, and still reach no GVRET client or console, but each is stamped by
   the kernel when it was sent rather than with the time the write returned.
+- **A CAN interface that won't open no longer sends the operator after
+  `CAP_NET_RAW`**, which an `AF_CAN` socket never needed. A missing
+  interface points at `ip link show`, and a refused address family at the
+  `can_raw` module and the unit's `RestrictAddressFamilies=`.
 
 ## [0.1.3] — 2026-09-20
 
