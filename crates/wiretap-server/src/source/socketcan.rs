@@ -5,6 +5,7 @@
 use std::io;
 
 use wiretap_io::can::{
+    self,
     socketcan::{self, SocketCanOptions},
     CanError, CanOptions, CanRead, CanTask,
 };
@@ -16,10 +17,12 @@ use super::{system_time_to_us, Bitrates};
 /// until the task is dropped.
 ///
 /// Without `fd`, FD frames are dropped and FD sends refused. `listen_only`
-/// refuses every send.
+/// refuses every send. What this socket sends comes back as a `Tx` read,
+/// stamped by the kernel.
 pub async fn open(interface: &str, fd: bool, listen_only: bool) -> io::Result<CanTask> {
     let mut options = CanOptions::default();
     options.listen_only = listen_only;
+    options.own_frames = true;
     let sc = SocketCanOptions {
         interface: interface.to_owned(),
         fd,
@@ -30,7 +33,8 @@ pub async fn open(interface: &str, fd: bool, listen_only: bool) -> io::Result<Ca
     })
 }
 
-/// A read as the archive stores it.
+/// A read as the archive stores it: `dir` for what the bus carried, and `tx`
+/// for what this socket sent.
 ///
 /// Remote-transmission frames are `None`: they carry no data, and archiving
 /// one as a zero-length frame would be noise. **This differs from the
@@ -44,7 +48,10 @@ pub fn sample(read: CanRead, bus: SourceId, dir: Direction) -> Option<CanSample>
         is_fd: frame.fd,
         data: frame.data,
         bus,
-        dir,
+        dir: match read.direction {
+            can::Direction::Rx => dir,
+            can::Direction::Tx => Direction::Tx,
+        },
     })
 }
 

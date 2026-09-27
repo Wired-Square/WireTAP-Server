@@ -44,12 +44,15 @@ use socketcan::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use wiretap_io::can::{CanEvent, CanRead, CanTask};
-use wiretap_model::{Direction, SourceId};
+use wiretap_model::{Direction, Sample, Secret, SourceId};
 use wiretap_protocol::testpattern::{
     encode, sweep_payload, Command, Flags, Message, ID_CONTROL, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
 };
+use wiretap_server::cache::{FrameCache, SqliteCache};
 use wiretap_server::pipeline;
-use wiretap_server::settings::{Device, DeviceKind, LogLevel, Settings, TestPattern};
+use wiretap_server::settings::{
+    Batching, Device, DeviceKind, Forward, LogLevel, Settings, TestPattern,
+};
 use wiretap_server::source::{socketcan as server_can, system_time_to_us, Bitrates};
 
 /// Long enough to absorb a loaded CI runner, short enough that a wedged read
@@ -74,11 +77,11 @@ fn standard(id: u32) -> StandardId {
 /// both widths, and `CanAnyFrame` answers `raw_id`, `data` and `is_extended`
 /// exactly as `CanFrame` did.
 ///
-/// **A socket never receives its own transmissions.** `CAN_RAW_RECV_OWN_MSGS`
-/// defaults off and neither `socketcan` nor this repo sets it, while
-/// `CAN_RAW_LOOPBACK` defaults on — so what this reads is always some *other*
-/// socket's frame, never the one it just sent. Every test here depends on that
-/// in one direction or the other.
+/// **This socket never receives its own transmissions.**
+/// `CAN_RAW_RECV_OWN_MSGS` defaults off and only the server's socket sets it,
+/// while `CAN_RAW_LOOPBACK` defaults on — so what this reads is always some
+/// *other* socket's frame, never the one it just sent. Every test here depends
+/// on that in one direction or the other.
 struct Bus(CanFdSocket);
 
 impl Bus {
@@ -332,6 +335,73 @@ async fn the_pipeline_bridges_the_bus_to_a_gvret_client_and_back() {
     assert_eq!(sent.data(), [0xC0, 0xDE]);
 }
 
+/// A GVRET client's frame, as the kernel hands it back: archived once as `tx`,
+/// and never broadcast, which would echo it to the client that sent it.
+///
+/// The archive is read from its disk cache: the gateway is a port nothing
+/// listens on, and the queue spills at its first frame.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a vcan interface; see the module docs"]
+async fn a_gvret_transmit_is_archived_once_as_tx_and_not_broadcast() {
+    let bus = Bus::open();
+    let dir = std::env::temp_dir().join(format!("wiretap-vcan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cache_path = dir.join("cache.db");
+    let mut settings = settings(&iface(), free_port().await, None);
+    settings.forward = Some(Forward {
+        host: "127.0.0.1".to_string(),
+        port: free_port().await,
+        api_key: Secret::new("unused"),
+        database: String::new(),
+        batching: Batching {
+            size: 500,
+            flush_interval: 0.1,
+            queue_size: 100,
+            cache_path: cache_path.clone(),
+            cache_origin: None,
+            cache_max_mb: 10,
+            queue_flush_pct: 1,
+            legacy_cache_path: None,
+        },
+    });
+    let (_server, mut client) = server_listening(settings).await;
+
+    client
+        .write_all(&[0xF1, 0x00, 0x21, 0x03, 0x00, 0x00, 0x00, 0x02, 0xC0, 0xDE])
+        .await
+        .expect("write a transmit");
+    assert_eq!(bus.next().await.raw_id(), 0x321);
+    let echoed = tokio::time::timeout(Duration::from_millis(500), client.read_u8()).await;
+    assert!(echoed.is_err(), "the client was sent {echoed:?}");
+
+    let archived = || {
+        let mut cache = SqliteCache::open(&cache_path, 10).expect("the cache");
+        cache
+            .oldest(1000)
+            .expect("read the cache")
+            .into_iter()
+            .filter_map(|c| match &*c.sample {
+                Sample::Can(s) if s.arb_id == 0x321 => Some(s.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let spilled = async {
+        while archived().is_empty() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    tokio::time::timeout(PATIENCE, spilled)
+        .await
+        .expect("the transmit reached the archive");
+    tokio::time::sleep(RETRIES).await;
+    let archived = archived();
+    assert_eq!(archived.len(), 1, "{archived:?}");
+    assert_eq!(archived[0].dir, Direction::Tx);
+    assert_eq!(archived[0].data, [0xC0, 0xDE]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A port nothing else on this machine is using. The usual bind-and-release
 /// race, taken deliberately: a fixed port collides with the previous run of
 /// this suite, which is the failure that actually happens.
@@ -539,8 +609,7 @@ impl Log {
     }
 }
 
-/// Long enough for the task's one-second retries to repeat a log line, if
-/// anything were going to.
+/// Long enough for anything retried about once a second to have repeated.
 const RETRIES: Duration = Duration::from_secs(3);
 
 /// The id of the next two-byte frame a GVRET client is sent.

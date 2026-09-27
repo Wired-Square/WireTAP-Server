@@ -21,15 +21,11 @@
 
 use std::io;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use tokio::sync::broadcast;
 use tracing::warn;
-use wiretap_model::{CanSample, Direction, Sample, SourceId};
+use wiretap_model::{Sample, SourceId};
 use wiretap_protocol::testpattern::{capability, is_test_pattern_frame, Reply, Responder};
-
-use crate::archive;
-use crate::source::system_time_to_us;
 
 /// Where a reply goes once the state machine has produced one.
 ///
@@ -78,7 +74,6 @@ pub async fn responder_loop<S: ReplySink>(
     bus: SourceId,
     can_fd: bool,
     mut frames: broadcast::Receiver<Arc<Sample>>,
-    archive: Option<archive::Archive>,
 ) {
     // Extended is unconditional: the writer sends either id width and nothing
     // filters one out on the way in.
@@ -114,23 +109,6 @@ pub async fn responder_loop<S: ReplySink>(
         ) {
             if let Err(e) = sink.send(&reply).await {
                 warn!("test pattern: reply on bus {} failed: {e}", bus.0);
-                continue;
-            }
-            // Archived as `tx`, exactly as `transmit_loop` archives a GVRET
-            // client's frames. Without this a captured validation run shows the
-            // initiator's requests and this server saying nothing — which is
-            // what a broken responder looks like. Nothing reads a frame back
-            // from the socket it wrote it to, so this is the only record.
-            if let Some(archive) = &archive {
-                archive.enqueue(Arc::new(Sample::Can(CanSample {
-                    ts_us: system_time_to_us(SystemTime::now()),
-                    arb_id: reply.arb_id,
-                    extended: reply.extended,
-                    is_fd: reply.fd,
-                    data: reply.data,
-                    bus,
-                    dir: Direction::Tx,
-                })));
             }
         }
     }
@@ -140,6 +118,7 @@ pub async fn responder_loop<S: ReplySink>(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use wiretap_model::{CanSample, Direction};
     use wiretap_protocol::testpattern::{
         encode, Command, Flags, Message, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
     };
@@ -190,7 +169,7 @@ mod tests {
         drop(frames);
         let sink = Recorder::default();
         // The loop returns when the channel closes, so it needs no shutdown.
-        responder_loop(sink.clone(), BUS, can_fd, rx, None).await;
+        responder_loop(sink.clone(), BUS, can_fd, rx).await;
         sink.taken()
     }
 

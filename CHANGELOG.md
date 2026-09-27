@@ -24,6 +24,10 @@ All notable changes to this project are documented here. Entries go under
   restart; a downed one is reported as it goes down, where the old reader
   may have heard of it only from the next frame; and a loss is logged once,
   with `reopened` or `reading again` on its return, not once a second.
+- **The server's own transmits are archived as the kernel hands them back.**
+  A GVRET client's frame and a Test Pattern reply are still archived as
+  `tx`, and still reach no GVRET client or console, but each is stamped by
+  the kernel when it was sent rather than with the time the write returned.
 
 ## [0.1.3] — 2026-09-20
 

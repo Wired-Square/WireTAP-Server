@@ -27,9 +27,9 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::error;
 use tracing::{info, warn};
 #[cfg(target_os = "linux")]
-use wiretap_io::can::{CanError, CanEvent, CanFrame, CanTask, CanWriter};
+use wiretap_io::can::{self, CanError, CanEvent, CanFrame, CanTask, CanWriter};
 #[cfg(target_os = "linux")]
-use wiretap_model::{CanSample, Direction, Sample, SourceId};
+use wiretap_model::{Direction, Sample, SourceId};
 
 #[cfg(target_os = "linux")]
 use crate::archive::Archive;
@@ -44,8 +44,7 @@ use crate::settings::Settings;
 use crate::settings::{Device, Mode, SerialSettings};
 #[cfg(target_os = "linux")]
 use crate::source::{
-    bus_count, index_for_bus, modbus::RtuTap, serial::SerialLine, socketcan, system_time_to_us,
-    Transmit,
+    bus_count, index_for_bus, modbus::RtuTap, serial::SerialLine, socketcan, Transmit,
 };
 #[cfg(target_os = "linux")]
 use crate::testpattern;
@@ -376,7 +375,6 @@ async fn start_capture(
                 o.device.bus,
                 o.device.fd(),
                 frames.subscribe(),
-                o.archive.clone(),
             ));
         }
     }
@@ -418,11 +416,19 @@ async fn read_loop(
                 if std::mem::take(&mut lost) {
                     info!("{iface}: reading again");
                 }
-                for sample in reads
-                    .into_iter()
-                    .filter_map(|r| socketcan::sample(r, bus, dir))
-                {
-                    publish(Sample::Can(sample), archive.as_ref(), &frames);
+                for read in reads {
+                    // An own transmit goes to the archive alone: broadcast, it
+                    // would echo to every GVRET client, and a Test Pattern
+                    // responder would hear its own replies.
+                    let own = read.direction == can::Direction::Tx;
+                    let Some(sample) = socketcan::sample(read, bus, dir) else {
+                        continue;
+                    };
+                    if !own {
+                        publish(Sample::Can(sample), archive.as_ref(), &frames);
+                    } else if let Some(archive) = &archive {
+                        archive.enqueue(Arc::new(Sample::Can(sample)));
+                    }
                 }
             }
             CanEvent::Disconnected {
@@ -550,32 +556,11 @@ async fn transmit_loop(opened: Vec<Opened>, bus_offset: u8, mut queue: mpsc::Rec
         }
         // Classic: a GVRET `F1 00` carries no FD flag, so a client cannot ask
         // for one. The Test Pattern responder owns the FD path.
-        let frame = CanFrame::data(0, t.arb_id, t.extended, false, false, t.data.clone());
+        let frame = CanFrame::data(0, t.arb_id, t.extended, false, false, t.data);
         match o.writer.send(frame).await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                warn!("transmit on bus {} failed: {e}", t.bus.0);
-                continue;
-            }
-            Err(refused) => {
-                warn!("transmit on bus {} refused: {refused}", t.bus.0);
-                continue;
-            }
-        }
-        // Archived as `tx`, so a request this server made can be told apart
-        // from the traffic it was answering. The Python did the same, and the
-        // frame is timestamped here rather than on the wire — nothing reads a
-        // frame back from a socket it wrote it to.
-        if let Some(archive) = &o.archive {
-            archive.enqueue(Arc::new(Sample::Can(CanSample {
-                ts_us: system_time_to_us(SystemTime::now()),
-                arb_id: t.arb_id,
-                extended: t.extended,
-                is_fd: false,
-                data: t.data,
-                bus: t.bus,
-                dir: Direction::Tx,
-            })));
+            Ok(Err(e)) => warn!("transmit on bus {} failed: {e}", t.bus.0),
+            Err(refused) => warn!("transmit on bus {} refused: {refused}", t.bus.0),
         }
     }
 }
