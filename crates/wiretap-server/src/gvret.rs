@@ -177,6 +177,7 @@ impl Client {
                 arb_id,
                 extended,
                 data,
+                declared: _,
             } => {
                 let queued = self.transmits.try_send(Transmit {
                     bus: SourceId(bus),

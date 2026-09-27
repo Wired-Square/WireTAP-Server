@@ -186,24 +186,29 @@ async fn server_listening(
     (server, client)
 }
 
-/// Read until the frame with `arb_id` arrives, failing if it never does.
+/// Read until a frame with each of `arb_ids` has arrived, failing if one never
+/// does, and return them in that order.
 ///
 /// Scanning rather than taking the first frame keeps a test honest on a bus
 /// that carries anything else — which a `vcan0` left over from a previous run
-/// may well do.
-async fn read_until(task: &mut CanTask, arb_id: u32) -> CanRead {
+/// may well do. Frames sent back to back can share one `Read`.
+async fn read_until(task: &mut CanTask, arb_ids: &[u32]) -> Vec<CanRead> {
+    let mut found: Vec<Option<CanRead>> = arb_ids.iter().map(|_| None).collect();
     let scan = async {
-        loop {
+        while found.iter().any(Option::is_none) {
             if let Some(CanEvent::Read(reads)) = task.next_event().await {
-                if let Some(read) = reads.into_iter().find(|r| r.frame.arb_id == arb_id) {
-                    return read;
+                for read in reads {
+                    if let Some(i) = arb_ids.iter().position(|&id| id == read.frame.arb_id) {
+                        found[i].get_or_insert(read);
+                    }
                 }
             }
         }
     };
     tokio::time::timeout(PATIENCE, scan)
         .await
-        .unwrap_or_else(|_| panic!("no frame with id {arb_id:#x} arrived"))
+        .unwrap_or_else(|_| panic!("not every one of {arb_ids:#x?} arrived"));
+    found.into_iter().flatten().collect()
 }
 
 #[tokio::test]
@@ -217,7 +222,10 @@ async fn a_frame_on_the_bus_becomes_a_sample() {
     let before = system_time_to_us(SystemTime::now());
     bus.send(CanFrame::new(standard(0x123), &[0xDE, 0xAD, 0xBE, 0xEF]).expect("a frame"))
         .await;
-    let read = read_until(&mut task, 0x123).await;
+    let [read] = read_until(&mut task, &[0x123])
+        .await
+        .try_into()
+        .expect("one read");
     let sample = server_can::sample(read, SourceId(3), Direction::Rx).expect("a data frame");
 
     assert_eq!(sample.data, [0xDE, 0xAD, 0xBE, 0xEF]);
@@ -253,12 +261,14 @@ async fn a_remote_frame_is_skipped_and_does_not_stall_the_reader() {
     bus.send(CanFrame::new(standard(0x7FF), &[0x55]).expect("a frame"))
         .await;
 
-    let remote = read_until(&mut task, 0x7FE).await;
+    let [remote, data] = read_until(&mut task, &[0x7FE, 0x7FF])
+        .await
+        .try_into()
+        .expect("two reads");
     assert!(
         server_can::sample(remote, SourceId(0), Direction::Rx).is_none(),
         "a remote frame reached the archive"
     );
-    let data = read_until(&mut task, 0x7FF).await;
     let sample = server_can::sample(data, SourceId(0), Direction::Rx).expect("a data frame");
     assert_eq!(sample.data, [0x55]);
 }
