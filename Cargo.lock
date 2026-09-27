@@ -2674,6 +2674,7 @@ dependencies = [
  "tracing-subscriber",
  "wiretap-build-id",
  "wiretap-catalog",
+ "wiretap-checksum",
  "wiretap-ingest-proto",
  "wiretap-io",
  "wiretap-model",

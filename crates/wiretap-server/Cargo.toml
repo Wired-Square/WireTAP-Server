@@ -47,6 +47,7 @@ tracing-subscriber.workspace = true
 wiretap-io = { workspace = true, features = ["can-socketcan", "serial"] }
 
 [dev-dependencies]
+wiretap-checksum.workspace = true
 # The outage drill and the vcan loopback are integration tests, so they link
 # against the crate rather than into it and need their own runtime. `net` and
 # `io-util` are the vcan drill's: it drives the GVRET listener over a socket.

@@ -47,6 +47,8 @@ wiretap-protocol = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git",
 wiretap-catalog = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.18" }
 # The SocketCAN reader and writer, and the serial port. Same tag again.
 wiretap-io = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.18" }
+# The Modbus CRC, for the server's tests alone. Same tag again.
+wiretap-checksum = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.18" }
 
 # --- CLI ---
 clap = { version = "4", default-features = false }

@@ -69,25 +69,13 @@ impl RtuTap {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
+    use wiretap_checksum::algorithms::crc16_modbus_checksum;
+
     use super::*;
     use crate::settings::Framing;
 
-    /// CRC-16/MODBUS, low byte first, as it goes on the wire.
     fn with_crc(body: &[u8]) -> Vec<u8> {
-        let mut crc: u16 = 0xFFFF;
-        for &b in body {
-            crc ^= u16::from(b);
-            for _ in 0..8 {
-                crc = if crc & 1 != 0 {
-                    (crc >> 1) ^ 0xA001
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        let mut out = body.to_vec();
-        out.extend_from_slice(&crc.to_le_bytes());
-        out
+        [body, &crc16_modbus_checksum(body).to_le_bytes()].concat()
     }
 
     fn at(us: u64) -> SystemTime {
