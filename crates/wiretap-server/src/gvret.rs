@@ -439,6 +439,25 @@ mod tests {
         );
     }
 
+    /// Cut, not refused: the upstream decoder keeps the first 8 bytes and
+    /// drops the declared length, so this server can't tell. Should it ever
+    /// pass the whole payload on, the writer refuses it as
+    /// `Unsupported::Length`, and this fails to say so.
+    #[tokio::test]
+    async fn a_transmit_over_8_bytes_arrives_cut_by_the_decoder() {
+        let mut h = harness(two_buses()).await;
+        let mut c = handshaken(h.addr).await;
+        let mut command = vec![0xF1, 0x00, 0x23, 0x01, 0x00, 0x00, 0x00, 12];
+        command.extend(0..12u8);
+        c.write_all(&command).await.unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(5), h.transmits.recv())
+            .await
+            .expect("the transmit was forwarded in time")
+            .expect("the channel is open");
+        assert_eq!(got.data, (0..8).collect::<Vec<u8>>());
+    }
+
     /// The behaviour the whole fan-out exists for: frames a client could not
     /// keep up with are counted and dropped, never held against the capture.
     #[tokio::test]
