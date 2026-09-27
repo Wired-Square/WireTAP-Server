@@ -7,7 +7,7 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
-- **The serial tap is `wiretap-lib-rs` v0.16.15's `RtuTap`**, which the
+- **The serial tap is `wiretap-lib-rs`'s `RtuTap`**, which the
   server's own tap moved into. Stamps are unchanged, except after a reopen
   that follows a backward clock step mid-message: they now hold the newest
   clock of any earlier read, not the last read's.
@@ -16,6 +16,14 @@ All notable changes to this project are documented here. Entries go under
   asking for more registers than Modbus allows, depending on where a read
   ended, and the broadcast was lost. The framer now refuses such a request:
   66 more messages in 1.39 million on the trial line's 34 MB capture.
+- **CAN is read and written through v0.16.16's `wiretap-io`**, in place of
+  the server's own SocketCAN reader. Kernel stamps, FD and remote-frame
+  handling, the bitrate fallback, and refusing to start without the
+  interface are unchanged. An interface that goes away is now reopened by
+  name, so an adapter unplugged and plugged back is read again without a
+  restart; a downed one is reported as it goes down, where the old reader
+  may have heard of it only from the next frame; and a loss is logged once,
+  with `reopened` or `reading again` on its return, not once a second.
 
 ## [0.1.3] — 2026-09-20
 

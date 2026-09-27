@@ -43,11 +43,21 @@ pub trait ReplySink: Send {
     fn send(&self, reply: &Reply) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }
 
+/// BRS off, so an FD reply goes out as it did before the writer could set it.
 #[cfg(target_os = "linux")]
-impl ReplySink for Arc<crate::source::socketcan::CanReader> {
+impl ReplySink for wiretap_io::can::CanWriter {
     async fn send(&self, reply: &Reply) -> io::Result<()> {
-        self.transmit(reply.arb_id, reply.extended, reply.fd, &reply.data)
+        let frame = wiretap_io::can::CanFrame::data(
+            0,
+            reply.arb_id,
+            reply.extended,
+            reply.fd,
+            false,
+            reply.data.clone(),
+        );
+        wiretap_io::can::CanWriter::send(self, frame)
             .await
+            .map_err(io::Error::other)?
     }
 }
 
@@ -56,8 +66,8 @@ impl ReplySink for Arc<crate::source::socketcan::CanReader> {
 /// One responder per answering interface, because a run binds to a bus: two
 /// interfaces sharing one would count each other's frames as their own.
 ///
-/// **`can_fd` decides whether CAN FD is claimed**, because `CanReader::recv`
-/// drops FD frames unless it was opened with `accept_fd`. A responder claiming
+/// **`can_fd` decides whether CAN FD is claimed**, because the capture drops
+/// FD frames unless the device has `fd` on. A responder claiming
 /// FD on a server started without `--can-fd` would answer the whole FD sweep
 /// with silence, and the initiator would report a link that cannot carry CAN
 /// FD. It can; this server was not listening for it. Saying so in the
@@ -70,7 +80,7 @@ pub async fn responder_loop<S: ReplySink>(
     mut frames: broadcast::Receiver<Arc<Sample>>,
     archive: Option<archive::Archive>,
 ) {
-    // Extended is unconditional: `transmit` builds either id width and nothing
+    // Extended is unconditional: the writer sends either id width and nothing
     // filters one out on the way in.
     let capabilities = capability::EXTENDED | if can_fd { capability::FD } else { 0 };
     let mut responder = Responder::new(capabilities, bus.0);

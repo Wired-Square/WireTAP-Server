@@ -41,17 +41,19 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 # codec's golden-byte tests failed. Those tests do not run in this repo's CI,
 # and that guarantee is why they do not need to. It holds only for tags cut
 # that way; a hand-cut tag has no gate behind it.
-wiretap-protocol = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.15" }
+wiretap-protocol = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.16" }
 # The Modbus RTU tap. Same tag as above: the workspace releases as one, and
 # two tags of one repository would be two checkouts.
-wiretap-catalog = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.15" }
+wiretap-catalog = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.16" }
+# The SocketCAN reader and writer. Same tag again.
+wiretap-io = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.16" }
 
 # --- CLI ---
 clap = { version = "4", default-features = false }
 
 # --- CAN capture (Linux only) ---
-# Replaces the Python's raw AF_CAN socket code and its pyroute2 dependency:
-# the netlink module answers bitrate queries directly.
+# Only the vcan drills' end of the bus: the server reads and writes through
+# wiretap-io.
 socketcan = { version = "3.6", default-features = false }
 
 # --- async runtime and HTTP ---

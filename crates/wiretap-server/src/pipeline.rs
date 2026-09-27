@@ -10,8 +10,8 @@
 //! over the CAN sockets and the listening socket and did every client's write
 //! itself. Here each interface has a reader task publishing to a broadcast
 //! channel, each client has a task subscribed to it, and transmits travel the
-//! other way down an mpsc to a task that owns the sockets. No client can delay
-//! a read, and no read can delay a client.
+//! other way down an mpsc to a task that holds the sockets' writers. No client
+//! can delay a read, and no read can delay a client.
 
 use std::io;
 #[cfg(target_os = "linux")]
@@ -27,7 +27,9 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::error;
 use tracing::{info, warn};
 #[cfg(target_os = "linux")]
-use wiretap_model::{CanSample, Direction, Sample};
+use wiretap_io::can::{CanError, CanEvent, CanFrame, CanTask, CanWriter};
+#[cfg(target_os = "linux")]
+use wiretap_model::{CanSample, Direction, Sample, SourceId};
 
 #[cfg(target_os = "linux")]
 use crate::archive::Archive;
@@ -42,11 +44,8 @@ use crate::settings::Settings;
 use crate::settings::{Device, Mode, SerialSettings};
 #[cfg(target_os = "linux")]
 use crate::source::{
-    bus_count, index_for_bus,
-    modbus::RtuTap,
-    serial::SerialLine,
-    socketcan::{detect_bitrates, CanReader},
-    system_time_to_us, Transmit,
+    bus_count, index_for_bus, modbus::RtuTap, serial::SerialLine, socketcan, system_time_to_us,
+    Transmit,
 };
 #[cfg(target_os = "linux")]
 use crate::testpattern;
@@ -67,7 +66,7 @@ const FRAME_BACKLOG: usize = 1024;
 const TRANSMIT_QUEUE: usize = 64;
 
 #[cfg(target_os = "linux")]
-/// How long a reader waits after a failed read before trying again.
+/// How long a serial tap waits before each attempt to reopen its line.
 const READ_BACKOFF: Duration = Duration::from_secs(1);
 
 #[cfg(target_os = "linux")]
@@ -258,7 +257,7 @@ async fn start_devices(_settings: &Settings, _archives: &Archives) -> Result<(),
 /// A CAN device with its socket open and its archive found.
 struct Opened {
     device: Device,
-    reader: Arc<CanReader>,
+    writer: CanWriter,
     archive: Option<Archive>,
 }
 
@@ -274,21 +273,22 @@ async fn start_capture(
     frames: broadcast::Sender<Arc<Sample>>,
 ) -> Result<(), RunError> {
     let mut opened = Vec::new();
+    let mut tasks = Vec::new();
     let mut rates = Vec::new();
     for d in settings.can_devices() {
-        let reader =
-            CanReader::open(&d.interface, d.bus, settings.default_dir, d.fd()).map_err(|err| {
-                RunError::OpenCan {
-                    iface: d.interface.clone(),
-                    err,
-                }
+        let task = socketcan::open(&d.interface, d.fd(), d.mode == Mode::Passive)
+            .await
+            .map_err(|err| RunError::OpenCan {
+                iface: d.interface.clone(),
+                err,
             })?;
-        rates.push(detect_bitrates(&d.interface));
+        rates.push(socketcan::bitrates(&d.interface));
         opened.push(Opened {
             device: d.clone(),
-            reader: Arc::new(reader),
+            writer: task.writer(),
             archive: archives.handle(&d.database),
         });
+        tasks.push(task);
     }
     let any_fd = settings.any_fd();
 
@@ -327,10 +327,12 @@ async fn start_capture(
         },
     );
 
-    for o in &opened {
+    for (o, task) in opened.iter().zip(tasks) {
         tokio::spawn(read_loop(
-            o.reader.clone(),
+            task,
             o.device.interface.clone(),
+            o.device.bus,
+            settings.default_dir,
             frames.clone(),
             o.archive.clone(),
         ));
@@ -370,7 +372,7 @@ async fn start_capture(
         for &i in &armed {
             let o = &opened[i];
             tokio::spawn(testpattern::responder_loop(
-                o.reader.clone(),
+                o.writer.clone(),
                 o.device.bus,
                 o.device.fd(),
                 frames.subscribe(),
@@ -390,20 +392,48 @@ fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {
 
 #[cfg(target_os = "linux")]
 /// Publish one interface's frames to everything downstream.
+///
+/// A loss is logged once and its end once, as the serial tap does, however
+/// many retries lie between: "reopened" for a new socket, else "reading again"
+/// at the first read.
 async fn read_loop(
-    reader: Arc<CanReader>,
+    mut task: CanTask,
     iface: String,
+    bus: SourceId,
+    dir: Direction,
     frames: broadcast::Sender<Arc<Sample>>,
     archive: Option<Archive>,
 ) {
-    loop {
-        match reader.recv().await {
-            Ok(sample) => publish(Sample::Can(sample), archive.as_ref(), &frames),
-            Err(e) => {
-                // An interface that goes down fails every read, and the Python
-                // spun through them in silence. Say so, once a second.
-                error!("{iface}: read failed: {e}");
-                tokio::time::sleep(READ_BACKOFF).await;
+    let mut reopening = false;
+    let mut lost = false;
+    while let Some(event) = task.next_event().await {
+        match event {
+            CanEvent::Connected(_) => {
+                if std::mem::take(&mut reopening) {
+                    info!("{iface}: reopened");
+                    lost = false;
+                }
+            }
+            CanEvent::Read(reads) => {
+                if std::mem::take(&mut lost) {
+                    info!("{iface}: reading again");
+                }
+                for sample in reads
+                    .into_iter()
+                    .filter_map(|r| socketcan::sample(r, bus, dir))
+                {
+                    publish(Sample::Can(sample), archive.as_ref(), &frames);
+                }
+            }
+            CanEvent::Disconnected {
+                error, consecutive, ..
+            } => {
+                if consecutive == 1 {
+                    error!("{iface}: {}", socketcan::loss(&error));
+                }
+                // A read error keeps the socket, so nothing is reopened.
+                reopening = !matches!(error, CanError::Read(_));
+                lost = true;
             }
         }
     }
@@ -520,13 +550,17 @@ async fn transmit_loop(opened: Vec<Opened>, bus_offset: u8, mut queue: mpsc::Rec
         }
         // Classic: a GVRET `F1 00` carries no FD flag, so a client cannot ask
         // for one. The Test Pattern responder owns the FD path.
-        if let Err(e) = o
-            .reader
-            .transmit(t.arb_id, t.extended, false, &t.data)
-            .await
-        {
-            warn!("transmit on bus {} failed: {e}", t.bus.0);
-            continue;
+        let frame = CanFrame::data(0, t.arb_id, t.extended, false, false, t.data.clone());
+        match o.writer.send(frame).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!("transmit on bus {} failed: {e}", t.bus.0);
+                continue;
+            }
+            Err(refused) => {
+                warn!("transmit on bus {} refused: {refused}", t.bus.0);
+                continue;
+            }
         }
         // Archived as `tx`, so a request this server made can be told apart
         // from the traffic it was answering. The Python did the same, and the

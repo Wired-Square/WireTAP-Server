@@ -6,7 +6,8 @@
 //! Docker Desktop's kernel either — `ip link add dev vcan0 type vcan` answers
 //! `Not supported` — so until this ran, opening a socket, reading a frame,
 //! putting one on the bus and asking the kernel for a bitrate had never
-//! executed anywhere.
+//! executed anywhere. The socket itself is `wiretap-io`'s, with drills of its
+//! own; these are about what the server does with it.
 //!
 //! Ignored by default, because it needs an interface only root can create:
 //!
@@ -16,33 +17,40 @@
 //! cargo test -p wiretap-server --test vcan_loopback -- --ignored --test-threads=1
 //! ```
 //!
+//! The drills that take an interface down or delete it make their own,
+//! [`Scratch`], with `ip` as root or `sudo -n ip` otherwise, as CI's runner
+//! allows. Where neither works they are skipped, and under CI they fail.
+//!
 //! **`--test-threads=1` is not decoration.** Every test here shares one bus,
 //! and vcan is multicast: run in parallel, one test's frames arrive in
 //! another's reader. `WIRETAP_VCAN` names a different interface if `vcan0` is
 //! taken.
 //!
 //! The other end of the bus is a plain `socketcan` socket rather than a second
-//! [`CanReader`], so what a test asserts about a frame is never encoded and
+//! `wiretap-io` task, so what a test asserts about a frame is never encoded and
 //! decoded by the same code under test.
 
 #![cfg(target_os = "linux")]
 
+use std::io;
+use std::process::Command as Shell;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use socketcan::{
-    tokio::CanFdSocket, CanAnyFrame, CanFdFrame, CanFrame, EmbeddedFrame, ExtendedId, Frame,
+    tokio::CanFdSocket, CanAnyFrame, CanFdFrame, CanFrame, EmbeddedFrame, Frame, SocketOptions,
     StandardId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use wiretap_io::can::{CanEvent, CanRead, CanTask};
 use wiretap_model::{Direction, SourceId};
 use wiretap_protocol::testpattern::{
     encode, sweep_payload, Command, Flags, Message, ID_CONTROL, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
 };
 use wiretap_server::pipeline;
 use wiretap_server::settings::{Device, DeviceKind, LogLevel, Settings, TestPattern};
-use wiretap_server::source::socketcan::{detect_bitrates, CanReader};
-use wiretap_server::source::{system_time_to_us, Bitrates};
+use wiretap_server::source::{socketcan as server_can, system_time_to_us, Bitrates};
 
 /// Long enough to absorb a loaded CI runner, short enough that a wedged read
 /// fails the test instead of hanging the job.
@@ -78,7 +86,11 @@ impl Bus {
     /// only to the sockets that were already open when it was written, so a
     /// socket opened afterwards sees nothing and the test hangs.
     fn open() -> Self {
-        Self(CanFdSocket::open(&iface()).expect("open the bus; is vcan0 up?"))
+        Self::on(&iface())
+    }
+
+    fn on(iface: &str) -> Self {
+        Self(CanFdSocket::open(iface).expect("open the bus; is the interface up?"))
     }
 
     async fn send(&self, frame: CanFrame) {
@@ -111,11 +123,11 @@ impl Bus {
     }
 }
 
-/// A server on this bus with no gateway: what frames do after the fan-out is
+/// A server on `iface` with no gateway: what frames do after the fan-out is
 /// the outage drill's subject, and these tests are about the bus and the socket.
-fn settings(port: u16, test_pattern: Option<TestPattern>) -> Settings {
+fn settings(iface: &str, port: u16, test_pattern: Option<TestPattern>) -> Settings {
     Settings {
-        devices: vec![Device::can(&iface(), false, "")],
+        devices: vec![Device::can(iface, false, "")],
         host: "127.0.0.1".to_string(),
         port,
         bus_offset: 0,
@@ -138,7 +150,7 @@ fn settings(port: u16, test_pattern: Option<TestPattern>) -> Settings {
 ///
 /// **The barrier is the point.** vcan delivers a frame only to sockets that
 /// were already open when it was written, so a test that writes to the bus
-/// straight after `tokio::spawn` is racing `CanReader::open` — and losing the
+/// straight after `tokio::spawn` is racing the socket's open — and losing the
 /// race looks like the code under test saying nothing. The GVRET handshake is
 /// the proxy: the listener is spawned *after* the readers in `start_capture`,
 /// so a device-info reply proves both are up. `ci.yml` waits on the same port
@@ -146,9 +158,13 @@ fn settings(port: u16, test_pattern: Option<TestPattern>) -> Settings {
 ///
 /// The join handle comes back so a caller can tell "the server refused to
 /// start" from "the server said nothing", which are the same symptom otherwise.
+/// The client comes back latched, for a drill that watches what it is sent.
 async fn server_listening(
     settings: Settings,
-) -> tokio::task::JoinHandle<Result<(), pipeline::RunError>> {
+) -> (
+    tokio::task::JoinHandle<Result<(), pipeline::RunError>>,
+    TcpStream,
+) {
     let port = settings.port;
     let mut server = tokio::spawn(async move { pipeline::run(&settings).await });
     let mut client = tokio::select! {
@@ -164,7 +180,7 @@ async fn server_listening(
         [0xF1, 0x07, 0x90, 0x01, 0x01, 0x00, 0x00, 0x00],
         "device info, which is also the proof the readers are open"
     );
-    server
+    (server, client)
 }
 
 /// Read until the frame with `arb_id` arrives, failing if it never does.
@@ -172,12 +188,13 @@ async fn server_listening(
 /// Scanning rather than taking the first frame keeps a test honest on a bus
 /// that carries anything else — which a `vcan0` left over from a previous run
 /// may well do.
-async fn read_until(reader: &CanReader, arb_id: u32) -> wiretap_model::CanSample {
+async fn read_until(task: &mut CanTask, arb_id: u32) -> CanRead {
     let scan = async {
         loop {
-            let sample = reader.recv().await.expect("read a frame");
-            if sample.arb_id == arb_id {
-                return sample;
+            if let Some(CanEvent::Read(reads)) = task.next_event().await {
+                if let Some(read) = reads.into_iter().find(|r| r.frame.arb_id == arb_id) {
+                    return read;
+                }
             }
         }
     };
@@ -190,12 +207,15 @@ async fn read_until(reader: &CanReader, arb_id: u32) -> wiretap_model::CanSample
 #[ignore = "needs a vcan interface; see the module docs"]
 async fn a_frame_on_the_bus_becomes_a_sample() {
     let bus = Bus::open();
-    let reader = CanReader::open(&iface(), SourceId(3), Direction::Rx, false).expect("open");
+    let mut task = server_can::open(&iface(), false, false)
+        .await
+        .expect("open");
 
     let before = system_time_to_us(SystemTime::now());
     bus.send(CanFrame::new(standard(0x123), &[0xDE, 0xAD, 0xBE, 0xEF]).expect("a frame"))
         .await;
-    let sample = read_until(&reader, 0x123).await;
+    let read = read_until(&mut task, 0x123).await;
+    let sample = server_can::sample(read, SourceId(3), Direction::Rx).expect("a data frame");
 
     assert_eq!(sample.data, [0xDE, 0xAD, 0xBE, 0xEF]);
     assert!(!sample.extended);
@@ -215,148 +235,29 @@ async fn a_frame_on_the_bus_becomes_a_sample() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs a vcan interface; see the module docs"]
-async fn an_extended_id_keeps_its_flag_and_all_29_bits() {
-    let bus = Bus::open();
-    let reader = CanReader::open(&iface(), SourceId(0), Direction::Rx, false).expect("open");
-
-    let id = 0x1AB_CDEF;
-    bus.send(
-        CanFrame::new(ExtendedId::new(id).expect("an extended id"), &[0x01]).expect("a frame"),
-    )
-    .await;
-    let sample = read_until(&reader, id).await;
-
-    // `raw_id` has to have stripped the EFF flag for the id to match at all,
-    // which is the half of this that a bug would break silently.
-    assert!(sample.extended, "the flag survives the read");
-    assert_eq!(sample.data, [0x01]);
-}
-
 /// The one deliberate difference from the Python on this path: it passed
 /// remote frames through as zero-length data frames, and this drops them.
 #[tokio::test]
 #[ignore = "needs a vcan interface; see the module docs"]
 async fn a_remote_frame_is_skipped_and_does_not_stall_the_reader() {
     let bus = Bus::open();
-    let reader = CanReader::open(&iface(), SourceId(0), Direction::Rx, false).expect("open");
+    let mut task = server_can::open(&iface(), false, false)
+        .await
+        .expect("open");
 
     bus.send(CanFrame::new_remote(standard(0x7FE), 8).expect("a remote frame"))
         .await;
     bus.send(CanFrame::new(standard(0x7FF), &[0x55]).expect("a frame"))
         .await;
 
-    // Scanning for the data frame proves both halves at once: the remote frame
-    // was not surfaced, and skipping it did not swallow what followed. This
-    // cannot delegate to `read_until` — that skips every id it is not looking
-    // for, which is exactly the thing being checked for here.
-    let scan = async {
-        loop {
-            let sample = reader.recv().await.expect("read a frame");
-            assert_ne!(sample.arb_id, 0x7FE, "a remote frame reached the archive");
-            if sample.arb_id == 0x7FF {
-                return sample;
-            }
-        }
-    };
-    let sample = tokio::time::timeout(PATIENCE, scan)
-        .await
-        .expect("the data frame behind the remote frame arrived");
-    assert_eq!(sample.data, [0x55]);
-}
-
-/// `transmit` is the only path where a bug puts a frame on a *physical* bus
-/// that nobody asked for, which is why `index_for_bus` exists at all.
-#[tokio::test]
-#[ignore = "needs a vcan interface; see the module docs"]
-async fn a_transmit_reaches_the_bus_as_the_client_asked() {
-    let bus = Bus::open();
-    let reader = CanReader::open(&iface(), SourceId(0), Direction::Rx, false).expect("open");
-
-    reader
-        .transmit(0x321, false, false, &[0xAA, 0xBB, 0xCC])
-        .await
-        .expect("transmit");
-    let frame = bus.next().await;
-    assert_eq!(frame.raw_id(), 0x321);
-    assert!(!frame.is_extended());
-    assert_eq!(frame.data(), [0xAA, 0xBB, 0xCC]);
-
-    reader
-        .transmit(0x1AB_CDEF, true, false, &[0x01])
-        .await
-        .expect("transmit an extended frame");
-    let frame = bus.next().await;
-    assert_eq!(frame.raw_id(), 0x1AB_CDEF);
-    assert!(frame.is_extended());
-
-    // The clamp the doc comment calls a local guarantee rather than a remote
-    // one: the decoder already bounds a client's payload, and this is what
-    // makes that true regardless of the decoder.
-    reader
-        .transmit(0x100, false, false, &[0xFF; 12])
-        .await
-        .expect("a long payload is truncated, not rejected");
-    assert_eq!(bus.next().await.data(), [0xFF; 8]);
-}
-
-/// The clamp above is right for GVRET and would be fatal for a Test Pattern
-/// sweep: an echo of code 15 must be 64 bytes, and an initiator compares it
-/// against the length the code names rather than against what it sent. Before
-/// the FD path this transmitted 8 bytes and blamed the link.
-///
-/// Every length here is one a code names. 9 has no code of its own; the encoder
-/// rounds it to 12 and pads, which is asserted upstream and re-checked here
-/// because it is this repo's socket doing the padding.
-#[tokio::test]
-#[ignore = "needs a vcan interface; see the module docs"]
-async fn an_fd_transmit_keeps_its_whole_payload() {
-    let bus = Bus::open();
-    let reader = CanReader::open(&iface(), SourceId(0), Direction::Rx, true).expect("open");
-
-    for len in [12usize, 32, 64] {
-        let payload: Vec<u8> = (0..len).map(|i| i as u8).collect();
-        reader
-            .transmit(0x321, false, true, &payload)
-            .await
-            .unwrap_or_else(|e| panic!("transmit {len} bytes: {e}"));
-        let frame = bus.next().await;
-        assert_eq!(frame.data(), &payload[..], "{len} bytes arrived intact");
-    }
-
-    reader
-        .transmit(0x321, false, true, &[0xAB; 9])
-        .await
-        .expect("transmit 9 bytes");
-    let frame = bus.next().await;
-    assert_eq!(
-        frame.data().len(),
-        12,
-        "9 bytes is rounded up to the next code and padded"
+    let remote = read_until(&mut task, 0x7FE).await;
+    assert!(
+        server_can::sample(remote, SourceId(0), Direction::Rx).is_none(),
+        "a remote frame reached the archive"
     );
-    assert_eq!(&frame.data()[..9], [0xAB; 9]);
-    assert_eq!(&frame.data()[9..], [0, 0, 0], "padded, not filled");
-}
-
-#[tokio::test]
-#[ignore = "needs a vcan interface; see the module docs"]
-async fn an_unrepresentable_id_is_refused_rather_than_truncated() {
-    let reader = CanReader::open(&iface(), SourceId(0), Direction::Rx, false).expect("open");
-
-    // 0x800 needs 12 bits; a standard id has 11. Truncating would transmit
-    // 0x000 — a frame on the bus with the wrong identifier.
-    let err = reader
-        .transmit(0x800, false, false, &[0x00])
-        .await
-        .expect_err("refused");
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-
-    let err = reader
-        .transmit(1 << 29, true, false, &[0x00])
-        .await
-        .expect_err("refused");
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    let data = read_until(&mut task, 0x7FF).await;
+    let sample = server_can::sample(data, SourceId(0), Direction::Rx).expect("a data frame");
+    assert_eq!(sample.data, [0x55]);
 }
 
 /// A vcan interface has no bit timing to report, which is exactly the fallback
@@ -365,9 +266,9 @@ async fn an_unrepresentable_id_is_refused_rather_than_truncated() {
 #[tokio::test]
 #[ignore = "needs a vcan interface; see the module docs"]
 async fn an_interface_with_no_timing_reports_the_fallback_bitrate() {
-    assert_eq!(detect_bitrates(&iface()), Bitrates::FALLBACK);
+    assert_eq!(server_can::bitrates(&iface()), Bitrates::FALLBACK);
     assert_eq!(
-        detect_bitrates("wiretap-no-such-iface"),
+        server_can::bitrates("wiretap-no-such-iface"),
         Bitrates::FALLBACK,
         "an interface that does not exist is the netlink error path"
     );
@@ -376,14 +277,15 @@ async fn an_interface_with_no_timing_reports_the_fallback_bitrate() {
 /// The whole daemon, wired as it ships: a frame on the bus reaches a GVRET
 /// client as protocol bytes, and a client's `F1 00` reaches the bus.
 ///
-/// This is the only test that runs `pipeline`'s CAN half — `start_capture`,
-/// `read_loop`, `transmit_loop` and, because `echo_console` is on, `echo_loop`.
+/// With the drills below, this is what runs `pipeline`'s CAN half —
+/// `start_capture`, `read_loop`, `transmit_loop` and, because `echo_console`
+/// is on, `echo_loop`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a vcan interface; see the module docs"]
 async fn the_pipeline_bridges_the_bus_to_a_gvret_client_and_back() {
     let bus = Bus::open();
     let port = free_port().await;
-    let settings = settings(port, None);
+    let settings = settings(&iface(), port, None);
     // `run` returns only on a signal, so the task outlives this body and the
     // runtime drops it. The handle is held rather than detached because every
     // way this can fail to start — vcan0 down, the port taken — would
@@ -479,6 +381,7 @@ async fn read_exactly(stream: &mut TcpStream, n: usize) -> Vec<u8> {
 async fn an_armed_responder_echoes_an_fd_sweep_on_the_bus() {
     let bus = Bus::open();
     let mut settings = settings(
+        &iface(),
         free_port().await,
         Some(TestPattern {
             ifaces: vec![iface()],
@@ -506,10 +409,10 @@ async fn an_armed_responder_echoes_an_fd_sweep_on_the_bus() {
     let echo = bus.next().await;
     assert_eq!(echo.raw_id(), SWEEP_ECHO_BASE + 15, "the echo id");
     assert_eq!(echo.data(), &payload[..], "all 64 bytes came back");
-    assert!(
-        matches!(echo, CanAnyFrame::Fd(_)),
-        "and came back as CAN FD, not downgraded to classic"
-    );
+    let CanAnyFrame::Fd(echo) = echo else {
+        panic!("the echo came back downgraded to classic");
+    };
+    assert!(!echo.is_brs(), "and at one bitrate, as it always went out");
 }
 
 /// **Disabled is silent.** The responder is the only thing here that transmits
@@ -523,7 +426,7 @@ async fn an_armed_responder_echoes_an_fd_sweep_on_the_bus() {
 #[ignore = "needs a vcan interface; see the module docs"]
 async fn a_disabled_responder_transmits_nothing() {
     let bus = Bus::open();
-    let _server = server_listening(settings(free_port().await, None)).await;
+    let _server = server_listening(settings(&iface(), free_port().await, None)).await;
 
     let hello = encode(Message::Control(Command::Hello), Flags::new(0, 0));
     bus.send(CanFrame::new(standard(ID_CONTROL), &hello).expect("a control frame"))
@@ -534,5 +437,202 @@ async fn a_disabled_responder_transmits_nothing() {
         heard.is_none(),
         "a disabled responder put {:?} on the bus",
         heard.map(|f| f.raw_id())
+    );
+}
+
+/// `ip`, as root or through `sudo -n`.
+fn ip(args: &[&str]) -> bool {
+    let ran = |command: &mut Shell| command.status().is_ok_and(|s| s.success());
+    ran(Shell::new("ip").args(args)) || ran(Shell::new("sudo").arg("-n").arg("ip").args(args))
+}
+
+/// A vcan interface of a drill's own, so taking it down or deleting it
+/// disturbs no other test's bus. Deleted when dropped.
+struct Scratch;
+
+impl Scratch {
+    const NAME: &'static str = "wiretap-drill";
+
+    /// `None`, and the drill skipped, where this host won't let it make one.
+    fn new() -> Option<Self> {
+        Self::delete();
+        if Self::add() {
+            return Some(Self);
+        }
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "cannot add {}: CI needs the vcan module and passwordless sudo",
+            Self::NAME
+        );
+        eprintln!(
+            "skipped: adding {} needs root or passwordless sudo",
+            Self::NAME
+        );
+        None
+    }
+
+    fn add() -> bool {
+        ip(&["link", "add", "dev", Self::NAME, "type", "vcan"]) && Self::set("up")
+    }
+
+    fn set(state: &str) -> bool {
+        ip(&["link", "set", state, Self::NAME])
+    }
+
+    fn delete() -> bool {
+        ip(&["link", "del", Self::NAME])
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        Self::delete();
+    }
+}
+
+/// What the server logs, for a drill about what an operator is told. It
+/// captures this thread only, so those drills run on a current-thread runtime,
+/// where every task the server spawns runs on it too.
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for Log {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Log {
+    fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+        let log = Self::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        (log, tracing::subscriber::set_default(subscriber))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    async fn wait_for(&self, line: &str) {
+        let wait = async {
+            while !self.text().contains(line) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(PATIENCE, wait)
+            .await
+            .unwrap_or_else(|_| panic!("never logged {line:?}:\n{}", self.text()));
+    }
+
+    fn errors(&self) -> usize {
+        self.text().matches("ERROR").count()
+    }
+}
+
+/// Long enough for the task's one-second retries to repeat a log line, if
+/// anything were going to.
+const RETRIES: Duration = Duration::from_secs(3);
+
+/// The id of the next two-byte frame a GVRET client is sent.
+async fn next_frame_id(client: &mut TcpStream) -> u32 {
+    let frame = read_exactly(client, 12 + 2).await;
+    assert_eq!(frame[0..2], [0xF1, 0x00], "a frame, not a reply");
+    u32::from_le_bytes(frame[6..10].try_into().unwrap())
+}
+
+/// A downed interface keeps its socket, and frames come back through it once
+/// the interface is up. The loss is logged once, not once a retry, and so is
+/// its end.
+#[tokio::test]
+#[ignore = "needs a vcan interface; see the module docs"]
+async fn a_downed_interface_is_logged_once_and_capture_resumes_once_it_is_up() {
+    let Some(_scratch) = Scratch::new() else {
+        return;
+    };
+    let (log, _guard) = Log::capture();
+    let (_server, mut client) =
+        server_listening(settings(Scratch::NAME, free_port().await, None)).await;
+
+    assert!(Scratch::set("down"));
+    log.wait_for("wiretap-drill: interface is down").await;
+    tokio::time::sleep(RETRIES).await;
+    assert!(Scratch::set("up"));
+
+    // Opened only now: a socket open across the down holds its error for the
+    // next write.
+    Bus::on(Scratch::NAME)
+        .send(CanFrame::new(standard(0x2A1), &[1, 2]).expect("a frame"))
+        .await;
+    assert_eq!(next_frame_id(&mut client).await, 0x2A1);
+    log.wait_for("wiretap-drill: reading again").await;
+    assert_eq!(log.errors(), 1, "{}", log.text());
+    assert_eq!(log.text().matches("reading again").count(), 1);
+    assert!(!log.text().contains("reopened"), "{}", log.text());
+}
+
+/// An adapter unplugged and plugged back is an interface deleted and made
+/// again under a new index, which the old socket never reads again: the
+/// server reopens it by name.
+#[tokio::test]
+#[ignore = "needs a vcan interface; see the module docs"]
+async fn a_deleted_interface_is_reopened_by_name_when_it_comes_back() {
+    let Some(_scratch) = Scratch::new() else {
+        return;
+    };
+    let (log, _guard) = Log::capture();
+    let (_server, mut client) =
+        server_listening(settings(Scratch::NAME, free_port().await, None)).await;
+
+    assert!(Scratch::delete());
+    log.wait_for("wiretap-drill: interface is gone").await;
+    tokio::time::sleep(RETRIES).await;
+    assert!(Scratch::add());
+    log.wait_for("wiretap-drill: reopened").await;
+
+    Bus::on(Scratch::NAME)
+        .send(CanFrame::new(standard(0x2A2), &[1, 2]).expect("a frame"))
+        .await;
+    assert_eq!(next_frame_id(&mut client).await, 0x2A2);
+    assert_eq!(log.errors(), 1, "{}", log.text());
+    assert!(!log.text().contains("reading again"), "{}", log.text());
+}
+
+/// Evidence for why the reader was replaced, not a guard on this server: the
+/// old one read through socketcan's tokio socket, which waits on readability
+/// alone. A downed interface raises only an error, so it heard of the loss
+/// only when a frame arrived after the interface was back up.
+#[tokio::test]
+#[ignore = "needs a vcan interface; see the module docs"]
+async fn the_replaced_reader_heard_of_a_downed_interface_only_from_the_next_frame() {
+    let Some(_scratch) = Scratch::new() else {
+        return;
+    };
+    let old = CanFdSocket::open(Scratch::NAME).expect("open");
+    old.set_recv_timestamp(true).expect("kernel stamps");
+
+    assert!(Scratch::set("down"));
+    let heard = tokio::time::timeout(RETRIES, old.read_frame_with_timestamp()).await;
+    assert!(heard.is_err(), "it heard the loss after all: {heard:?}");
+
+    assert!(Scratch::set("up"));
+    Bus::on(Scratch::NAME)
+        .send(CanFrame::new(standard(0x2A3), &[1, 2]).expect("a frame"))
+        .await;
+    let late = tokio::time::timeout(PATIENCE, old.read_frame_with_timestamp())
+        .await
+        .expect("woken by the frame");
+    assert_eq!(
+        late.expect_err("the loss, before the frame").kind(),
+        io::ErrorKind::NetworkDown
     );
 }

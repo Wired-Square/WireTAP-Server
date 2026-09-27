@@ -192,7 +192,8 @@ jobs:
 
       # Opening a socket, reading a frame, putting one on the bus, asking the
       # kernel for a bitrate, and the pipeline that wires them to a GVRET
-      # client. None of it had ever run before this job.
+      # client. None of it had ever run before this job. The drills that take
+      # an interface down or delete it add their own through `sudo -n ip`.
       - name: Capture drill against vcan0
         run: |
           cargo test -p wiretap-server --test vcan_loopback --locked -- \

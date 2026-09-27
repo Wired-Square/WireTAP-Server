@@ -37,6 +37,17 @@ impl Bitrates {
         nominal: 500_000,
         data: 0,
     };
+
+    /// What an interface reported, as the Python read it. A missing nominal
+    /// falls back *without* discarding a data rate that was read, and a
+    /// nominal of zero — a CAN device that is up but was never given a
+    /// bitrate — stays zero rather than being dressed up as 500 kbit/s.
+    pub fn reported(nominal: Option<u32>, data: Option<u32>) -> Self {
+        Self {
+            nominal: nominal.unwrap_or(Self::FALLBACK.nominal),
+            data: data.unwrap_or(0),
+        }
+    }
 }
 
 /// A frame a GVRET client asked this server to put on a bus.
@@ -91,10 +102,8 @@ pub fn index_for_bus(bus: SourceId, bus_offset: u8, iface_count: usize) -> Optio
 
 /// A `SystemTime` from the kernel as microseconds since the Unix epoch.
 ///
-/// The clamp is for arbitrary inputs, not for a real hazard on this path:
-/// `socketcan` already clamps the kernel's `timespec` at zero, so a frame
-/// timestamp cannot be pre-epoch. A Pi with an unset clock reads *at* the
-/// epoch, not before it.
+/// The clamp is for arbitrary inputs, not for a real hazard on this path: a Pi
+/// with an unset clock reads *at* the epoch, not before it.
 pub fn system_time_to_us(t: SystemTime) -> i64 {
     match t.duration_since(UNIX_EPOCH) {
         Ok(d) => i64::try_from(d.as_micros()).unwrap_or(i64::MAX),
@@ -158,6 +167,27 @@ mod tests {
 
         // And no interfaces means nothing is routable.
         assert_eq!(index_for_bus(SourceId(0), 0, 0), None);
+    }
+
+    #[test]
+    fn a_rate_the_interface_did_not_report_falls_back_alone() {
+        assert_eq!(
+            Bitrates::reported(None, Some(2_000_000)),
+            Bitrates {
+                nominal: 500_000,
+                data: 2_000_000
+            },
+            "the data rate that was read is kept"
+        );
+        assert_eq!(
+            Bitrates::reported(Some(0), None),
+            Bitrates {
+                nominal: 0,
+                data: 0
+            },
+            "zero is reported, not dressed up"
+        );
+        assert_eq!(Bitrates::reported(None, None), Bitrates::FALLBACK);
     }
 
     #[test]
