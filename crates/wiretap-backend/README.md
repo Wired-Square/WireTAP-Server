@@ -85,6 +85,10 @@ sees exactly what it always did. A Modbus row's `id` is `unit << 8 | func`, its
 `dlc` the message length, and `unit`, `func` and `crc_valid` are its own
 columns.
 
+**A CAN row's `dlc` is the length code, not a byte count**: 0–15, so a
+12-byte FD frame is 9. The payload length in bytes is served beside it, as
+`len` on each of `frames` and as `max_len` beside `max_dlc` in `inventory`.
+
 **Each database carries its own events** — a user's annotations, a moment or a
 span with a note, kept beside the frames they describe and independent of
 protocol. `GET /v1/db/{db}/events?start=&end=&limit=` lists them oldest first

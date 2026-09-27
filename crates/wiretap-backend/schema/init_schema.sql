@@ -135,7 +135,7 @@ CREATE TABLE IF NOT EXISTS public.capture_frame (
                 CHECK (protocol IN ('can', 'modbus', 'serial')),
   id          integer     NOT NULL,               -- CAN arbitration id, Modbus register, serial frame id
   extended    boolean,                            -- CAN: 11-bit if false or 29-bit if true; NULL off any other wire
-  dlc         smallint    NOT NULL                -- payload length: 0..8 CAN, 0..64 FD, 0..256 Modbus
+  dlc         smallint    NOT NULL                -- CAN: length code 0..15; bytes off any other wire, 0..256 Modbus
                 CHECK (dlc >= 0 AND dlc <= 256),
   is_fd       boolean,                            -- CAN FD flag; NULL off any other wire
   data_bytes  bytea       NOT NULL,               -- raw payload

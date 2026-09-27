@@ -196,6 +196,7 @@ pub struct InventoryEntry {
     pub first_us: i64,
     pub last_us: i64,
     pub max_dlc: u16,
+    pub max_len: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +211,7 @@ pub struct FrameBatchRow {
     pub id: u32,
     pub extended: bool,
     pub dlc: u16,
+    pub len: u16,
     pub is_fd: bool,
     pub bus: u8,
     pub dir: String,

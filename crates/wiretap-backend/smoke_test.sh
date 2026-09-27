@@ -116,20 +116,23 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" -H "Content-Type: applicat
 read -r ikid ingest_key < <(curl -fsS -H "$A" -H "$J" -d '{"name":"smoke-ingest","role":"ingest"}' "$BASE/v1/admin/keys" | python3 -c 'import sys,json;k=json.load(sys.stdin);print(k["id"],k["key"])')
 PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ingest_key" "$IMPORT_DB" <<'PYEOF'
 import sys, time
-from test_ingest_client import ReferenceClient, encode_modbus_record
+from test_ingest_client import ReferenceClient, encode_modbus_record, encode_record
 c = ReferenceClient(sys.argv[1], int(sys.argv[2]), token=sys.argv[3], database=sys.argv[4])
 assert c.hello()[0] == 0
 rec = encode_modbus_record(0, 1, 0x03, bytes.fromhex("010300000001840a"), bus=2)
-assert c.send_batch(1, [rec], base_ts_us=int(time.time() * 1_000_000))[1] == 0
+fd = encode_record(0, 0x7F0, bytes(range(12)), fd=True)
+assert c.send_batch(1, [rec, fd], base_ts_us=int(time.time() * 1_000_000))[1] == 0
 PYEOF
-check "modbus record ingested over TCP" $?
+check "modbus record and FD frame ingested over TCP" $?
 curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory?protocol=modbus" | grep -q '"frame_id":259'; check "inventory lists modbus rows when asked (unit 1, FC03 = 0x0103)" $?
 ! curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory" | grep -q '"frame_id":259'; check "inventory hides modbus rows by default" $?
 curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/time-bounds?protocol=modbus" | grep -q '"min_ts_us":[0-9]'; check "time-bounds by protocol" $?
-curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/frames?protocol=modbus&limit=5" | grep -q '"dlc":8'; check "frames by protocol carry the message length" $?
+curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/frames?protocol=modbus&limit=5" | grep -q '"dlc":8,"len":8'; check "frames by protocol carry the message length" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" "$BASE/v1/db/$IMPORT_DB/frames?protocol=modbsu")
 [ "$code" = "400" ]; check "a protocol typo is a 400" $?
 curl -fsS -X DELETE -H "$A" "$BASE/v1/admin/keys/$ikid" >/dev/null
+curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/frames?limit=5000" | python3 -c 'import sys,json;assert [(f["dlc"],f["len"]) for f in json.load(sys.stdin)["frames"] if f["id"]==2032]==[(9,12)]'; check "an FD frame serves its length code as dlc and its bytes as len" $?
+curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory" | python3 -c 'import sys,json;assert [(e["max_dlc"],e["max_len"]) for e in json.load(sys.stdin)["entries"] if e["frame_id"]==2032]==[(9,12)]'; check "inventory serves an FD id's longest payload in bytes as max_len" $?
 
 # --- admin views ---
 curl -fsS -H "$A" "$BASE/v1/db/$DB/activity" | grep -q queries; check "activity" $?

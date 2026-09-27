@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **The gateway serves a CAN payload's length in bytes beside its `dlc`**:
+  `len` on each frame from `frames`, and `max_len` beside `max_dlc` on each
+  `inventory` entry. `dlc` is unchanged: for CAN it is the length code, so a
+  12-byte FD frame is 9, and for Modbus the byte count. `max_len` is read
+  from `max_dlc` through the FD table, so the schema needs no migration.
+
 ### Changed
 
 - **The serial tap is `wiretap-lib-rs`'s `RtuTap`**, which the

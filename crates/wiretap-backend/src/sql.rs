@@ -744,19 +744,33 @@ async fn rollup_available(client: &Client) -> bool {
         .unwrap_or(false)
 }
 
+/// The payload length a stored `dlc` stands for; a CAN row holds the length
+/// code. Read from the code, not `data_bytes`, because the rollup keeps only
+/// `max_dlc`: the table is monotonic, so the largest code is the largest payload.
+fn payload_len(protocol: Protocol, dlc: u16) -> u16 {
+    match protocol {
+        Protocol::Can => wiretap_protocol::dlc_to_len(dlc as u8, true) as u16,
+        Protocol::Modbus | Protocol::Serial => dlc,
+    }
+}
+
 pub async fn inventory(
     client: &Client,
     start_time: Option<String>,
     end_time: Option<String>,
     protocol: Option<Protocol>,
 ) -> Result<Vec<InventoryEntry>, String> {
-    let map = |row: &tokio_postgres::Row| InventoryEntry {
-        frame_id: row.get::<_, i32>("id") as u32,
-        is_extended: bool_column(row, "extended"),
-        count: row.get("cnt"),
-        first_us: row.get::<_, f64>("first_us") as i64,
-        last_us: row.get::<_, f64>("last_us") as i64,
-        max_dlc: row.get::<_, i32>("max_dlc") as u16,
+    let map = |row: &tokio_postgres::Row| {
+        let max_dlc = row.get::<_, i32>("max_dlc") as u16;
+        InventoryEntry {
+            frame_id: row.get::<_, i32>("id") as u32,
+            is_extended: bool_column(row, "extended"),
+            count: row.get("cnt"),
+            first_us: row.get::<_, f64>("first_us") as i64,
+            last_us: row.get::<_, f64>("last_us") as i64,
+            max_dlc,
+            max_len: payload_len(protocol.unwrap_or(DEFAULT_PROTOCOL), max_dlc),
+        }
     };
 
     // Full-archive inventory reads the hourly rollup when present
@@ -913,15 +927,19 @@ pub async fn frames_batch(
     let frames: Vec<FrameBatchRow> = rows
         .iter()
         .skip(skip)
-        .map(|row| FrameBatchRow {
-            ts_us: row.get::<_, f64>("ts_us") as i64,
-            id: row.get::<_, i32>("id") as u32,
-            extended: bool_column(row, "extended"),
-            dlc: row.get::<_, i16>("dlc") as u16,
-            is_fd: bool_column(row, "is_fd"),
-            bus: row.get::<_, i32>("bus") as u8,
-            dir: row.get("dir"),
-            data_hex: hex::encode(row.get::<_, Vec<u8>>("data_bytes")),
+        .map(|row| {
+            let data: Vec<u8> = row.get("data_bytes");
+            FrameBatchRow {
+                ts_us: row.get::<_, f64>("ts_us") as i64,
+                id: row.get::<_, i32>("id") as u32,
+                extended: bool_column(row, "extended"),
+                dlc: row.get::<_, i16>("dlc") as u16,
+                len: data.len() as u16,
+                is_fd: bool_column(row, "is_fd"),
+                bus: row.get::<_, i32>("bus") as u8,
+                dir: row.get("dir"),
+                data_hex: hex::encode(data),
+            }
         })
         .collect();
 
@@ -1010,6 +1028,15 @@ pub async fn signal_backend(client: &Client, pid: i32, terminate: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_can_length_code_reads_as_its_fd_byte_count_and_modbus_as_bytes() {
+        assert_eq!(payload_len(Protocol::Can, 8), 8);
+        assert_eq!(payload_len(Protocol::Can, 9), 12);
+        assert_eq!(payload_len(Protocol::Can, 15), 64);
+        assert_eq!(payload_len(Protocol::Modbus, 11), 11);
+        assert_eq!(payload_len(Protocol::Modbus, 256), 256);
+    }
 
     #[test]
     fn cursor_round_trip() {
