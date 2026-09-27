@@ -14,6 +14,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use wiretap_catalog::{validate::validate, Catalog, ModbusRtuOptions};
 use wiretap_model::config::{DeviceSection, FileConfig};
 use wiretap_model::{parse_ifaces, valid_db_name, Direction, Secret, SourceId};
 
@@ -122,6 +123,79 @@ pub struct SerialSettings {
     pub parity: Parity,
     pub stop_bits: u8,
     pub framing: Framing,
+    pub catalogue: Option<LineCatalogue>,
+}
+
+/// A `modbus-rtu` line's catalogue, read once at startup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineCatalogue {
+    pub path: String,
+    pub name: String,
+    /// Its function codes and their length rules, and nothing else set.
+    pub rtu: ModbusRtuOptions,
+}
+
+/// Where the packaged unit's `ProtectHome=` and `PrivateTmp=` leave the daemon
+/// nothing to read, however `--check-config` fares as a user.
+const HIDDEN_FROM_THE_UNIT: [&str; 5] = ["/home", "/root", "/run/user", "/tmp", "/var/tmp"];
+
+impl LineCatalogue {
+    fn load(path: &str) -> Result<Self, String> {
+        let p = Path::new(path);
+        if !p.is_absolute() {
+            return Err(format!("catalog must be an absolute path, got {path:?}"));
+        }
+        if path.split('/').any(|c| c == "." || c == "..") {
+            return Err(format!(
+                "catalog {path} must not contain . or .. components"
+            ));
+        }
+        if let Some(dir) = HIDDEN_FROM_THE_UNIT.iter().find(|d| p.starts_with(d)) {
+            return Err(format!(
+                "catalog {path} is under {dir}, which the packaged unit hides from the \
+                 daemon; put it in /etc/wiretap-server/"
+            ));
+        }
+        Self::read(path)
+    }
+
+    /// Validated before it is parsed: the parser drops a rule it cannot read,
+    /// which leaves that code to the CRC search.
+    pub(crate) fn read(path: &str) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read catalog {path}: {e}"))?;
+        let findings: Vec<String> = validate(&text)
+            .into_iter()
+            .map(|f| format!("{}: {}", f.field, f.message))
+            .collect();
+        if !findings.is_empty() {
+            return Err(format!("catalog {path}: {}", findings.join("; ")));
+        }
+        let catalog = Catalog::parse(&text).map_err(|e| format!("catalog {path}: {e}"))?;
+        Ok(Self {
+            path: path.to_owned(),
+            rtu: catalog.rtu_options(),
+            name: catalog.meta.name,
+        })
+    }
+}
+
+impl fmt::Display for LineCatalogue {
+    /// `x (0x20, 0x60)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let codes: Vec<String> = self
+            .rtu
+            .vendor_functions
+            .iter()
+            .map(|c| format!("{c:#04x}"))
+            .collect();
+        let codes = if codes.is_empty() {
+            "no vendor codes".to_owned()
+        } else {
+            codes.join(", ")
+        };
+        write!(f, "{} ({codes})", self.name)
+    }
 }
 
 impl fmt::Display for SerialSettings {
@@ -218,6 +292,7 @@ impl Device {
                 only_for(t.parity.is_some(), "parity", "serial")?;
                 only_for(t.stop_bits.is_some(), "stop_bits", "serial")?;
                 only_for(t.framing.is_some(), "framing", "serial")?;
+                only_for(t.catalog.is_some(), "catalog", "modbus-rtu")?;
                 (
                     DeviceKind::Can {
                         fd: t.fd.unwrap_or(can_fd),
@@ -264,6 +339,7 @@ impl Device {
                         parity,
                         stop_bits,
                         framing,
+                        catalogue: t.catalog.as_deref().map(LineCatalogue::load).transpose()?,
                     }),
                     Mode::Passive,
                 )
@@ -1023,6 +1099,12 @@ impl Settings {
         }
         for d in &self.devices {
             r.push(("device", d.to_string()));
+            if let DeviceKind::Serial(SerialSettings {
+                catalogue: Some(c), ..
+            }) = &d.kind
+            {
+                r.push(("  catalogue", format!("{}, {c}", c.path)));
+            }
         }
         r.extend([
             ("gvret listen", format!("{}:{}", self.host, self.port)),
@@ -1859,6 +1941,7 @@ mod tests {
                 parity: Parity::None,
                 stop_bits: 1,
                 framing: Framing::ModbusRtu,
+                catalogue: None,
             }),
             "8N1 unless told otherwise"
         );
@@ -1885,10 +1968,79 @@ mod tests {
             ("[[device]]\nkind = \"can\"\ninterface = \"can0\"\nbaud = 9600\n", "baud applies to a serial device"),
             ("[[device]]\nkind = \"tty\"\ninterface = \"x\"\n", "kind must be"),
             ("[[device]]\nkind = \"can\"\n", "interface is required"),
+            (&format!("{SERIAL}catalog = \"sungrow.catalog.toml\"\n"), "catalog must be an absolute path"),
+            (&format!("{SERIAL}catalog = \"/home/pi/sungrow.catalog.toml\"\n"), "under /home, which the packaged unit hides"),
+            (&format!("{SERIAL}catalog = \"/tmp/sungrow.catalog.toml\"\n"), "under /tmp"),
+            (&format!("{SERIAL}catalog = \"/etc/wiretap-server/absent.catalog.toml\"\n"), "cannot read catalog /etc/wiretap-server/absent.catalog.toml"),
+            (&format!("{SERIAL}catalog = \"/etc/../home/pi/sungrow.catalog.toml\"\n"), "must not contain . or .. components"),
+            (&format!("{SERIAL}catalog = \"/etc/wiretap-server/./sungrow.catalog.toml\"\n"), "must not contain . or .. components"),
+            ("[[device]]\nkind = \"can\"\ninterface = \"can0\"\ncatalog = \"/etc/x.toml\"\n", "catalog applies to a modbus-rtu device"),
         ] {
             let err = resolve(&[], Some(broken)).unwrap_err().to_string();
             assert!(err.starts_with("device[0]: ") && err.contains(expect), "{broken:?} -> {err}");
         }
+    }
+
+    fn catalogue_file(name: &str, text: &str) -> String {
+        let path = std::env::temp_dir().join(format!("wt-{name}-{}.toml", std::process::id()));
+        std::fs::write(&path, text).expect("write the catalogue");
+        path.to_str().expect("utf-8 path").to_owned()
+    }
+
+    const DECLARES_0X60: &str = "[meta]\nname = \"test\"\n[meta.modbus.function_code.0x60]\n";
+
+    #[test]
+    fn a_catalogue_is_validated_before_it_is_parsed() {
+        let valid = catalogue_file(
+            "valid",
+            &format!("{DECLARES_0X60}lengths = [{{ len = {{ fixed = 11 }} }}]\n"),
+        );
+        let c = LineCatalogue::read(&valid).unwrap();
+        assert_eq!(c.to_string(), "test (0x60)");
+        std::fs::remove_file(&valid).unwrap();
+        let err = LineCatalogue::read(&valid).unwrap_err();
+        assert!(
+            err.starts_with(&format!("cannot read catalog {valid}: ")),
+            "{err}"
+        );
+
+        let broken = catalogue_file("syntax", "[meta\n");
+        let err = LineCatalogue::read(&broken).unwrap_err();
+        assert!(
+            err.starts_with(&format!("catalog {broken}: toml: ")),
+            "{err}"
+        );
+        std::fs::remove_file(&broken).unwrap();
+
+        let no_len =
+            format!("{DECLARES_0X60}lengths = [{{ when = {{ offset = 4, value = 3 }} }}]\n");
+        assert!(Catalog::parse(&no_len).is_ok(), "the parser drops the rule");
+        let dropped = catalogue_file("no-len", &no_len);
+        let err = LineCatalogue::read(&dropped).unwrap_err();
+        assert!(
+            err.starts_with(&format!(
+                "catalog {dropped}: meta.modbus.function_code.0x60.lengths[0]: "
+            )),
+            "{err}"
+        );
+        std::fs::remove_file(&dropped).unwrap();
+    }
+
+    #[test]
+    fn check_config_lists_a_lines_catalogue() {
+        let mut r = resolve(&[], Some(SERIAL)).unwrap();
+        let path = catalogue_file("rows", DECLARES_0X60);
+        let DeviceKind::Serial(line) = &mut r.settings.devices[0].kind else {
+            panic!("a serial device");
+        };
+        line.catalogue = Some(LineCatalogue::read(&path).unwrap());
+        std::fs::remove_file(&path).unwrap();
+        let rows = r.settings.rows();
+        let at = rows.iter().position(|(l, _)| *l == "device").unwrap();
+        assert_eq!(
+            rows[at + 1],
+            ("  catalogue", format!("{path}, test (0x60)"))
+        );
     }
 
     #[test]

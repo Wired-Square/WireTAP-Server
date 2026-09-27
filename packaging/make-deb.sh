@@ -134,9 +134,10 @@ fi
 UNIT="${ROOT}/packaging/${PKG}.service"
 CONFIG="${ROOT}/packaging/${PKG}.toml"
 EXAMPLE="${ROOT}/packaging/examples/can-interface.service"
+CATALOGUE="${ROOT}/packaging/examples/sungrow-rs485.catalog.toml"
 PROTOCOL="${ROOT}/docs/ingest-protocol.md"
 
-for f in "${UNIT}" "${CONFIG}" "${EXAMPLE}" "${PROTOCOL}"; do
+for f in "${UNIT}" "${CONFIG}" "${EXAMPLE}" "${CATALOGUE}" "${PROTOCOL}"; do
 	[ -f "${f}" ] || die "missing ${f#"${ROOT}"/}"
 done
 
@@ -393,6 +394,7 @@ build_arch() {  # build_arch <arch>
 	# Documentation, not a unit: bringing a CAN interface up is the host's job
 	# and the scope of what this package should own is still open.
 	install -m 0644 "${EXAMPLE}"  "${stage}${DOC_DIR}/examples/can-interface.service"
+	install -m 0644 "${CATALOGUE}" "${stage}${DOC_DIR}/examples/sungrow-rs485.catalog.toml"
 	install -m 0644 "${DEBIAN}/copyright" "${stage}${DOC_DIR}/copyright"
 	gzip -9nc "${DEBIAN}/changelog" > "${stage}${DOC_DIR}/changelog.Debian.gz"
 	chmod 0644 "${stage}${DOC_DIR}/changelog.Debian.gz"

@@ -148,6 +148,9 @@ pub struct DeviceSection {
     pub stop_bits: Option<u8>,
     /// Serial: `modbus-rtu`. Required.
     pub framing: Option<String>,
+    /// `modbus-rtu`: the absolute path of a catalogue declaring the line's
+    /// vendor function codes.
+    pub catalog: Option<String>,
     #[serde(flatten)]
     pub unknown: toml::Table,
 }
@@ -318,7 +321,8 @@ mod tests {
     fn a_serial_device_table_parses() {
         let cfg = FileConfig::parse(
             "[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\n\
-             baud = 9600\nframing = \"modbus-rtu\"\ndatabase = \"sungrow_rs485\"\n",
+             baud = 9600\nframing = \"modbus-rtu\"\ndatabase = \"sungrow_rs485\"\n\
+             catalog = \"/etc/wiretap-server/sungrow-rs485.catalog.toml\"\n",
         )
         .unwrap();
         let d = &cfg.device[0];
@@ -327,6 +331,10 @@ mod tests {
         assert_eq!(d.baud, Some(9600));
         assert_eq!(d.framing.as_deref(), Some("modbus-rtu"));
         assert_eq!(d.database.as_deref(), Some("sungrow_rs485"));
+        assert_eq!(
+            d.catalog.as_deref(),
+            Some("/etc/wiretap-server/sungrow-rs485.catalog.toml")
+        );
         assert!(
             d.mode.is_none() && d.parity.is_none(),
             "absent, not defaulted"

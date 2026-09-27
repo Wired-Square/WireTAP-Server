@@ -79,6 +79,7 @@ mod tests {
         parity: Parity::None,
         stop_bits: 1,
         framing: Framing::ModbusRtu,
+        catalogue: None,
     };
 
     struct Pty {

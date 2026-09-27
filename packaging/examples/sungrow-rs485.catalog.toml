@@ -1,0 +1,12 @@
+[meta]
+name = "sungrow-rs485"
+[meta.modbus.function_code.0x60]
+lengths = [{ len = { count_at = 6, overhead = 9 } }]
+[meta.modbus.function_code.0x20]
+lengths = [
+  { when = { offset = 4, value = 0x03 }, len = { fixed = 11 } },
+  { when = { offset = 4, value = 0x04 }, len = { count_at = 5, overhead = 8 } },
+  { when = { offset = 4, value = 0x04 }, len = { fixed = 11 } },
+]
+[meta.modbus.function_code.0x65]
+lengths = [{ len = { count_at = 4, overhead = 7 } }]

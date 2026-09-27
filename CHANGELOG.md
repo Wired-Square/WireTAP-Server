@@ -12,6 +12,17 @@ All notable changes to this project are documented here. Entries go under
   `inventory` entry. `dlc` is unchanged: for CAN it is the length code, so a
   12-byte FD frame is 9, and for Modbus the byte count. `max_len` is read
   from `max_dlc` through the FD table, so the schema needs no migration.
+- **A `modbus-rtu` serial device takes an optional `catalog`**: the path of a
+  catalogue whose `[meta.modbus.function_code.<code>]` tables declare the
+  line's vendor codes and their lengths. Those messages are framed at the
+  declared length, where the CRC search could stop short; other codes are
+  still searched. The package ships `sungrow-rs485.catalog.toml` as an
+  example: on the trial line's capture it cuts no message of its three codes
+  short, and frames 99.995% of the bytes, up from 99.975%. The file is
+  validated and read once, at startup, and a finding stops the server,
+  naming the key. The path must be absolute, with no `.` or `..`, and outside
+  `/home`, `/root`, `/run/user`, `/tmp` and `/var/tmp`, which the unit hides.
+  `--check-config` and the startup log name each device's catalogue.
 
 ### Changed
 

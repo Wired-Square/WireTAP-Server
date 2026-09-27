@@ -223,7 +223,15 @@ async fn start_devices(settings: &Settings, archives: &Archives) -> Result<(), R
             path: d.interface.clone(),
             err,
         })?;
-        info!("Tapping {}[{}]  {s}  read-only", d.interface, d.bus.0);
+        let catalogue = s
+            .catalogue
+            .as_ref()
+            .map(|c| format!(", catalogue {c}"))
+            .unwrap_or_default();
+        info!(
+            "Tapping {}[{}]  {s}  read-only{catalogue}",
+            d.interface, d.bus.0
+        );
         let archive = archives.handle(&d.database);
         let frames = frames.clone();
         tokio::spawn(serial_tap::drain(

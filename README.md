@@ -81,6 +81,22 @@ vendor's own codes is captured without knowing them first. The
 shipped config documents every key, and `--check-config` lists each device with
 its bus number and database.
 
+Where a vendor's codes are known, a catalogue can declare their lengths, so
+each message is framed whole instead of where a CRC search first passes:
+
+```toml
+catalog = "/etc/wiretap-server/sungrow-rs485.catalog.toml"
+```
+
+[packaging/examples/sungrow-rs485.catalog.toml](packaging/examples/sungrow-rs485.catalog.toml)
+is one, and the package installs it under
+`/usr/share/doc/wiretap-server/examples/`. The path must be absolute and
+readable by the unit, so keep it in `/etc/wiretap-server/`: a home directory
+or `/tmp` is refused. The catalogue is read once, at startup; restart the
+service after editing it. A catalogue that fails validation stops the server
+from starting, naming the key, and `--check-config` lists each device's
+catalogue with its name and vendor codes.
+
 Port 23 is the GVRET default and needs `CAP_NET_BIND_SERVICE`; the packaged unit
 grants it.
 
