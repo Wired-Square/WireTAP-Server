@@ -19,7 +19,7 @@ use std::io::Write as _;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use tokio::sync::{broadcast, mpsc};
@@ -41,11 +41,9 @@ use crate::gvret;
 use crate::ingest;
 use crate::settings::Settings;
 #[cfg(target_os = "linux")]
-use crate::settings::{Device, Mode, SerialSettings};
+use crate::settings::{Device, Mode};
 #[cfg(target_os = "linux")]
-use crate::source::{
-    bus_count, index_for_bus, modbus::RtuTap, serial::SerialLine, socketcan, Transmit,
-};
+use crate::source::{bus_count, index_for_bus, modbus::RtuTap, serial_tap, socketcan, Transmit};
 #[cfg(target_os = "linux")]
 use crate::testpattern;
 
@@ -63,15 +61,6 @@ const FRAME_BACKLOG: usize = 1024;
 /// occasionally, so a backlog here means the bus or the interface is already
 /// in trouble and the useful answer is to say so.
 const TRANSMIT_QUEUE: usize = 64;
-
-#[cfg(target_os = "linux")]
-/// How long a serial tap waits before each attempt to reopen its line.
-const READ_BACKOFF: Duration = Duration::from_secs(1);
-
-#[cfg(target_os = "linux")]
-/// Read buffer for a serial line: four seconds of 9600 baud, though a read
-/// returns only what has arrived.
-const SERIAL_READ: usize = 4096;
 
 /// Why the server stopped, or would not start.
 #[derive(Debug)]
@@ -230,19 +219,18 @@ async fn start_devices(settings: &Settings, archives: &Archives) -> Result<(), R
         start_capture(settings, archives, frames.clone()).await?;
     }
     for (d, s) in settings.serial_devices() {
-        let line =
-            SerialLine::open_readonly(&d.interface, s).map_err(|err| RunError::OpenSerial {
-                path: d.interface.clone(),
-                err,
-            })?;
+        let task = serial_tap::open(&d.interface, s).map_err(|err| RunError::OpenSerial {
+            path: d.interface.clone(),
+            err,
+        })?;
         info!("Tapping {}[{}]  {s}  read-only", d.interface, d.bus.0);
-        tokio::spawn(tap_loop(
+        let archive = archives.handle(&d.database);
+        let frames = frames.clone();
+        tokio::spawn(serial_tap::drain(
             d.interface.clone(),
-            s.clone(),
-            line,
+            task,
             RtuTap::new(d.bus, s),
-            archives.handle(&d.database),
-            frames.clone(),
+            move |m| publish(Sample::Modbus(m), archive.as_ref(), &frames),
         ));
     }
     if settings.echo_console {
@@ -481,52 +469,6 @@ async fn echo_loop(mut frames: broadcast::Receiver<Arc<Sample>>, colour: bool) {
             Err(RecvError::Lagged(n)) => warn!("console echo dropped {n} frames"),
             Err(RecvError::Closed) => return,
         }
-    }
-}
-
-#[cfg(target_os = "linux")]
-/// Read one serial line for as long as the server runs, reopening it when it
-/// goes away — a USB adapter unplugged and plugged back.
-async fn tap_loop(
-    interface: String,
-    settings: SerialSettings,
-    mut line: SerialLine,
-    mut tap: RtuTap,
-    archive: Option<Archive>,
-    frames: broadcast::Sender<Arc<Sample>>,
-) {
-    let mut buf = [0u8; SERIAL_READ];
-    loop {
-        // Read until the line goes away.
-        loop {
-            match line.read(&mut buf).await {
-                Ok(0) => {
-                    error!("{interface}: line closed; reopening");
-                    break;
-                }
-                Ok(n) => {
-                    // One time per read; the tap stamps each message by the
-                    // read its last byte arrived in, which need not be this one.
-                    for m in tap.push(&buf[..n], SystemTime::now()) {
-                        publish(Sample::Modbus(m), archive.as_ref(), &frames);
-                    }
-                }
-                Err(e) => {
-                    error!("{interface}: read failed: {e}; reopening");
-                    break;
-                }
-            }
-        }
-        // The half-message on either side of the gap does not join. The
-        // reopen attempts are quiet until one works.
-        tap.reset();
-        line = loop {
-            tokio::time::sleep(READ_BACKOFF).await;
-            if let Ok(reopened) = SerialLine::open_readonly(&interface, &settings) {
-                break reopened;
-            }
-        };
-        info!("{interface}: reopened");
     }
 }
 

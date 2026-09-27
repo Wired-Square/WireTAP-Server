@@ -75,8 +75,9 @@ framing = "modbus-rtu"
 database = "sungrow_rs485"
 ```
 
-A serial device is opened read-only and every function code is framed, so a
-line full of a vendor's own codes is captured without knowing them first. The
+A serial device is opened read-only and exclusively, so no other reader can
+take bytes from the tap. Every function code is framed, so a line full of a
+vendor's own codes is captured without knowing them first. The
 shipped config documents every key, and `--check-config` lists each device with
 its bus number and database.
 

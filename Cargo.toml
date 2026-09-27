@@ -45,7 +45,7 @@ wiretap-protocol = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git",
 # The Modbus RTU tap. Same tag as above: the workspace releases as one, and
 # two tags of one repository would be two checkouts.
 wiretap-catalog = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.18" }
-# The SocketCAN reader and writer. Same tag again.
+# The SocketCAN reader and writer, and the serial port. Same tag again.
 wiretap-io = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.16.18" }
 
 # --- CLI ---

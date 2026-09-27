@@ -59,7 +59,7 @@ impl RtuTap {
             .collect()
     }
 
-    /// The line was reopened: the bytes on either side of the gap do not join.
+    /// The line was lost: the bytes on either side of the gap do not join.
     pub fn reset(&mut self) {
         self.tap.reset();
     }

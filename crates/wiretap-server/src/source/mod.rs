@@ -4,8 +4,8 @@
 //! Modbus framing live here where they can be tested on any machine.
 
 pub mod modbus;
-#[cfg(target_os = "linux")]
-pub mod serial;
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+pub mod serial_tap;
 #[cfg(target_os = "linux")]
 pub mod socketcan;
 
