@@ -38,6 +38,11 @@ All notable changes to this project are documented here. Entries go under
   `CAP_NET_RAW`**, which an `AF_CAN` socket never needed. A missing
   interface points at `ip link show`, and a refused address family at the
   `can_raw` module and the unit's `RestrictAddressFamilies=`.
+- **A GVRET transmit that declares more than 8 bytes is refused**, and
+  logged with the client, bus, id and declared length. It used to be sent
+  cut to its first 8 bytes, which on a live bus is a different message from
+  the one the client sent. The connection carries on, and its next transmit
+  goes out as usual.
 
 ## [0.1.3] — 2026-09-20
 

@@ -177,8 +177,17 @@ impl Client {
                 arb_id,
                 extended,
                 data,
-                declared: _,
+                declared,
             } => {
+                // A cut frame on a live bus is a different message from the
+                // one the client sent.
+                if usize::from(declared) > data.len() {
+                    warn!(
+                        "Client {}: refused a transmit on bus {bus}, id {arb_id:#x}, declaring {declared} bytes",
+                        self.peer
+                    );
+                    return;
+                }
                 let queued = self.transmits.try_send(Transmit {
                     bus: SourceId(bus),
                     arb_id,
@@ -440,23 +449,35 @@ mod tests {
         );
     }
 
-    /// Cut, not refused: the upstream decoder keeps the first 8 bytes and
-    /// drops the declared length, so this server can't tell. Should it ever
-    /// pass the whole payload on, the writer refuses it as
-    /// `Unsupported::Length`, and this fails to say so.
+    /// The stream stays in sync past a refusal, so the next transmit on the
+    /// same connection still goes out.
     #[tokio::test]
-    async fn a_transmit_over_8_bytes_arrives_cut_by_the_decoder() {
+    async fn a_transmit_declaring_over_8_bytes_is_refused() {
         let mut h = harness(two_buses()).await;
         let mut c = handshaken(h.addr).await;
-        let mut command = vec![0xF1, 0x00, 0x23, 0x01, 0x00, 0x00, 0x00, 12];
-        command.extend(0..12u8);
-        c.write_all(&command).await.unwrap();
+        let mut overlong = vec![0xF1, 0x00, 0x23, 0x01, 0x00, 0x00, 0x00, 12];
+        overlong.extend(0..12u8);
+        assert!(matches!(
+            Decoder::new().feed(&[&SYNC[..], &overlong].concat())[..],
+            [ClientCommand::Transmit { declared: 12, ref data, .. }] if data.len() == 8
+        ));
+        c.write_all(&overlong).await.unwrap();
 
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), h.transmits.recv())
+                .await
+                .is_err(),
+            "nothing was queued"
+        );
+
+        let mut valid = vec![0xF1, 0x00, 0x24, 0x01, 0x00, 0x00, 0x00, 8];
+        valid.extend(0..8u8);
+        c.write_all(&valid).await.unwrap();
         let got = tokio::time::timeout(Duration::from_secs(5), h.transmits.recv())
             .await
-            .expect("the transmit was forwarded in time")
+            .expect("the valid transmit was forwarded in time")
             .expect("the channel is open");
-        assert_eq!(got.data, (0..8).collect::<Vec<u8>>());
+        assert_eq!((got.arb_id, got.data), (0x124, (0..8).collect()));
     }
 
     /// The behaviour the whole fan-out exists for: frames a client could not
