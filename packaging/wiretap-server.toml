@@ -103,8 +103,7 @@ enable = false
 
 [ingest]
 # A binary TCP listener for capture devices pushing frames to this host. The
-# wire format's spec is linked from
-# /usr/share/doc/wiretap-server/ingest-protocol.md.
+# wire format's spec is /usr/share/doc/wiretap-server/ingest-protocol.md.
 #
 # It requires [forward]: accepting a batch, acknowledging it and then having
 # nowhere to put it is the one thing at-least-once delivery must never do, so

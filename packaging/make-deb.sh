@@ -64,6 +64,7 @@ say() { echo "==> $*"; }
 
 command -v dpkg-deb >/dev/null || die "dpkg-deb not found (macOS: brew install dpkg)"
 command -v dpkg-gencontrol >/dev/null || die "dpkg-gencontrol not found (it ships with dpkg)"
+command -v python3 >/dev/null || die "python3 not found (it reads cargo metadata)"
 
 if [ -z "${version}" ]; then
 	version="$(awk '/^\[workspace\.package\]/{f=1} f && /^version[[:space:]]*=/{gsub(/[",]/,"",$3); print $3; exit}' \
@@ -135,7 +136,13 @@ UNIT="${ROOT}/packaging/${PKG}.service"
 CONFIG="${ROOT}/packaging/${PKG}.toml"
 EXAMPLE="${ROOT}/packaging/examples/can-interface.service"
 CATALOGUE="${ROOT}/packaging/examples/sungrow-rs485.catalog.toml"
-PROTOCOL="${ROOT}/docs/ingest-protocol.md"
+# The ingest spec from the wiretap-protocol checkout Cargo.lock pins, so the
+# package documents the protocol its binary speaks.
+protocol_manifest="$(cd "${ROOT}" && cargo metadata --format-version 1 --locked \
+	| python3 -c 'import json, sys; print(next(p["manifest_path"]
+		for p in json.load(sys.stdin)["packages"] if p["name"] == "wiretap-protocol"))')" \
+	|| die "could not find wiretap-protocol in cargo metadata"
+PROTOCOL="$(dirname "${protocol_manifest}")/docs/ingest.md"
 
 for f in "${UNIT}" "${CONFIG}" "${EXAMPLE}" "${CATALOGUE}" "${PROTOCOL}"; do
 	[ -f "${f}" ] || die "missing ${f#"${ROOT}"/}"
