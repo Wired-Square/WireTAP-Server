@@ -262,7 +262,7 @@ impl Session {
 
         // Refused before anything is enqueued: accepting a batch this server
         // will only drop would tell the device its frames are safe.
-        if self.archive.occupancy_pct() >= REFUSE_ABOVE_PCT {
+        if self.archive.is_closed() || self.archive.occupancy_pct() >= REFUSE_ABOVE_PCT {
             return (
                 Some(self.ack(batch.seq, proto::ACK_OVERLOADED)),
                 Next::Continue,
@@ -583,6 +583,38 @@ mod tests {
         let ack = proto::parse_ack(&reply(&mut c).await.body).unwrap();
         assert_eq!((ack.seq, ack.status), (9, proto::ACK_OK));
         assert_eq!(wait_for(&seen, 1).await.len(), 1, "the resend landed");
+    }
+
+    /// A batch that arrives once shutdown has closed the archive is refused,
+    /// so the device keeps it for the next run rather than being told it is
+    /// safe.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_during_shutdown_is_refused() {
+        let (archive, seen, stop) = archive_capturing(100);
+        let server = Server::bind(&ingest_settings(""), archive.clone())
+            .await
+            .expect("bind");
+        let addr = server.local_addr().expect("bound");
+        tokio::spawn(server.run());
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&proto::encode_hello(b"", "", false))
+            .await
+            .unwrap();
+        reply(&mut c).await;
+
+        let _ = stop.send(true);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !archive.is_closed() {
+            assert!(std::time::Instant::now() < deadline, "the archive closed");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        c.write_all(&proto::encode_batch(4, 0, 1, &one_record(0, 0x7)))
+            .await
+            .unwrap();
+        let ack = proto::parse_ack(&reply(&mut c).await.body).unwrap();
+        assert_eq!((ack.seq, ack.status), (4, proto::ACK_OVERLOADED));
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

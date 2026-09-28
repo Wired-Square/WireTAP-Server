@@ -30,11 +30,13 @@
 //! apart. With one pipeline the tail is empty and the lines are the Python's.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 use wiretap_model::Sample;
 
@@ -141,10 +143,11 @@ pub struct Archive {
     /// "below 80", so a recovery is reported once rather than every frame.
     last_bucket: Arc<AtomicI64>,
     last_full_log: Arc<Mutex<Option<Instant>>>,
+    closed_reported: Arc<AtomicBool>,
 }
 
 impl Archive {
-    /// Hand over a frame, or drop it if the queue is full.
+    /// Hand over a frame, or drop it if the queue is full or closed.
     ///
     /// Never blocks and never awaits: this is called from the capture path,
     /// where waiting on the archive is what the whole design exists to avoid.
@@ -154,8 +157,14 @@ impl Archive {
                 add(&self.counters.enqueued, 1);
                 self.warn_thresholds();
             }
-            Err(_) => self.log_queue_full(add(&self.counters.dropped, 1)),
+            Err(TrySendError::Full(_)) => self.log_queue_full(add(&self.counters.dropped, 1)),
+            Err(TrySendError::Closed(_)) => self.report_closed(),
         }
+    }
+
+    /// Shutdown has begun: nothing enqueued now will be archived.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
     }
 
     /// The running totals, for a stats line or a test that wants to know
@@ -239,6 +248,17 @@ impl Archive {
             get(&self.counters.dropped),
             self.tag
         );
+    }
+
+    /// A frame arrived after shutdown closed the queue. Not an overload, so
+    /// not counted in `dropped`, and said once: the queue closes once.
+    fn report_closed(&self) {
+        if !self.closed_reported.swap(true, Ordering::Relaxed) {
+            warn!(
+                "frame arrived after shutdown began, not archived{}",
+                self.tag
+            );
+        }
     }
 }
 
@@ -376,8 +396,13 @@ impl Archives {
             .map(|(_, r)| r.frames.clone())
     }
 
-    /// Stop every pipeline and wait for each to flush.
-    pub async fn shutdown(self) {
+    /// Stop `readers`, then every pipeline, waiting for each to flush.
+    ///
+    /// Readers first, so every frame one has read is queued before its queue
+    /// closes. Aborting them is safe because none awaits between reading a
+    /// frame and enqueueing it.
+    pub async fn shutdown(self, mut readers: JoinSet<()>) {
+        readers.shutdown().await;
         for (_, r) in self.0 {
             let _ = r.shutdown().await;
         }
@@ -407,6 +432,7 @@ pub fn channel<S: BatchSink, C: FrameCache>(
             tag: Arc::clone(&tag),
             last_bucket: Arc::new(AtomicI64::new(-1)),
             last_full_log: Arc::new(Mutex::new(None)),
+            closed_reported: Arc::new(AtomicBool::new(false)),
         },
         Batcher {
             rx,
@@ -1137,18 +1163,69 @@ mod tests {
             0.0,
             None,
         );
-        // No worker: nothing drains the queue, so it fills and stays full.
-        drop(batcher);
+        // Held but never run: nothing drains the queue, so it fills and stays
+        // full. Dropping it would close the queue instead.
+        let _batcher = batcher;
 
         for i in 0..10 {
             archive.enqueue(sample(i));
         }
-        assert_eq!(
-            get(&archive.counters.enqueued),
-            0,
-            "a closed queue takes none"
+        assert_eq!(get(&archive.counters.enqueued), 4, "the queue's worth");
+        assert_eq!(get(&archive.counters.dropped), 6);
+        assert!(
+            archive.last_full_log.lock().unwrap().is_some(),
+            "and said so"
         );
-        assert_eq!(get(&archive.counters.dropped), 10);
+    }
+
+    /// A frame that arrives after shutdown closed the queue is not an
+    /// overload: it is neither counted as dropped nor logged as `queue FULL`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_closed_queue_is_not_reported_as_full() {
+        let r = rig(100);
+        let archive = r.archive.clone();
+        r.finish_by_signal().await;
+
+        archive.enqueue(sample(0));
+
+        assert_eq!(get(&archive.counters.dropped), 0, "not an overload drop");
+        assert!(
+            archive.last_full_log.lock().unwrap().is_none(),
+            "no queue FULL"
+        );
+        assert!(archive.closed_reported.load(Ordering::Relaxed), "said once");
+    }
+
+    /// Readers are stopped before their archive closes, so every frame one
+    /// has handed over is archived and none arrives at a closed queue.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_stops_the_readers_before_closing_the_queue() {
+        let r = rig(100_000);
+        let sink = r.sink.clone();
+        let handed_over = Arc::new(AtomicU64::new(0));
+        let mut readers = JoinSet::new();
+        let (reader, handed) = (r.archive.clone(), Arc::clone(&handed_over));
+        readers.spawn(async move {
+            loop {
+                reader.enqueue(sample(add(&handed, 1) as u32));
+                tokio::task::yield_now().await;
+            }
+        });
+        wait_for("the reader to start", || get(&handed_over) > 100).await;
+
+        let archives = Archives(vec![(
+            "db".into(),
+            Running {
+                frames: r.archive,
+                stop: r.stop,
+                worker: r.task,
+            },
+        )]);
+        tokio::time::timeout(Duration::from_secs(10), archives.shutdown(readers))
+            .await
+            .expect("shutdown finished");
+
+        assert_eq!(sink.written().len() as u64, get(&handed_over));
     }
 
     /// What `cache_batch` reports is what landed, because both `info` lines

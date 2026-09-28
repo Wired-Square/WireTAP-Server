@@ -23,6 +23,7 @@ use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinSet;
 #[cfg(target_os = "linux")]
 use tracing::error;
 use tracing::{info, warn};
@@ -177,11 +178,12 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
         None => Archives::none(),
     };
 
+    let mut readers = JoinSet::new();
     if settings.devices.is_empty() {
         // No local hardware, so no sockets, no lines and no GVRET listener.
         info!("No devices configured; running ingest-only");
     } else {
-        start_devices(settings, &archives).await?;
+        start_devices(settings, &archives, &mut readers).await?;
     }
 
     if let Some(ingest) = &settings.ingest {
@@ -200,11 +202,8 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
     shutdown().await;
     info!("Shutting down");
 
-    // Closing the queues is what tells the batchers to flush, so this has to
-    // outlive the tasks that hold clones of the handles — which the runtime
-    // drops when this returns. `TimeoutStopSec` in the unit is what gives the
-    // flush room.
-    archives.shutdown().await;
+    // `TimeoutStopSec` in the unit is what gives the flush room.
+    archives.shutdown(readers).await;
     Ok(())
 }
 
@@ -213,10 +212,14 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
 ///
 /// One broadcast for all of them: the GVRET bridge takes the CAN frames off
 /// it and the console echo takes everything.
-async fn start_devices(settings: &Settings, archives: &Archives) -> Result<(), RunError> {
+async fn start_devices(
+    settings: &Settings,
+    archives: &Archives,
+    readers: &mut JoinSet<()>,
+) -> Result<(), RunError> {
     let (frames, _) = broadcast::channel(FRAME_BACKLOG);
     if !settings.can_devices().is_empty() {
-        start_capture(settings, archives, frames.clone()).await?;
+        start_capture(settings, archives, frames.clone(), readers).await?;
     }
     for (d, s) in settings.serial_devices() {
         let task = serial_tap::open(&d.interface, s).map_err(|err| RunError::OpenSerial {
@@ -234,7 +237,7 @@ async fn start_devices(settings: &Settings, archives: &Archives) -> Result<(), R
         );
         let archive = archives.handle(&d.database);
         let frames = frames.clone();
-        tokio::spawn(serial_tap::drain(
+        readers.spawn(serial_tap::drain(
             d.interface.clone(),
             task,
             RtuTap::new(d.bus, s),
@@ -250,7 +253,11 @@ async fn start_devices(settings: &Settings, archives: &Archives) -> Result<(), R
 /// Off Linux there is nothing to capture from, but the rest of the server
 /// still runs — which is what an ingest-only deployment is.
 #[cfg(not(target_os = "linux"))]
-async fn start_devices(_settings: &Settings, _archives: &Archives) -> Result<(), RunError> {
+async fn start_devices(
+    _settings: &Settings,
+    _archives: &Archives,
+    _readers: &mut JoinSet<()>,
+) -> Result<(), RunError> {
     Err(RunError::NoDeviceCapture)
 }
 
@@ -272,6 +279,7 @@ async fn start_capture(
     settings: &Settings,
     archives: &Archives,
     frames: broadcast::Sender<Arc<Sample>>,
+    readers: &mut JoinSet<()>,
 ) -> Result<(), RunError> {
     let mut opened = Vec::new();
     let mut tasks = Vec::new();
@@ -329,7 +337,7 @@ async fn start_capture(
     );
 
     for (o, task) in opened.iter().zip(tasks) {
-        tokio::spawn(read_loop(
+        readers.spawn(read_loop(
             task,
             o.device.interface.clone(),
             o.device.bus,

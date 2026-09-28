@@ -76,6 +76,16 @@ All notable changes to this project are documented here. Entries go under
   its old version, and the admin UI's *failed* badge names the engine version
   it found. A fresh database is still created on an older engine.
 
+### Fixed
+
+- **A frame read during shutdown is no longer lost as `queue FULL: size=0`.**
+  The CAN readers and serial taps are now stopped before the archive closes,
+  so every frame they have read is flushed. A frame that still arrives after
+  the close is not counted in `dropped` or logged as `queue FULL`; it is
+  logged once as `frame arrived after shutdown began, not archived`. An
+  ingest batch that arrives after the close is refused with status 3, which
+  a device answers by resending it later.
+
 ## [0.1.3] — 2026-09-20
 
 The gateway gains per-database events and a schema that says which columns
