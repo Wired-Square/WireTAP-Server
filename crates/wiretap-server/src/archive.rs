@@ -850,7 +850,7 @@ mod tests {
     fn id(s: &Sample) -> u32 {
         match s {
             Sample::Can(c) => c.arb_id,
-            Sample::Modbus(m) => wiretap_ingest_proto::modbus_id(m.unit, m.func),
+            Sample::Modbus(m) => wiretap_protocol::ingest::modbus_id(m.unit, m.func),
         }
     }
 

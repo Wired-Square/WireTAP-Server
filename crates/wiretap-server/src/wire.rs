@@ -1,13 +1,13 @@
 //! How a [`Sample`] crosses the ingest protocol, in both directions.
 //!
-//! `wiretap-ingest-proto` carries scalars and no frame type, so the mapping
+//! `wiretap_protocol::ingest` carries scalars and no frame type, so the mapping
 //! from a sample to a record's kind, flags and id word lives here — once,
 //! because [`crate::forward`] encodes it and [`crate::ingest`] decodes it, and
 //! the two have to agree with each other and with the gateway's reading of the
 //! same record.
 
-use wiretap_ingest_proto as proto;
 use wiretap_model::{CanSample, Direction, ModbusSample, Sample, SourceId};
+use wiretap_protocol::ingest as proto;
 
 /// A capture timestamp as the protocol carries it. One spelling, because the
 /// base and the deltas measured from it have to agree.

@@ -17,9 +17,9 @@ wiretap-build-id = { path = "../wiretap-build-id" }
 # Also a build-dependency above; this side is the build_version! macro only.
 wiretap-build-id = { path = "../wiretap-build-id" }
 wiretap-model = { path = "../wiretap-model" }
-# The GVRET codec and the DLC table. No frame type crosses the boundary: the
-# codec takes scalars and this crate adapts, which is what will let the desktop
-# adopt it without touching the serde type its frontend reads.
+# The GVRET and ingest codecs and the DLC table. No frame type crosses the
+# boundary: the codecs take scalars and this crate adapts, which is what will
+# let the desktop adopt them without touching the serde type its frontend reads.
 wiretap-protocol.workspace = true
 # `RtuTap`, which frames and stamps the serial tap's bytes. It brings the
 # catalogue's other dependencies with it; what that costs the musl binary is
@@ -35,7 +35,6 @@ rusqlite = { workspace = true, features = ["bundled"] }
 subtle.workspace = true
 # Only for naming the errno an open failed with.
 libc = "0.2"
-wiretap-ingest-proto = { path = "../wiretap-ingest-proto" }
 tracing.workspace = true
 # No `env-filter`: the level comes from the config file, and RUST_LOG would
 # cost a regex engine in a binary that is shipped over the network.

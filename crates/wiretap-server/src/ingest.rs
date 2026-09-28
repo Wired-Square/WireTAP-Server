@@ -13,9 +13,9 @@
 //!
 //! The session loop mirrors the gateway's (`wiretap-backend/src/ingest/mod.rs`)
 //! because both serve the same protocol. They are deliberately not shared: the
-//! codec is, in `wiretap-ingest-proto`, but sharing the *driver* would mean
-//! putting tokio into a crate whose whole point is that a client can speak the
-//! protocol without one.
+//! codec is, in `wiretap_protocol::ingest`, but sharing the *driver* would
+//! mean putting tokio into a crate whose whole point is that a client can
+//! speak the protocol without one.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,8 +25,8 @@ use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
-use wiretap_ingest_proto as proto;
 use wiretap_model::Secret;
+use wiretap_protocol::ingest as proto;
 
 use crate::archive::Archive;
 use crate::settings::Ingest;
@@ -269,18 +269,8 @@ impl Session {
             );
         }
 
-        // A relative batch's base is an epoch this server knows nothing about,
-        // so the newest record is stamped with its arrival and the rest are
-        // back-dated by their distance from it. The newest is the *largest*
-        // delta, not the last one: a sender interleaving two buses can hand
-        // over a batch whose last record is not its newest, and taking the
-        // last would then stamp the real newest ahead of its own arrival.
-        let base_ts_us = if self.time_relative {
-            let newest = batch.records.iter().map(|r| r.delta_us).max().unwrap_or(0);
-            system_time_to_us(SystemTime::now()) - i64::from(newest)
-        } else {
-            batch.base_ts_us as i64
-        };
+        let arrival_us = system_time_to_us(SystemTime::now()) as u64;
+        let base_ts_us = batch.base_ts_us(self.time_relative, arrival_us) as i64;
 
         for record in batch.records {
             let ts_us = base_ts_us + i64::from(record.delta_us);

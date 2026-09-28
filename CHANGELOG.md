@@ -62,6 +62,12 @@ All notable changes to this project are documented here. Entries go under
   cut to its first 8 bytes, which on a live bus is a different message from
   the one the client sent. The connection carries on, and its next transmit
   goes out as usual.
+- **The ingest codec is `wiretap-protocol`'s `ingest` module**, which the
+  server's own `wiretap-ingest-proto` crate moved into, byte for byte. Both
+  listeners take a `TIME_RELATIVE` batch's base from it, so the gateway and
+  the capture daemon stamp such a batch by one rule. The spec moved with it:
+  `docs/ingest-protocol.md` now links to it and keeps only the `[ingest]`
+  settings.
 
 ## [0.1.3] — 2026-09-20
 

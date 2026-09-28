@@ -13,10 +13,10 @@ use bytes::Bytes;
 use chrono::DateTime;
 use deadpool_postgres::Pool;
 use futures_util::SinkExt;
-use wiretap_ingest_proto::{
+use wiretap_model::Protocol;
+use wiretap_protocol::ingest::{
     modbus_unit_func, record_id_fields, FLAG_CRC_VALID, ID_ARB_MASK, ID_TX,
 };
-use wiretap_model::Protocol;
 
 /// One row of `capture_frame`, whichever protocol it came off.
 ///
@@ -62,7 +62,7 @@ impl FrameRow {
     }
 
     /// A Modbus message from its `id_flags` word — unit and function code, as
-    /// `wiretap_ingest_proto::modbus_id` packs them — and its flags. `dlc` is
+    /// `wiretap_protocol::ingest::modbus_id` packs them — and its flags. `dlc` is
     /// the message length, CRC included, not a CAN length code.
     pub fn modbus(ts_us: i64, id_flags: u32, flags: u8, bus: u8, data: Vec<u8>) -> Self {
         let (unit, func) = modbus_unit_func(id_flags);
@@ -158,7 +158,7 @@ pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiretap_ingest_proto::{modbus_id, ID_FD};
+    use wiretap_protocol::ingest::{modbus_id, ID_FD};
 
     #[test]
     fn a_modbus_row_fills_the_columns_a_can_row_leaves_null() {

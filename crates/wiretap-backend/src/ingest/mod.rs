@@ -7,7 +7,7 @@
 /// The wire codec, shared with the capture server that speaks the other half
 /// of it. Re-exported under the name it had when it lived here, because the
 /// call sites read better as `proto::encode_ack` than as the crate name.
-pub use wiretap_ingest_proto as proto;
+pub use wiretap_protocol::ingest as proto;
 
 pub mod writer;
 
@@ -261,21 +261,8 @@ impl IngestServer {
             Some(Ok(b)) => b,
         };
 
-        // TIME_RELATIVE: stamp the newest record at arrival, back-date the
-        // rest. The newest is the largest delta rather than the last record —
-        // a sender interleaving two buses can send them out of order, and the
-        // last would then stamp the real newest ahead of its own arrival.
-        let base_ts_us = if session.time_relative {
-            let newest = batch
-                .records
-                .iter()
-                .map(|r| r.delta_us as i64)
-                .max()
-                .unwrap_or(0);
-            Utc::now().timestamp_micros() - newest
-        } else {
-            batch.base_ts_us as i64
-        };
+        let arrival_us = Utc::now().timestamp_micros() as u64;
+        let base_ts_us = batch.base_ts_us(session.time_relative, arrival_us) as i64;
 
         let seq = batch.seq;
         let rows: Vec<FrameRow> = batch

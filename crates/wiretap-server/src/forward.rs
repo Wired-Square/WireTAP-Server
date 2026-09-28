@@ -1,7 +1,7 @@
 //! Forwarding frames to a WireTAP gateway over the binary ingest protocol.
 //!
 //! The only [`BatchSink`] there is. It speaks the client half of
-//! `wiretap-ingest-proto`, whose server half the gateway parses — one codec,
+//! `wiretap_protocol::ingest`, whose server half the gateway parses — one codec,
 //! both ends, so a change to the wire format cannot land on one side only.
 //!
 //! Every batch is acknowledged **after** the gateway has written it, so a slow
@@ -15,8 +15,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::info;
-use wiretap_ingest_proto as proto;
 use wiretap_model::{Sample, Secret};
+use wiretap_protocol::ingest as proto;
 
 use crate::archive::{BatchSink, SinkError, SinkResult};
 use crate::settings::Forward;

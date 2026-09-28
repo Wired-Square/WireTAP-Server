@@ -22,9 +22,8 @@ COPY Cargo.toml Cargo.lock ./
 # Every workspace member has to be here, because `members = ["crates/*"]` is a
 # glob and the workspace inside this image is whatever was copied — cargo loads
 # every member's manifest, and every path dependency's, before it builds
-# anything. Copying only the backend left `wiretap-model` and
-# `wiretap-ingest-proto` missing, which is a build failure and not a smaller
-# build.
+# anything. Copying only the backend left `wiretap-model` missing, which is a
+# build failure and not a smaller build.
 #
 # What each member needs differs, and the rule is below: a *dependency* gets its
 # real source, a member that is only a member gets a stub. The capture server is
@@ -40,8 +39,6 @@ COPY crates/wiretap-model/src               crates/wiretap-model/src
 # dependency — the stub treatment below would fail the build script that uses it.
 COPY crates/wiretap-build-id/Cargo.toml     crates/wiretap-build-id/
 COPY crates/wiretap-build-id/src            crates/wiretap-build-id/src
-COPY crates/wiretap-ingest-proto/Cargo.toml crates/wiretap-ingest-proto/
-COPY crates/wiretap-ingest-proto/src        crates/wiretap-ingest-proto/src
 # The capture server is a member and not a dependency: cargo has to load its
 # manifest and find *a* target, and never builds it. Its real source is the
 # largest and fastest-moving in the workspace, and putting it here would gate

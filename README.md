@@ -105,7 +105,7 @@ grants it.
 | Path | What |
 | --- | --- |
 | [crates/wiretap-backend/](crates/wiretap-backend/) | The gateway: HTTP API, ingest listener, admin SPA, Docker stack, capture schema |
-| [docs/ingest-protocol.md](docs/ingest-protocol.md) | The binary ingest wire format, for anyone writing capture-device firmware |
+| [docs/ingest-protocol.md](docs/ingest-protocol.md) | Where the binary ingest spec lives, for anyone writing capture-device firmware, and the `[ingest]` settings |
 | [tools/](tools/) | Test and admin scripts. Never packaged, never shipped |
 | [debian/](debian/), [packaging/](packaging/) | Package metadata, maintainer scripts, `make-deb.sh`, the systemd unit and the lifecycle test |
 

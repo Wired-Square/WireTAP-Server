@@ -7,9 +7,9 @@
 //! The logic lives in the library and the binary is a thin wrapper, so the
 //! pipeline and the configuration merge are testable without opening a socket
 //! — which is what lets the port be checked against the Python it replaces.
-//! Both wire codecs live outside this crate: `wiretap-protocol`'s `gvret`
-//! module for the live bridge, and `wiretap-ingest-proto` for the ingest
-//! listener and the forward link alike.
+//! Both wire codecs live outside this crate, in `wiretap-protocol`: its `gvret`
+//! module for the live bridge, and its `ingest` module for the ingest listener
+//! and the forward link alike.
 
 /// `0.1.0 (g4bf526d44891)` — the package version and the commit `build.rs`
 /// stamps in, reported by `--version` and by the journal's first line. See
