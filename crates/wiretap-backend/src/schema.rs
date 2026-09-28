@@ -648,6 +648,35 @@ mod tests {
         );
     }
 
+    /// A run can start at any migration — the gateway at the first one a
+    /// database is behind, psql at whichever file it is handed — so each opens
+    /// with the same engine check, before anything it could change and after
+    /// the `ON_ERROR_STOP` without which psql would carry on past the RAISE.
+    #[test]
+    fn every_migration_refuses_an_old_timescaledb_first() {
+        let guard = &split_statements(MIGRATIONS[0].sql)[0];
+        assert!(
+            guard.contains("< ARRAY[2, 28, 1]")
+                && guard.contains("RAISE EXCEPTION")
+                && guard.trim_end().ends_with("END $$"),
+            "the first statement is not the whole engine check: {guard}"
+        );
+        for m in MIGRATIONS {
+            assert_eq!(
+                &split_statements(m.sql)[0],
+                guard,
+                "migration {} does not open with the engine check",
+                m.version
+            );
+            let stop = m.sql.find("\\set ON_ERROR_STOP on");
+            assert!(
+                stop.is_some_and(|stop| stop < m.sql.find("DO $$").unwrap()),
+                "migration {} checks the engine before psql stops on errors",
+                m.version
+            );
+        }
+    }
+
     /// The constant and the row `init_schema.sql` inserts have to agree, or a
     /// fresh database reports a version the code does not believe in.
     #[test]

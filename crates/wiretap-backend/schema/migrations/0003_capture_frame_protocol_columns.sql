@@ -20,7 +20,8 @@
 -- **Needs TimescaleDB 2.28.1 or later.** Before that, ADD CONSTRAINT on a
 -- compressed hypertable reads freed memory (timescale/timescaledb#10094) and
 -- fails at random with `unrecognized node type`; on 2.27.2 three of five
--- adds failed. Upgrade the engine first — the README says how.
+-- adds failed. Every migration therefore opens by refusing an older engine,
+-- before it changes anything. Upgrade the engine first — the README says how.
 --
 -- Measured before it was written, on a copy of a real archive — 83.6 M rows
 -- over 5 compressed chunks, TimescaleDB 2.29 — because both statements touch a
@@ -32,6 +33,16 @@
 -- validated form is the only one that ends validated.
 
 \set ON_ERROR_STOP on
+
+-- timescale/timescaledb#10094, fixed in 2.28.1.
+DO $$
+DECLARE v text := (SELECT extversion FROM pg_extension WHERE extname = 'timescaledb');
+BEGIN
+  IF string_to_array(split_part(v, '-', 1), '.')::int[] < ARRAY[2, 28, 1] THEN
+    RAISE EXCEPTION 'TimescaleDB % is older than 2.28.1, which this schema needs; '
+                    'upgrade the engine and retry — nothing has been changed', v;
+  END IF;
+END $$;
 
 -- Idempotent by itself.
 ALTER TABLE public.capture_frame

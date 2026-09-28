@@ -179,10 +179,12 @@ Two things to know when it does:
 to a compressed hypertable, and `ALTER TABLE … ADD CONSTRAINT` on older
 TimescaleDB has a use-after-free (fixed by
 [timescale/timescaledb#10094](https://github.com/timescale/timescaledb/pull/10094)
-in 2.28.1) that fails the statement at random with `unrecognized node type`,
-leaving the database half-migrated and marked *failed* — and, since the
-`events` reshape runs first, without its `events` table. Check before
-upgrading a gateway that carries it:
+in 2.28.1) that fails the statement at random with `unrecognized node type`.
+Every migration now refuses an older engine before it changes anything: the
+database stays at its old version, marked *failed* in the admin UI with the
+engine version it found, and the gateway tries again when it next starts.
+0.1.3 did not check, and left such a database half-migrated and without its
+`events` table. Check before upgrading a gateway that carries it:
 
 ```bash
 docker compose exec timescaledb psql -U postgres -tAc \

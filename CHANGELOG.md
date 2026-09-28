@@ -68,6 +68,13 @@ All notable changes to this project are documented here. Entries go under
   from it, so the gateway and the capture daemon stamp such a batch by one
   rule. The spec moved with it: `docs/ingest-protocol.md` now points to it and
   keeps only the `[ingest]` settings, and the .deb installs the spec itself.
+- **A schema migration refuses TimescaleDB older than 2.28.1 before it
+  changes anything.** 0.1.3 ran `0003`'s CHECK on such an engine anyway,
+  where it fails at random (see 0.1.3's Notes) and leaves the database
+  *failed* with `events` already dropped. Each migration now opens with the
+  check, under the gateway and under psql alike, so the database stays at
+  its old version, and the admin UI's *failed* badge names the engine version
+  it found. A fresh database is still created on an older engine.
 
 ## [0.1.3] — 2026-09-20
 

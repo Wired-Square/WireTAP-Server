@@ -7,7 +7,9 @@
 --   - add timescaledb to shared_preload_libraries and restart Postgres
 --   - CREATE EXTENSION needs superuser
 --   - older TimescaleDB has a use-after-free in ADD CONSTRAINT on compressed
---     hypertables (timescale/timescaledb#10094) that 0003's CHECK trips
+--     hypertables (timescale/timescaledb#10094) that 0003's CHECK trips, so
+--     every migration refuses it; this file creates that CHECK with the table
+--     and does not check
 -- Existing pre-TimescaleDB databases should be migrated with
 -- migrate_to_timescale.py rather than re-running this file.
 

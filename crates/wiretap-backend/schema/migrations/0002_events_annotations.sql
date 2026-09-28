@@ -21,7 +21,17 @@
 
 \set ON_ERROR_STOP on
 
--- The guard is the whole safety argument: the table is only reshaped because it
+-- timescale/timescaledb#10094, fixed in 2.28.1.
+DO $$
+DECLARE v text := (SELECT extversion FROM pg_extension WHERE extname = 'timescaledb');
+BEGIN
+  IF string_to_array(split_part(v, '-', 1), '.')::int[] < ARRAY[2, 28, 1] THEN
+    RAISE EXCEPTION 'TimescaleDB % is older than 2.28.1, which this schema needs; '
+                    'upgrade the engine and retry — nothing has been changed', v;
+  END IF;
+END $$;
+
+-- This guard is the whole safety argument: the table is only reshaped because it
 -- is empty, and a deployment where something did write to it keeps its rows and
 -- gets an operator instead. The existence test makes a run interrupted between
 -- the drop and the re-create repeatable.
