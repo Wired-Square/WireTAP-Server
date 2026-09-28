@@ -17,7 +17,7 @@ wiretap-build-id = { path = "../wiretap-build-id" }
 # Also a build-dependency above; this side is the build_version! macro only.
 wiretap-build-id = { path = "../wiretap-build-id" }
 wiretap-model = { path = "../wiretap-model" }
-# The GVRET and ingest codecs and the DLC table. No frame type crosses the
+# The GVRET, ingest and test-pattern codecs and the DLC table. No frame type crosses the
 # boundary: the codecs take scalars and this crate adapts, which is what will
 # let the desktop adopt them without touching the serde type its frontend reads.
 wiretap-protocol.workspace = true

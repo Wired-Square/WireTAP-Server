@@ -63,11 +63,11 @@ All notable changes to this project are documented here. Entries go under
   the one the client sent. The connection carries on, and its next transmit
   goes out as usual.
 - **The ingest codec is `wiretap-protocol`'s `ingest` module**, which the
-  server's own `wiretap-ingest-proto` crate moved into, byte for byte. Both
-  listeners take a `TIME_RELATIVE` batch's base from it, so the gateway and
-  the capture daemon stamp such a batch by one rule. The spec moved with it:
-  `docs/ingest-protocol.md` now links to it and keeps only the `[ingest]`
-  settings.
+  server's own `wiretap-ingest-proto` crate moved into, with its wire output
+  unchanged byte for byte. Both listeners take a `TIME_RELATIVE` batch's base
+  from it, so the gateway and the capture daemon stamp such a batch by one
+  rule. The spec moved with it: `docs/ingest-protocol.md` now points to it and
+  keeps only the `[ingest]` settings, and the .deb installs the spec itself.
 
 ## [0.1.3] — 2026-09-20
 

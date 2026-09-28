@@ -22,14 +22,14 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 
 [workspace.dependencies]
 # --- extracted for the WireTAP desktop to share ---
-# The GVRET codec, the CAN data length code table and the ingest id-flag
-# layout: the wire formats with one end here and one end in a repo this one
-# cannot see. The desktop has not adopted it yet — it still carries its own two
-# GVRET codecs and its own copies of the DLC table — so today this buys one
-# definition rather than one implementation, and the point of moving first is
-# that adopting is then a deletion. Three members here take it, so the rule
-# above earns its keep twice: a tag they disagreed about would be two protocols
-# in one binary.
+# The GVRET codec, the CAN data length code table and the ingest codec. GVRET's
+# other end is the desktop, which has not adopted it yet — it still carries its
+# own two GVRET codecs and its own copies of the DLC table — so there this buys
+# one definition rather than one implementation, and the point of moving first
+# is that adopting is then a deletion. Both ends of the ingest codec are here,
+# and its clients are in firmware. Two members here take it, so the rule above
+# earns its keep: a tag they disagreed about would be two protocols on one
+# link.
 #
 # `https`, not the `ssh` form wiretap-lib-rs's README shows: that repository is
 # public and nothing here has a key. CI runs on a stock runner, the gateway
@@ -37,8 +37,8 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 #
 # The tag is the test gate too. wiretap-lib-rs cuts releases with
 # `cargo release`, whose pre-release hook runs that repo's full fmt/clippy/test
-# gate *before* the tag is created — so a tag cannot name a tree where the GVRET
-# codec's golden-byte tests failed. Those tests do not run in this repo's CI,
+# gate *before* the tag is created — so a tag cannot name a tree where the
+# codecs' golden-byte tests failed. Those tests do not run in this repo's CI,
 # and that guarantee is why they do not need to. It holds only for tags cut
 # that way; a hand-cut tag has no gate behind it.
 wiretap-protocol = { git = "https://github.com/Wired-Square/wiretap-lib-rs.git", tag = "v0.19.5" }

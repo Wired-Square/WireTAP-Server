@@ -22,8 +22,9 @@ COPY Cargo.toml Cargo.lock ./
 # Every workspace member has to be here, because `members = ["crates/*"]` is a
 # glob and the workspace inside this image is whatever was copied — cargo loads
 # every member's manifest, and every path dependency's, before it builds
-# anything. Copying only the backend left `wiretap-model` missing, which is a
-# build failure and not a smaller build.
+# anything. Copying only the backend leaves its path dependencies
+# (`wiretap-model`, `wiretap-build-id`) missing, a build failure rather than a
+# smaller build.
 #
 # What each member needs differs, and the rule is below: a *dependency* gets its
 # real source, a member that is only a member gets a stub. The capture server is

@@ -18,8 +18,8 @@ wiretap-build-id = { path = "../wiretap-build-id" }
 wiretap-build-id = { path = "../wiretap-build-id" }
 # Only the sample types; default-features off keeps the TOML parser out.
 wiretap-model = { path = "../wiretap-model", default-features = false }
-# The ingest codec, and the DLC table the HTTP import path writes a `dlc`
-# column with.
+# The ingest codec, and the DLC table: a CAN row's `dlc` column and the `len`
+# served from it.
 wiretap-protocol.workspace = true
 axum.workspace = true
 base64.workspace = true

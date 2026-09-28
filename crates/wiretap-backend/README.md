@@ -9,9 +9,10 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
   storage, one database per capture. Not published to the network.
 - **`wiretap-backend`** (Rust / axum) — the only process that talks to Postgres.
   Two listeners plus a built-in admin UI:
-  - **Binary ingest** (TCP 9323) — the protocol in
-    [docs/ingest-protocol.md](../../docs/ingest-protocol.md), for MCUs and the Pi's
-    forward mode. Writes are **ACK-after-write**: a batch is stored in Postgres
+  - **Binary ingest** (TCP 9323) — the protocol in wiretap-protocol's
+    `docs/ingest.md` (linked from
+    [docs/ingest-protocol.md](../../docs/ingest-protocol.md)), for MCUs and the
+    Pi's forward mode. Writes are **ACK-after-write**: a batch is stored in Postgres
     before the device is acknowledged, so a database outage back-pressures the
     device into its own disk cache (nothing is buffered in gateway RAM).
   - **HTTP API** (8423) — the analytical query surface the desktop uses, plus

@@ -4,11 +4,6 @@
 //! client is only ACKed once the batch is durably stored (ACK-after-write), so
 //! a DB outage back-pressures the device into its own disk cache.
 
-/// The wire codec, shared with the capture server that speaks the other half
-/// of it. Re-exported under the name it had when it lived here, because the
-/// call sites read better as `proto::encode_ack` than as the crate name.
-pub use wiretap_protocol::ingest as proto;
-
 pub mod writer;
 
 use std::collections::HashMap;
@@ -22,6 +17,7 @@ use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use wiretap_protocol::ingest as proto;
 
 use crate::config::Config;
 use crate::db::Databases;
@@ -261,15 +257,15 @@ impl IngestServer {
             Some(Ok(b)) => b,
         };
 
-        let arrival_us = Utc::now().timestamp_micros() as u64;
-        let base_ts_us = batch.base_ts_us(session.time_relative, arrival_us) as i64;
+        let base_ts_us =
+            batch.base_ts_us(session.time_relative, Utc::now().timestamp_micros() as u64);
 
         let seq = batch.seq;
         let rows: Vec<FrameRow> = batch
             .records
             .into_iter()
             .map(|rec| {
-                let ts_us = base_ts_us + rec.delta_us as i64;
+                let ts_us = base_ts_us.saturating_add(u64::from(rec.delta_us)) as i64;
                 match rec.kind {
                     RecordKind::Can => FrameRow::can(ts_us, rec.id_flags, rec.bus, rec.payload),
                     RecordKind::Modbus => {

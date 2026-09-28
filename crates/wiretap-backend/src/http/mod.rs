@@ -15,10 +15,10 @@ use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use wiretap_protocol::ingest::RecordKind;
 
 use crate::db;
 use crate::events;
-use crate::ingest::proto;
 use crate::ingest::writer::FrameRow;
 use crate::keys::{KeyInfo, Role};
 use crate::running;
@@ -775,7 +775,7 @@ async fn import_capture(
         let mut off = 0;
         while pending.len() >= off + IMPORT_RECORD_HEADER {
             let plen = pending[off + 13] as usize;
-            let max = proto::RecordKind::Can.max_payload();
+            let max = RecordKind::Can.max_payload();
             if plen > max {
                 return Err(ApiError::from(format!(
                     "record payload length {plen} > {max}"

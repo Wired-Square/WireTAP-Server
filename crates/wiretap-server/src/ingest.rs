@@ -14,8 +14,8 @@
 //! The session loop mirrors the gateway's (`wiretap-backend/src/ingest/mod.rs`)
 //! because both serve the same protocol. They are deliberately not shared: the
 //! codec is, in `wiretap_protocol::ingest`, but sharing the *driver* would
-//! mean putting tokio into a crate whose whole point is that a client can
-//! speak the protocol without one.
+//! mean putting tokio into `wiretap-protocol`, which depends on nothing so
+//! that a client can speak its protocols without an async runtime.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -213,7 +213,7 @@ impl Session {
 
     fn hello(&mut self, body: &[u8]) -> (Option<Vec<u8>>, Next) {
         let now_us = system_time_to_us(SystemTime::now());
-        let ack = |status| Some(proto::encode_hello_ack(status, now_us.max(0) as u64));
+        let ack = |status| Some(proto::encode_hello_ack(status, now_us as u64));
 
         let Ok(hello) = proto::parse_hello(body) else {
             return (None, Next::Drop);
@@ -269,11 +269,13 @@ impl Session {
             );
         }
 
-        let arrival_us = system_time_to_us(SystemTime::now()) as u64;
-        let base_ts_us = batch.base_ts_us(self.time_relative, arrival_us) as i64;
+        let base_ts_us = batch.base_ts_us(
+            self.time_relative,
+            system_time_to_us(SystemTime::now()) as u64,
+        );
 
         for record in batch.records {
-            let ts_us = base_ts_us + i64::from(record.delta_us);
+            let ts_us = base_ts_us.saturating_add(u64::from(record.delta_us)) as i64;
             self.archive.enqueue(Arc::new(wire::decode(ts_us, record)));
         }
         (Some(self.ack(batch.seq, proto::ACK_OK)), Next::Continue)
@@ -648,11 +650,6 @@ mod tests {
             .unwrap();
         reply(&mut c).await;
 
-        // Deltas after some boot the server knows nothing about, and a base
-        // that is nonsense on this server's clock. Deliberately not in order:
-        // a sender interleaving two buses hands over a batch whose last record
-        // is not its newest, and taking the last would stamp the real newest
-        // ahead of the arrival it is supposed to be pinned to.
         let mut records = Vec::new();
         for delta in [1_000_000u64, 3_000_000, 2_000_000] {
             proto::encode_record_into(
