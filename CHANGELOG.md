@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-09-29
+
+The capture daemon reads CAN and serial lines through `wiretap-lib-rs`, frames
+a Modbus line the same whatever its reads return, and loses nothing at
+shutdown; the gateway refuses an engine too old to migrate on. No schema
+change.
+
 ### Added
 
 - **The gateway serves a CAN payload's length in bytes beside its `dlc`**:
@@ -359,7 +366,8 @@ through its own Compose stack.
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
 
-[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.0...v0.1.1

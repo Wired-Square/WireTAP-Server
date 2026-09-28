@@ -1,3 +1,20 @@
+wiretap-server (0.1.4) bookworm; urgency=medium
+
+  * CAN and serial lines are read through wiretap-lib-rs. An unplugged CAN
+    adapter is read again when it returns, without a restart, and a loss is
+    logged once rather than every second.
+  * The serial line is now opened exclusively: while the server holds it,
+    a second reader such as a debugging `cat` gets EBUSY. Stop the service
+    before reading the line by hand.
+  * A modbus-rtu device may name a catalogue of its vendor codes; see the
+    shipped sungrow-rs485.catalog.toml. Optional; nothing changes without it.
+  * Every frame the server has read before a stop is archived, and a
+    stop no longer logs a spurious `queue FULL: size=0`.
+  * A GVRET transmit declaring more than 8 bytes is refused, not cut to 8.
+  * No configuration change is needed; install and restart.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Tue, 29 Sep 2026 09:24:45 +1000
+
 wiretap-server (0.1.3) bookworm; urgency=medium
 
   * No change to the daemon. Republished alongside the gateway, which gains
