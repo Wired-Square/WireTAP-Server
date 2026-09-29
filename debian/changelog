@@ -1,3 +1,15 @@
+wiretap-server (0.1.6) UNRELEASED; urgency=medium
+
+  * A modbus-rtu line's catalogue is read for its RTU rules and name only,
+    and the binary is about 290 KB smaller. Its other sections (frames,
+    meta.version, endianness) are no longer checked at startup; a catalogue
+    with an empty meta.name is now refused.
+  * An extended CAN frame whose id falls in the Test Pattern range is no
+    longer answered during a run.
+  * No configuration change is needed; install and restart.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Tue, 29 Sep 2026 18:30:37 +1000
+
 wiretap-server (0.1.5) bookworm; urgency=medium
 
   * A batch the gateway refuses for its contents is kept in

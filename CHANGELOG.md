@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-09-29
+
+The capture daemon reads a line's catalogue for its Modbus RTU rules alone,
+about 290 KB smaller, and no longer answers an extended frame as a Test Pattern
+request. No gateway or schema change.
+
 ### Changed
 
 - **Built on `wiretap-lib-rs` v0.20.1**, which takes the id width when
@@ -464,7 +470,8 @@ through its own Compose stack.
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
 
-[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.2...v0.1.3
