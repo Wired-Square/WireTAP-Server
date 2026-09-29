@@ -70,10 +70,15 @@ impl Forward {
 
 /// `cache.db` → `cache-<db>.db`, in the same directory.
 fn sibling_cache(path: &Path, database: &str) -> PathBuf {
+    with_stem_suffix(path, &format!("-{database}"))
+}
+
+/// `cache.db` → `cache<suffix>.db`, in the same directory.
+fn with_stem_suffix(path: &Path, suffix: &str) -> PathBuf {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("cache");
     let name = match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{stem}-{database}.{ext}"),
-        None => format!("{stem}-{database}"),
+        Some(ext) => format!("{stem}{suffix}.{ext}"),
+        None => format!("{stem}{suffix}"),
     };
     path.with_file_name(name)
 }
@@ -432,6 +437,12 @@ impl Batching {
             // about where the cache lives.
             legacy_cache_path: None,
         }
+    }
+
+    /// Where batches the gateway refuses as malformed are kept, in the cache's
+    /// own format: `cache.db` → `cache.dead-letter.db`.
+    pub fn dead_letter_path(&self) -> PathBuf {
+        with_stem_suffix(&self.cache_path, ".dead-letter")
     }
 }
 
@@ -2147,6 +2158,11 @@ mod tests {
         assert_eq!(
             sibling_cache(Path::new("/home/pi/.wiretap-server-cache.db"), "x"),
             PathBuf::from("/home/pi/.wiretap-server-cache-x.db")
+        );
+        assert_eq!(
+            other.batching.dead_letter_path(),
+            PathBuf::from("/var/lib/wiretap-server/cache-rs485.dead-letter.db"),
+            "each database's refusals are kept beside its own cache"
         );
     }
 

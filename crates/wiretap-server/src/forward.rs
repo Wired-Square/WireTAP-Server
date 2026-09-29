@@ -9,16 +9,18 @@
 //! one, and the batcher puts the frames on disk instead of losing them. That is
 //! the whole reason this is a stream protocol with ACKs rather than a POST.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tracing::info;
+use tracing::{info, warn};
 use wiretap_model::{Sample, Secret};
 use wiretap_protocol::ingest as proto;
 
 use crate::archive::{BatchSink, SinkError, SinkResult};
+use crate::cache::{FrameCache, SqliteCache};
 use crate::settings::Forward;
 use crate::wire;
 
@@ -44,6 +46,7 @@ pub struct ForwardSink {
     /// Reused across batches: a batch is bounded at `MAX_BODY` bytes, and this
     /// runs for every batch for the life of the process.
     records: Vec<u8>,
+    dead_letter: PathBuf,
 }
 
 /// A connection and whatever of a reply has arrived so far.
@@ -62,6 +65,7 @@ impl ForwardSink {
             conn: None,
             seq: 0,
             records: Vec::new(),
+            dead_letter: forward.batching.dead_letter_path(),
         }
     }
 
@@ -101,11 +105,32 @@ impl ForwardSink {
             // failing here caches the frames rather than dropping them into a
             // gateway that has said it cannot take them.
             proto::ACK_OVERLOADED => Err(SinkError("forward: gateway overloaded".into())),
+            proto::ACK_MALFORMED => self.quarantine(chunk, seq),
             status => Err(SinkError(format!(
                 "forward: batch nacked (seq={} status={status})",
                 ack.seq
             ))),
         }
+    }
+
+    /// Keep a batch the gateway will never take, so the link can move past it.
+    /// If it cannot be kept, fail as any other refusal does and let the cache
+    /// hold it: a batch is never dropped.
+    fn quarantine(&self, chunk: &[Arc<Sample>], seq: u32) -> SinkResult {
+        let path = &self.dead_letter;
+        tokio::task::block_in_place(|| SqliteCache::open(path, u64::MAX)?.append(chunk))
+            .map_err(|e| {
+                SinkError(format!(
+                    "forward: batch refused as malformed (seq={seq}) and not quarantined to {}: {e}",
+                    path.display()
+                ))
+            })?;
+        warn!(
+            "gateway refused batch seq={seq} of {} frames as malformed; quarantined to {}",
+            chunk.len(),
+            path.display()
+        );
+        Ok(())
     }
 }
 
@@ -241,7 +266,6 @@ impl BatchSink for ForwardSink {
 mod tests {
     use super::*;
     use crate::settings::Batching;
-    use std::path::PathBuf;
     use tokio::net::TcpListener;
     use wiretap_model::{CanSample, Direction, ModbusSample, SourceId};
 
@@ -332,7 +356,11 @@ mod tests {
     }
 
     fn sink(port: u16, database: &str) -> ForwardSink {
-        ForwardSink::new(&Forward {
+        ForwardSink::new(&forward(port, database))
+    }
+
+    fn forward(port: u16, database: &str) -> Forward {
+        Forward {
             host: "127.0.0.1".into(),
             port,
             api_key: Secret::new("sekrit"),
@@ -347,7 +375,31 @@ mod tests {
                 cache_origin: None,
                 legacy_cache_path: None,
             },
-        })
+        }
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("wiretap-forward-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("a writable temp directory");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sink_caching_at(port: u16, cache_path: PathBuf) -> ForwardSink {
+        let mut f = forward(port, "");
+        f.batching.cache_path = cache_path;
+        ForwardSink::new(&f)
     }
 
     fn can(ts_us: i64, arb_id: u32) -> CanSample {
@@ -644,6 +696,54 @@ mod tests {
         let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err();
         assert!(err.to_string().contains("seq=1"), "{err}");
         assert!(err.to_string().contains("status=1"), "{err}");
+        s.close().await;
+        let _ = gateway.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_refused_as_malformed_is_quarantined_and_the_link_moves_on() {
+        let dir = TempDir::new("quarantine");
+        let (port, gateway) = fake_gateway(Script {
+            ack_status: proto::ACK_MALFORMED,
+            ..Script::default()
+        })
+        .await;
+        let mut s = sink_caching_at(port, dir.0.join("cache.db"));
+        s.connect().await.unwrap();
+        let refused = [sample(1, 0x111), sample(2, 0x222)];
+        s.write_batch(&refused)
+            .await
+            .expect("quarantined, not failed");
+        s.write_batch(&[sample(3, 0x333)])
+            .await
+            .expect("the next batch goes on the same connection");
+        s.close().await;
+        assert_eq!(gateway.await.unwrap().batches.len(), 2);
+
+        let mut dead = SqliteCache::open(dir.0.join("cache.dead-letter.db"), 1).unwrap();
+        let kept: Vec<Arc<Sample>> = dead
+            .oldest(10)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.sample)
+            .collect();
+        assert_eq!(kept, [refused.as_slice(), &[sample(3, 0x333)]].concat());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_malformed_batch_that_cannot_be_quarantined_fails_the_write() {
+        let dir = TempDir::new("no-quarantine");
+        let not_a_directory = dir.0.join("file");
+        std::fs::write(&not_a_directory, b"").unwrap();
+        let (port, gateway) = fake_gateway(Script {
+            ack_status: proto::ACK_MALFORMED,
+            ..Script::default()
+        })
+        .await;
+        let mut s = sink_caching_at(port, not_a_directory.join("cache.db"));
+        s.connect().await.unwrap();
+        let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err();
+        assert!(err.to_string().contains("seq=1"), "{err}");
         s.close().await;
         let _ = gateway.await;
     }

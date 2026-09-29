@@ -14,7 +14,9 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
     [docs/ingest-protocol.md](../../docs/ingest-protocol.md)), for MCUs and the
     Pi's forward mode. Writes are **ACK-after-write**: a batch is stored in Postgres
     before the device is acknowledged, so a database outage back-pressures the
-    device into its own disk cache (nothing is buffered in gateway RAM).
+    device into its own disk cache (nothing is buffered in gateway RAM). Rows
+    PostgreSQL refuses for their contents (SQLSTATE class 22 or 23) are
+    answered malformed, since no retry would store them.
   - **HTTP API** (8423) — the analytical query surface the desktop uses, plus
     events (a user's annotations on the archive), capture import, database
     management and health.

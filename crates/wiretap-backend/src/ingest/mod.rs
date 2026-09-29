@@ -17,6 +17,7 @@ use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio_postgres::error::SqlState;
 use wiretap_protocol::ingest::*;
 
 use crate::config::Config;
@@ -224,7 +225,8 @@ impl IngestServer {
 
     /// Write one batch to Postgres, then ACK. The client only treats frames as
     /// delivered once they are durably stored; a DB failure yields ACK_OVERLOADED
-    /// so the device caches and retries (no frames are buffered in gateway RAM).
+    /// so the device caches and retries (no frames are buffered in gateway RAM),
+    /// unless no retry could store it (see [`ack_for_copy_error`]).
     async fn handle_batch(&self, incoming: IncomingBatch, session: &Session) -> u8 {
         let seq = incoming.batch.seq;
         let rows: Vec<FrameRow> = incoming
@@ -246,9 +248,19 @@ impl IngestServer {
             }
             Err(e) => {
                 tracing::warn!("ingest write failed (seq {seq}): {e}");
-                ACK_OVERLOADED
+                ack_for_copy_error(e.code.as_ref())
             }
         }
+    }
+}
+
+/// ACK_MALFORMED for a refusal of the rows themselves, a data exception
+/// (class 22) or an integrity constraint violation (class 23), which would fail
+/// identically on every retry; ACK_OVERLOADED for anything that may pass later.
+fn ack_for_copy_error(code: Option<&SqlState>) -> u8 {
+    match code.map(|c| &c.code()[..2]) {
+        Some("22" | "23") => ACK_MALFORMED,
+        _ => ACK_OVERLOADED,
     }
 }
 
@@ -276,5 +288,35 @@ mod tests {
             .await;
         let listed = serde_json::to_value(sessions.list().await).unwrap();
         assert_eq!(listed[0]["protocol_version"], 2);
+    }
+
+    #[test]
+    fn a_data_exception_is_refused_as_malformed_not_overloaded() {
+        for code in [
+            SqlState::DATETIME_FIELD_OVERFLOW,
+            SqlState::INVALID_TEXT_REPRESENTATION,
+        ] {
+            assert_eq!(ack_for_copy_error(Some(&code)), ACK_MALFORMED, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn an_integrity_constraint_violation_is_refused_as_malformed() {
+        for code in [SqlState::UNIQUE_VIOLATION, SqlState::NOT_NULL_VIOLATION] {
+            assert_eq!(ack_for_copy_error(Some(&code)), ACK_MALFORMED, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_failure_a_retry_may_get_past_stays_overloaded() {
+        for code in [
+            SqlState::CONNECTION_FAILURE,
+            SqlState::ADMIN_SHUTDOWN,
+            SqlState::DISK_FULL,
+            SqlState::UNDEFINED_TABLE,
+        ] {
+            assert_eq!(ack_for_copy_error(Some(&code)), ACK_OVERLOADED, "{code:?}");
+        }
+        assert_eq!(ack_for_copy_error(None), ACK_OVERLOADED, "no SQLSTATE");
     }
 }

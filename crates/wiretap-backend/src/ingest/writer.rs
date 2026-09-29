@@ -13,6 +13,7 @@ use bytes::Bytes;
 use chrono::DateTime;
 use deadpool_postgres::Pool;
 use futures_util::SinkExt;
+use tokio_postgres::error::SqlState;
 use wiretap_model::Protocol;
 use wiretap_protocol::ingest::{RecordFields, RecordKind, ID_ARB_MASK};
 
@@ -109,14 +110,40 @@ impl<T: std::fmt::Display> std::fmt::Display for Nullable<T> {
     }
 }
 
+/// Why a COPY failed, with PostgreSQL's SQLSTATE when it gave one.
+#[derive(Debug)]
+pub struct CopyError {
+    pub code: Option<SqlState>,
+    message: String,
+}
+
+impl std::fmt::Display for CopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl CopyError {
+    fn postgres(what: &'static str) -> impl FnOnce(tokio_postgres::Error) -> Self {
+        move |e| Self {
+            code: e.code().cloned(),
+            message: format!("{what}: {e}"),
+        }
+    }
+}
+
 /// COPY a slice of rows into public.capture_frame.
 ///
 /// **The base table, not the `can_frame` view.** The view exists so readers on
 /// the pre-2026-09-10 name keep working, and PostgreSQL cannot COPY into one —
 /// pointing this at it fails with `cannot copy to view`.
 ///
-pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), String> {
-    let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
+pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), CopyError> {
+    let text = copy_text(batch)?;
+    let client = pool.get().await.map_err(|e| CopyError {
+        code: None,
+        message: format!("pool: {e}"),
+    })?;
     let sink = client
         .copy_in(
             "COPY public.capture_frame \
@@ -124,15 +151,27 @@ pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), String> {
              FROM STDIN",
         )
         .await
-        .map_err(|e| format!("copy_in: {e}"))?;
+        .map_err(CopyError::postgres("copy_in"))?;
     futures_util::pin_mut!(sink);
+    sink.send(Bytes::from(text))
+        .await
+        .map_err(CopyError::postgres("copy send"))?;
+    sink.finish()
+        .await
+        .map_err(CopyError::postgres("copy finish"))?;
+    Ok(())
+}
 
+fn copy_text(batch: &[FrameRow]) -> Result<String, CopyError> {
     // Sized to the batch: a CAN row is ~81 bytes of text with an 8-byte
     // payload, and a Modbus row's payload alone is two hex characters a byte.
     let mut buf = String::with_capacity(batch.iter().map(|r| 72 + 2 * r.data.len()).sum());
     for row in batch {
-        let ts = DateTime::from_timestamp_micros(row.ts_us)
-            .ok_or_else(|| format!("timestamp out of range: {}", row.ts_us))?;
+        // The SQLSTATE PostgreSQL gives the same refusal.
+        let ts = DateTime::from_timestamp_micros(row.ts_us).ok_or_else(|| CopyError {
+            code: Some(SqlState::DATETIME_FIELD_OVERFLOW),
+            message: format!("timestamp out of range: {}", row.ts_us),
+        })?;
         // COPY text format: literal backslash is escaped, so bytea hex input
         // (\x…) is written as \\x…
         let _ = writeln!(
@@ -152,13 +191,7 @@ pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), String> {
             Nullable(row.crc_valid.map(copy_bool)),
         );
     }
-    sink.send(Bytes::from(buf))
-        .await
-        .map_err(|e| format!("copy send: {e}"))?;
-    sink.finish()
-        .await
-        .map_err(|e| format!("copy finish: {e}"))?;
-    Ok(())
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -194,5 +227,13 @@ mod tests {
             (Some(false), Some(true), true)
         );
         assert_eq!((c.unit, c.func, c.crc_valid), (None, None, None));
+    }
+
+    #[test]
+    fn a_timestamp_out_of_range_is_a_datetime_field_overflow() {
+        let row = FrameRow::new(i64::MAX, RecordKind::Can, 0x123, 0, 0, vec![1]);
+        let err = copy_text(&[row]).unwrap_err();
+        assert_eq!(err.code, Some(SqlState::DATETIME_FIELD_OVERFLOW));
+        assert!(err.to_string().contains("timestamp out of range"), "{err}");
     }
 }

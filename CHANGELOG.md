@@ -41,6 +41,15 @@ All notable changes to this project are documented here. Entries go under
   while PostgreSQL was down, as when the gateway starts first after a reboot,
   refused reads and writes until a restart. With `WIRETAP_AUTO_MIGRATE` on, a
   request now retries it once 30 seconds have passed since the failure.
+- **A batch PostgreSQL refuses no longer blocks the forward link.** The
+  gateway answered every failed write "overloaded", so a batch refused for
+  its contents, such as a timestamp out of range, was cached and resent for
+  ever, and nothing behind it got through. The gateway now answers
+  "malformed" to a data exception or integrity violation (SQLSTATE class 22
+  or 23), and the capture server keeps such a batch beside its disk cache
+  (`cache.dead-letter.db` by default), in the cache's own format, and carries
+  on. If that file cannot be written, the batch is cached and retried as
+  before.
 
 ## [0.1.4] — 2026-09-29
 

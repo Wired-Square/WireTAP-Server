@@ -89,6 +89,8 @@ enable = false
 # Where frames wait when the gateway is unreachable. The default is
 # $STATE_DIRECTORY/cache.db, which the unit's StateDirectory= puts at
 # /var/lib/wiretap-server/cache.db.
+# Batches the gateway refuses as malformed are kept beside it, in
+# cache.dead-letter.db, a cache of the same format.
 #
 # MOVING IT NEEDS A UNIT DROP-IN. The unit sets ProtectSystem=strict, so the
 # state directory is the only writable path the daemon has; any other location
