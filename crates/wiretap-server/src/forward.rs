@@ -46,40 +46,6 @@ pub struct ForwardSink {
     records: Vec<u8>,
 }
 
-/// How many frames from the front of `frames` fit in one batch.
-///
-/// The record count is the protocol's cap. The span is arithmetic: a delta is
-/// a `u32` of microseconds, so a batch cannot reach across more than about
-/// 71.6 minutes without wrapping — filing a frame that far *before* it
-/// happened, silently and in release, where `debug_assert` is not watching.
-/// The byte total is the frame's: its length field is a `u16`, which 256
-/// full-size Modbus messages overrun, and past it the length prefix wraps
-/// and the gateway loses framing.
-///
-/// A live batch spans a flush interval and comes nowhere near either. A disk
-/// cache drain does: `SqliteCache::oldest` reads `ORDER BY id`, so one chunk
-/// is 256 consecutive frames from across the whole outage, and a bus quiet
-/// enough to average a frame every 17 seconds reaches 71.6 minutes inside one
-/// batch. That is the recovery path, which is the one that has to work.
-fn batch_len(frames: &[Arc<Sample>]) -> usize {
-    let (mut lo, mut hi) = (wire::ts_us(&frames[0]), wire::ts_us(&frames[0]));
-    let mut bytes = proto::BATCH_HEADER + wire::wire_len(&frames[0]);
-    for (n, f) in frames
-        .iter()
-        .enumerate()
-        .take(proto::MAX_BATCH_RECORDS)
-        .skip(1)
-    {
-        let (next_lo, next_hi) = (lo.min(wire::ts_us(f)), hi.max(wire::ts_us(f)));
-        bytes += wire::wire_len(f);
-        if next_hi - next_lo > u64::from(u32::MAX) || bytes > proto::MAX_BODY {
-            return n;
-        }
-        (lo, hi) = (next_lo, next_hi);
-    }
-    frames.len().min(proto::MAX_BATCH_RECORDS)
-}
-
 /// A connection and whatever of a reply has arrived so far.
 struct Connection {
     stream: TcpStream,
@@ -107,15 +73,12 @@ impl ForwardSink {
 
     /// Send one `BATCH` and wait for its acknowledgement.
     ///
-    /// `chunk` is at most [`proto::MAX_BATCH_RECORDS`]; a gateway NACKs a batch
-    /// that claims more, rather than accepting a truncated one.
-    async fn send_chunk(&mut self, chunk: &[Arc<Sample>]) -> SinkResult {
-        // Absolute timestamps: every record is a delta from the base, and the
-        // base is the chunk's *earliest* frame rather than its first. Two bus
-        // readers feed one queue, so the head is not always the oldest frame.
-        // The `[forward]` client does not set `TIME_RELATIVE`, so the gateway
-        // takes these at face value rather than re-basing them on its own clock.
-        let base_ts_us = chunk.iter().map(|f| wire::ts_us(f)).min().unwrap_or(0);
+    /// `chunk` and `base_ts_us` are one [`proto::fit_batch`]'s: a chunk that fits
+    /// one batch, and its earliest frame's stamp.
+    async fn send_chunk(&mut self, chunk: &[Arc<Sample>], base_ts_us: u64) -> SinkResult {
+        // Absolute timestamps: the `[forward]` client does not set
+        // `TIME_RELATIVE`, so the gateway takes these at face value rather than
+        // re-basing them on its own clock.
         self.records.clear();
         for f in chunk {
             wire::encode_into(&mut self.records, base_ts_us, f);
@@ -241,9 +204,13 @@ impl BatchSink for ForwardSink {
 
     async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> SinkResult {
         let mut rest = batch;
+        // A disk cache drain reads `ORDER BY id` across a whole outage, so a
+        // chunk on a quiet bus can outspan a `u32` of microseconds, and two bus
+        // readers mean its head is not always its earliest frame.
         while !rest.is_empty() {
-            let (chunk, tail) = rest.split_at(batch_len(rest));
-            self.send_chunk(chunk).await?;
+            let fit = proto::fit_batch(rest.iter().map(|f| wire::fit_input(f)));
+            let (chunk, tail) = rest.split_at(fit.len);
+            self.send_chunk(chunk, fit.base_ts_us).await?;
             rest = tail;
         }
         Ok(())

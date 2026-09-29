@@ -11,7 +11,7 @@ use wiretap_protocol::ingest as proto;
 
 /// A capture timestamp as the protocol carries it. One spelling, because the
 /// base and the deltas measured from it have to agree.
-pub fn ts_us(s: &Sample) -> u64 {
+fn ts_us(s: &Sample) -> u64 {
     s.ts_us().max(0) as u64
 }
 
@@ -37,10 +37,10 @@ fn parts(s: &Sample) -> (proto::RecordKind, u8, u32, &[u8]) {
     }
 }
 
-/// Bytes the sample takes in a `BATCH` body.
-pub fn wire_len(s: &Sample) -> usize {
+/// The `(ts_us, kind, payload_len)` that [`proto::fit_batch`] measures a sample by.
+pub fn fit_input(s: &Sample) -> (u64, proto::RecordKind, usize) {
     let (kind, _, _, payload) = parts(s);
-    proto::record_wire_len(kind, payload.len())
+    (ts_us(s), kind, payload.len())
 }
 
 /// Append `s` as one record, measured from `base_ts_us`.
@@ -126,8 +126,14 @@ mod tests {
         }
         assert_eq!(
             records.len(),
-            samples.iter().map(wire_len).sum::<usize>(),
-            "wire_len is what encode_into writes"
+            samples
+                .iter()
+                .map(|s| {
+                    let (_, kind, len) = fit_input(s);
+                    proto::record_wire_len(kind, len)
+                })
+                .sum::<usize>(),
+            "fit_input sizes what encode_into writes"
         );
 
         let mut buf = proto::encode_batch(1, BASE as u64, 2, &records);

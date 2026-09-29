@@ -264,15 +264,11 @@ impl IngestServer {
             Some(Ok(b)) => b,
         };
 
-        let base_ts_us =
-            batch.base_ts_us(session.time_relative, Utc::now().timestamp_micros() as u64);
-
         let seq = batch.seq;
         let rows: Vec<FrameRow> = batch
-            .records
-            .into_iter()
-            .map(|rec| {
-                let ts_us = base_ts_us.saturating_add(u64::from(rec.delta_us)) as i64;
+            .stamped(session.time_relative, Utc::now().timestamp_micros() as u64)
+            .map(|(ts_us, rec)| {
+                let ts_us = ts_us as i64;
                 match rec.kind {
                     RecordKind::Can => FrameRow::can(ts_us, rec.id_flags, rec.bus, rec.payload),
                     RecordKind::Modbus => {

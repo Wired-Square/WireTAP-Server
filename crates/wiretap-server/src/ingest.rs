@@ -269,16 +269,13 @@ impl Session {
             );
         }
 
-        let base_ts_us = batch.base_ts_us(
-            self.time_relative,
-            system_time_to_us(SystemTime::now()) as u64,
-        );
-
-        for record in batch.records {
-            let ts_us = base_ts_us.saturating_add(u64::from(record.delta_us)) as i64;
-            self.archive.enqueue(Arc::new(wire::decode(ts_us, record)));
+        let seq = batch.seq;
+        let arrival_us = system_time_to_us(SystemTime::now()) as u64;
+        for (ts_us, record) in batch.stamped(self.time_relative, arrival_us) {
+            self.archive
+                .enqueue(Arc::new(wire::decode(ts_us as i64, record)));
         }
-        (Some(self.ack(batch.seq, proto::ACK_OK)), Next::Continue)
+        (Some(self.ack(seq, proto::ACK_OK)), Next::Continue)
     }
 
     fn ack(&self, seq: u32, status: u8) -> Vec<u8> {
