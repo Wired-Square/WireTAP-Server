@@ -94,7 +94,7 @@ pub async fn responder_loop<S: ReplySink>(
         let Sample::Can(sample) = &*sample else {
             continue;
         };
-        if sample.bus != bus || !is_test_pattern_frame(sample.arb_id) {
+        if sample.bus != bus || !is_test_pattern_frame(sample.arb_id, sample.extended) {
             continue;
         }
         // The capture timestamp rather than a fresh clock reading: the crate
@@ -219,7 +219,7 @@ mod tests {
         // Adjacent to the framed ids and deliberately outside them, so this is
         // a boundary rather than an arbitrary id. Stated, because the whole
         // test rests on it.
-        assert!(!is_test_pattern_frame(0x7FF));
+        assert!(!is_test_pattern_frame(0x7FF, false));
 
         assert_eq!(replies.len(), 1, "only the Hello is ours to answer");
         assert_eq!(
@@ -256,6 +256,25 @@ mod tests {
     async fn a_sweep_before_start_is_ignored() {
         let replies = run(vec![sample(SWEEP_REQUEST_BASE + 15, true, vec![0xFF; 64])]).await;
         assert!(replies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_extended_frame_in_the_test_pattern_range_is_not_answered() {
+        let extended_sweep = Arc::new(Sample::Can(CanSample {
+            ts_us: 1_700_000_000_000_000,
+            arb_id: SWEEP_REQUEST_BASE + 5,
+            extended: true,
+            is_fd: false,
+            data: vec![0; 5],
+            bus: BUS,
+            dir: Direction::Rx,
+        }));
+        let replies = run(vec![
+            framed(Message::Control(Command::Start { mode: 0, run: RUN })),
+            extended_sweep,
+        ])
+        .await;
+        assert!(replies.is_empty(), "{replies:?}");
     }
 
     /// A frame from the interface next door is not this responder's, even

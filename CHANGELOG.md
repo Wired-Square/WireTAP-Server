@@ -5,6 +5,19 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Changed
+
+- **Built on `wiretap-lib-rs` v0.20.0**, which takes the id width when
+  recognising a Test Pattern frame and leaves the wire format alone.
+
+### Fixed
+
+- **An extended frame whose id falls in the Test Pattern range is no longer
+  answered.** A 29-bit frame numerically inside the 11-bit ranges, such as
+  extended `0x7E5`, was taken for a Test Pattern frame, and during a run was
+  echoed as a sweep request. The 11-bit ids are now matched on standard frames
+  only.
+
 ## [0.1.5] — 2026-09-29
 
 A batch the gateway refuses for its contents is set aside rather than resent
