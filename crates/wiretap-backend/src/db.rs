@@ -173,8 +173,12 @@ impl Databases {
         // through it. Dropping the pool forces the next batch back through
         // `require_current`, and discards prepared statements whose plans the
         // rename has just invalidated.
+        //
+        // Under the pools lock, which `pool_if_current` holds from its check to
+        // its insert, so no pool is cached for a state being left.
+        let mut pools = self.pools.lock().await;
         if !matches!(state, DbSchemaState::Current { .. }) {
-            self.pools.lock().await.remove(name);
+            pools.remove(name);
         }
         self.schema_state
             .lock()
@@ -571,12 +575,14 @@ impl Databases {
                 "database '{name}' does not exist"
             )));
         }
+        self.pool_if_current(name).await
+    }
+
+    async fn pool_if_current(&self, name: &str) -> Result<Pool, DbError> {
+        let mut pools = self.pools.lock().await;
         self.require_current(name).await?;
         let pool = self.build_pool(name)?;
-        self.pools
-            .lock()
-            .await
-            .insert(name.to_string(), pool.clone());
+        pools.insert(name.to_string(), pool.clone());
         Ok(pool)
     }
 
@@ -736,6 +742,38 @@ pub(crate) mod tests {
         assert!(
             settled.elapsed() < FAILED_RETRY_INTERVAL,
             "a failed retry restarts the interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pool_is_not_cached_for_a_database_that_left_current_meanwhile() {
+        let dbs = unreachable_databases(true);
+        dbs.set_state("archive", DbSchemaState::current()).await;
+
+        let pools = dbs.pools.lock().await;
+        let caller = tokio::spawn({
+            let dbs = dbs.clone();
+            async move { dbs.pool_if_current("archive").await.map(|_| ()) }
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        dbs.schema_state.lock().await.insert(
+            "archive".into(),
+            DbSchemaState::Migrating {
+                since: Instant::now(),
+            },
+        );
+        drop(pools);
+
+        let answer = caller.await.unwrap();
+        assert!(
+            answer.is_err(),
+            "a pool was handed out for a migrating database"
+        );
+        assert!(
+            !dbs.pools.lock().await.contains_key("archive"),
+            "a pool was cached for a migrating database"
         );
     }
 

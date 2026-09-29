@@ -73,6 +73,9 @@ All notable changes to this project are documented here. Entries go under
   disk cache, was cached and resent whole, so the gateway stored the pieces it
   had already acknowledged a second time. Only the pieces it did not take are
   now kept to send again.
+- **A pool is no longer kept for a database whose migration has just
+  started.** One cached in that moment kept serving reads and ingest through
+  the migration.
 
 ## [0.1.4] — 2026-09-29
 
