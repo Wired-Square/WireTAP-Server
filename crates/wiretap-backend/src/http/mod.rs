@@ -26,7 +26,11 @@ use crate::running;
 use crate::schema;
 use crate::sql;
 use crate::state::AppState;
-use crate::types::ImportResult;
+use crate::types::{
+    DatabaseInfo, DatabaseList, ErrorBody, Event, EventPatch, EventsQuery, EventsResponse,
+    FramesQuery, Health, ImportResult, InventoryResponse, NewEvent, PayloadsParams,
+    PayloadsResponse, ProtocolQuery, SignalResponse, TimeRangeQuery,
+};
 
 type St = Arc<AppState>;
 
@@ -34,7 +38,7 @@ pub struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        (self.0, Json(ErrorBody { error: self.1 })).into_response()
     }
 }
 
@@ -242,14 +246,14 @@ async fn client_for(state: &St, db: &str) -> Result<deadpool_postgres::Object, A
 /// Unauthenticated — the compose healthcheck curls it with no key — so this
 /// carries a consensus word only, never a database name. Names are for
 /// `/v1/databases`, which at least requires a read-role key.
-async fn health(State(state): State<St>) -> Json<serde_json::Value> {
+async fn health(State(state): State<St>) -> Json<Health> {
     let db_ok = state.dbs.connect_raw("postgres").await.is_ok();
-    Json(json!({
-        "status": if db_ok { "ok" } else { "degraded" },
-        "version": crate::VERSION,
-        "db_ok": db_ok,
-        "schema": schema_consensus(&state.dbs.schema_states().await),
-    }))
+    Json(Health {
+        status: if db_ok { "ok" } else { "degraded" }.into(),
+        version: crate::VERSION.into(),
+        db_ok,
+        schema: schema_consensus(&state.dbs.schema_states().await),
+    })
 }
 
 /// One word for how the whole deployment stands: the shared version when every
@@ -333,7 +337,7 @@ async fn refresh_rollup(
 async fn list_databases(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<DatabaseList>, ApiError> {
     if !key.role.allows_read() {
         return Err(forbidden("key role does not allow reads"));
     }
@@ -352,7 +356,7 @@ async fn list_databases(
         .map_err(|e| ApiError::from(format!("database list failed: {e}")))?;
     let states = state.dbs.schema_states().await;
     let rebuilding = state.dbs.rollup_rebuilds().await;
-    let mut databases: Vec<serde_json::Value> = Vec::new();
+    let mut databases = Vec::new();
     for r in &rows {
         let name: String = r.get("datname");
         // Same filter the sweep uses: a name this gateway would never manage is
@@ -371,27 +375,27 @@ async fn list_databases(
             Some(db::DbSchemaState::Current { .. }) => rollup_state(&state.dbs, &name).await,
             _ => None,
         };
-        databases.push(json!({
-            "name": name,
-            "size_bytes": r.get::<_, i64>("size_bytes"),
-            "schema_state": schema.map_or("unknown", |s| s.label()),
-            "schema_version": schema.and_then(|s| s.version()),
-            "busy_secs": schema.and_then(|s| s.busy_secs()),
-            "schema_error": match schema {
+        databases.push(DatabaseInfo {
+            size_bytes: r.get("size_bytes"),
+            schema_state: schema.map_or("unknown", |s| s.label()).into(),
+            schema_version: schema.and_then(|s| s.version()),
+            busy_secs: schema.and_then(|s| s.busy_secs()),
+            schema_error: match schema {
                 Some(db::DbSchemaState::Failed { error, .. }) => Some(error.clone()),
                 _ => None,
             },
-            "rollup_state": rollup.map(|(st, _)| st),
-            "rollup_lag_secs": rollup.and_then(|(_, lag)| lag),
-            "rollup_busy_secs": rebuilding.get(&name),
-        }));
+            rollup_state: rollup.map(|(st, _)| st.into()),
+            rollup_lag_secs: rollup.and_then(|(_, lag)| lag),
+            rollup_busy_secs: rebuilding.get(&name).copied(),
+            name,
+        });
     }
     // The version they are all headed for, so the UI can render "v0 → v1"
     // without hardcoding what current means.
-    Ok(Json(json!({
-        "databases": databases,
-        "schema_version": crate::schema::SCHEMA_VERSION,
-    })))
+    Ok(Json(DatabaseList {
+        databases,
+        schema_version: crate::schema::SCHEMA_VERSION,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -438,20 +442,6 @@ async fn delete_database(
 // Read endpoints
 // ---------------------------------------------------------------------------
 
-/// `protocol` absent means [`sql::DEFAULT_PROTOCOL`] on every read below, so a
-/// desktop that predates the parameter keeps seeing exactly what it did.
-#[derive(Deserialize)]
-struct ProtocolQuery {
-    protocol: Option<sql::Protocol>,
-}
-
-#[derive(Deserialize)]
-struct TimeRangeQuery {
-    start: Option<String>,
-    end: Option<String>,
-    protocol: Option<sql::Protocol>,
-}
-
 async fn time_bounds(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
@@ -468,20 +458,11 @@ async fn inventory(
     Extension(key): Extension<KeyInfo>,
     Path(db): Path<String>,
     Query(range): Query<TimeRangeQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<InventoryResponse>, ApiError> {
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
     let entries = sql::inventory(&client, range.start, range.end, range.protocol).await?;
-    Ok(Json(json!({ "entries": entries })))
-}
-
-#[derive(Deserialize)]
-struct FramesQuery {
-    start: Option<String>,
-    end: Option<String>,
-    after: Option<String>,
-    limit: Option<u32>,
-    protocol: Option<sql::Protocol>,
+    Ok(Json(InventoryResponse { entries }))
 }
 
 async fn frames(
@@ -510,12 +491,12 @@ async fn payloads(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path(db): Path<String>,
-    Json(p): Json<sql::PayloadsParams>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    Json(p): Json<PayloadsParams>,
+) -> Result<Json<PayloadsResponse>, ApiError> {
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
     let payloads = sql::payloads(&client, &p).await?;
-    Ok(Json(json!({ "payloads": payloads })))
+    Ok(Json(PayloadsResponse { payloads }))
 }
 
 // ---------------------------------------------------------------------------
@@ -526,33 +507,26 @@ async fn payloads(
 // admin key. A pinned read key annotates only its own database, as it reads
 // only that.
 
-#[derive(Deserialize)]
-struct EventsQuery {
-    start: Option<String>,
-    end: Option<String>,
-    limit: Option<u32>,
-}
-
 async fn events_list(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path(db): Path<String>,
     Query(q): Query<EventsQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<EventsResponse>, ApiError> {
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
     // Uncapped, unlike `frames`: there is no cursor here, so a cap would
     // override the client's limit in silence.
     let events = events::list(&client, q.start, q.end, q.limit.unwrap_or(1000)).await?;
-    Ok(Json(json!({ "events": events })))
+    Ok(Json(EventsResponse { events }))
 }
 
 async fn events_create(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path(db): Path<String>,
-    Json(new): Json<events::NewEvent>,
-) -> Result<(StatusCode, Json<events::Event>), ApiError> {
+    Json(new): Json<NewEvent>,
+) -> Result<(StatusCode, Json<Event>), ApiError> {
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
     Ok((
@@ -565,8 +539,8 @@ async fn events_update(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path((db, id)): Path<(String, i64)>,
-    Json(patch): Json<events::EventPatch>,
-) -> Result<Json<events::Event>, ApiError> {
+    Json(patch): Json<EventPatch>,
+) -> Result<Json<Event>, ApiError> {
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
     events::update(&client, id, &patch)
@@ -620,55 +594,55 @@ macro_rules! query_handler {
 
 query_handler!(
     q_byte_changes,
-    sql::ByteChangesParams,
+    crate::types::ByteChangesParams,
     crate::types::ByteChangeQueryResult,
     sql::byte_changes
 );
 query_handler!(
     q_frame_changes,
-    sql::FrameChangesParams,
+    crate::types::FrameChangesParams,
     crate::types::FrameChangeQueryResult,
     sql::frame_changes
 );
 query_handler!(
     q_mirror_validation,
-    sql::MirrorValidationParams,
+    crate::types::MirrorValidationParams,
     crate::types::MirrorValidationQueryResult,
     sql::mirror_validation
 );
 query_handler!(
     q_mux_statistics,
-    sql::MuxStatisticsParams,
+    crate::types::MuxStatisticsParams,
     crate::types::MuxStatisticsQueryResult,
     sql::mux_statistics
 );
 query_handler!(
     q_first_last,
-    sql::FirstLastParams,
+    crate::types::FirstLastParams,
     crate::types::FirstLastQueryResult,
     sql::first_last
 );
 query_handler!(
     q_frequency,
-    sql::FrequencyParams,
+    crate::types::FrequencyParams,
     crate::types::FrequencyQueryResult,
     sql::frequency
 );
 query_handler!(
     q_distribution,
-    sql::DistributionParams,
+    crate::types::DistributionParams,
     crate::types::DistributionQueryResult,
     sql::distribution
 );
 query_handler!(
     q_gap_analysis,
-    sql::GapAnalysisParams,
+    crate::types::GapAnalysisParams,
     crate::types::GapAnalysisQueryResult,
     sql::gap_analysis
 );
 query_handler!(
     q_pattern_search,
-    sql::PatternSearchParams,
+    crate::types::PatternSearchParams,
     crate::types::PatternSearchQueryResult,
     sql::pattern_search
 );
@@ -706,24 +680,24 @@ async fn activity_cancel(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path((db, pid)): Path<(String, i32)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<SignalResponse>, ApiError> {
     check_admin(&key)?;
     let client = client_for(&state, &db).await?;
-    Ok(Json(
-        json!({ "ok": sql::signal_backend(&client, pid, false).await? }),
-    ))
+    Ok(Json(SignalResponse {
+        ok: sql::signal_backend(&client, pid, false).await?,
+    }))
 }
 
 async fn activity_terminate(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path((db, pid)): Path<(String, i32)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<SignalResponse>, ApiError> {
     check_admin(&key)?;
     let client = client_for(&state, &db).await?;
-    Ok(Json(
-        json!({ "ok": sql::signal_backend(&client, pid, true).await? }),
-    ))
+    Ok(Json(SignalResponse {
+        ok: sql::signal_backend(&client, pid, true).await?,
+    }))
 }
 
 // ---------------------------------------------------------------------------

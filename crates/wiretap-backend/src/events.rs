@@ -4,59 +4,28 @@
 //! Written through the HTTP API only; ingest never touches the table.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
 
 use crate::schema::db_error_detail;
 use crate::sql::QueryError;
+use crate::types::{Event, EventPatch, NewEvent};
 
 fn failed(what: &str) -> impl FnOnce(tokio_postgres::Error) -> QueryError + '_ {
     move |e| QueryError::postgres(format!("{what}: {}", db_error_detail(&e)), &e)
 }
 
-/// Microseconds since the epoch throughout, as `time-bounds` and `frames`
-/// already speak to the desktop.
-#[derive(Debug, Serialize)]
-pub struct Event {
-    pub id: i64,
-    pub ts_us: i64,
-    pub duration_us: i64,
-    pub note: String,
-    pub created_at_us: i64,
-    pub updated_at_us: i64,
-}
-
 const COLUMNS: &str = "id, ts, duration_us, note, created_at, updated_at";
 
-impl Event {
-    fn from_row(row: &tokio_postgres::Row) -> Self {
-        let us = |col: &str| row.get::<_, DateTime<Utc>>(col).timestamp_micros();
-        Self {
-            id: row.get("id"),
-            ts_us: us("ts"),
-            duration_us: row.get("duration_us"),
-            note: row.get("note"),
-            created_at_us: us("created_at"),
-            updated_at_us: us("updated_at"),
-        }
+fn event_from_row(row: &tokio_postgres::Row) -> Event {
+    let us = |col: &str| row.get::<_, DateTime<Utc>>(col).timestamp_micros();
+    Event {
+        id: row.get("id"),
+        ts_us: us("ts"),
+        duration_us: row.get("duration_us"),
+        note: row.get("note"),
+        created_at_us: us("created_at"),
+        updated_at_us: us("updated_at"),
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct NewEvent {
-    pub ts_us: i64,
-    #[serde(default)]
-    pub duration_us: i64,
-    #[serde(default)]
-    pub note: String,
-}
-
-/// Every field optional; an absent one is left as it was.
-#[derive(Debug, Deserialize)]
-pub struct EventPatch {
-    pub ts_us: Option<i64>,
-    pub duration_us: Option<i64>,
-    pub note: Option<String>,
 }
 
 fn timestamp(ts_us: i64) -> Result<DateTime<Utc>, String> {
@@ -94,7 +63,7 @@ pub async fn list(
         )
         .await
         .map_err(failed("event list failed"))?;
-    Ok(rows.iter().map(Event::from_row).collect())
+    Ok(rows.iter().map(event_from_row).collect())
 }
 
 pub async fn create(client: &Client, new: &NewEvent) -> Result<Event, QueryError> {
@@ -112,7 +81,7 @@ pub async fn create(client: &Client, new: &NewEvent) -> Result<Event, QueryError
         )
         .await
         .map_err(failed("event insert failed"))?;
-    Ok(Event::from_row(&row))
+    Ok(event_from_row(&row))
 }
 
 /// `None` when no event has that id.
@@ -142,7 +111,7 @@ pub async fn update(
         )
         .await
         .map_err(failed("event update failed"))?;
-    Ok(row.as_ref().map(Event::from_row))
+    Ok(row.as_ref().map(event_from_row))
 }
 
 /// Whether an event with that id existed to delete.

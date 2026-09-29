@@ -7,7 +7,6 @@ use std::time::Instant;
 
 use base64::Engine;
 use futures_util::TryStreamExt;
-use serde::Deserialize;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
@@ -76,7 +75,7 @@ impl Args {
     }
 }
 
-pub use wiretap_model::Protocol;
+use wiretap_model::Protocol;
 
 /// Which protocol a query is about when the caller does not say.
 ///
@@ -94,27 +93,28 @@ pub const DEFAULT_PROTOCOL: Protocol = Protocol::Can;
 /// The anchor, not a fragment: every query in this file filters by protocol, so
 /// this is always the first predicate and callers append with `AND` — the same
 /// shape [`time_clause`] already assumes.
-fn protocol_clause(args: &mut Args, protocol: Option<Protocol>) -> String {
+fn protocol_clause(args: &mut Args, protocol: Option<wiretap_gateway::Protocol>) -> String {
     format!(
         "WHERE protocol = ${}::text",
-        args.add(protocol.unwrap_or(DEFAULT_PROTOCOL).as_str())
+        args.add(archive_protocol(protocol).as_str())
     )
 }
 
-/// Common per-frame filter (protocol, id, optional extended flag, time range).
-#[derive(Debug, Clone, Deserialize)]
-pub struct FrameFilter {
-    pub frame_id: u32,
-    pub is_extended: Option<bool>,
-    pub start_time: Option<String>,
-    pub end_time: Option<String>,
-    /// Absent means [`DEFAULT_PROTOCOL`] — read its docs before widening this.
-    /// Serde treats a missing `Option` field as `None`, so a client that predates
-    /// the column sends nothing and keeps getting exactly what it did before.
-    pub protocol: Option<Protocol>,
+/// The protocol a request names, or [`DEFAULT_PROTOCOL`] when it names none.
+fn archive_protocol(protocol: Option<wiretap_gateway::Protocol>) -> Protocol {
+    match protocol {
+        None => DEFAULT_PROTOCOL,
+        Some(wiretap_gateway::Protocol::Can) => Protocol::Can,
+        Some(wiretap_gateway::Protocol::Modbus) => Protocol::Modbus,
+        Some(wiretap_gateway::Protocol::Serial) => Protocol::Serial,
+    }
 }
 
-impl FrameFilter {
+trait WhereClause {
+    fn where_clause(&self, args: &mut Args) -> String;
+}
+
+impl WhereClause for FrameFilter {
     fn where_clause(&self, args: &mut Args) -> String {
         // `id` alone is not an identity any more — a CAN arbitration id and a
         // Modbus unit-and-function word share the column.
@@ -156,8 +156,8 @@ fn time_clause(args: &mut Args, start: &Option<String>, end: &Option<String>) ->
 
 fn stats(start: Instant, rows_scanned: usize, results_count: usize) -> QueryStats {
     QueryStats {
-        rows_scanned,
-        results_count,
+        rows_scanned: rows_scanned as u64,
+        results_count: results_count as u64,
         execution_time_ms: start.elapsed().as_millis() as u64,
     }
 }
@@ -165,15 +165,6 @@ fn stats(start: Instant, rows_scanned: usize, results_count: usize) -> QueryStat
 // ---------------------------------------------------------------------------
 // Change detection
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub struct ByteChangesParams {
-    #[serde(flatten)]
-    pub filter: FrameFilter,
-    pub byte_index: u8,
-    pub limit: Option<u32>,
-    pub query_id: Option<String>,
-}
 
 pub async fn byte_changes(
     client: &Client,
@@ -220,14 +211,6 @@ pub async fn byte_changes(
     })
 }
 
-#[derive(Debug, Deserialize)]
-pub struct FrameChangesParams {
-    #[serde(flatten)]
-    pub filter: FrameFilter,
-    pub limit: Option<u32>,
-    pub query_id: Option<String>,
-}
-
 pub async fn frame_changes(
     client: &Client,
     p: &FrameChangesParams,
@@ -270,24 +253,11 @@ pub async fn frame_changes(
     })
 }
 
-fn diff_indices(a: &[u8], b: &[u8]) -> Vec<usize> {
+fn diff_indices(a: &[u8], b: &[u8]) -> Vec<u64> {
     (0..a.len().max(b.len()))
         .filter(|&i| a.get(i).copied().unwrap_or(0) != b.get(i).copied().unwrap_or(0))
+        .map(|i| i as u64)
         .collect()
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MirrorValidationParams {
-    /// Absent means [`DEFAULT_PROTOCOL`] — read its docs before widening this.
-    pub protocol: Option<Protocol>,
-    pub mirror_frame_id: u32,
-    pub source_frame_id: u32,
-    pub is_extended: Option<bool>,
-    pub tolerance_ms: u32,
-    pub start_time: Option<String>,
-    pub end_time: Option<String>,
-    pub limit: Option<u32>,
-    pub query_id: Option<String>,
 }
 
 pub async fn mirror_validation(
@@ -346,17 +316,6 @@ pub async fn mirror_validation(
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub struct MuxStatisticsParams {
-    #[serde(flatten)]
-    pub filter: FrameFilter,
-    pub mux_selector_byte: u8,
-    pub include_16bit: bool,
-    pub payload_length: u8,
-    pub limit: Option<u32>,
-    pub query_id: Option<String>,
-}
 
 pub async fn mux_statistics(
     client: &Client,
@@ -484,13 +443,6 @@ pub async fn mux_statistics(
     })
 }
 
-#[derive(Debug, Deserialize)]
-pub struct FirstLastParams {
-    #[serde(flatten)]
-    pub filter: FrameFilter,
-    pub query_id: Option<String>,
-}
-
 pub async fn first_last(
     client: &Client,
     p: &FirstLastParams,
@@ -540,15 +492,6 @@ pub async fn first_last(
     })
 }
 
-#[derive(Debug, Deserialize)]
-pub struct FrequencyParams {
-    #[serde(flatten)]
-    pub filter: FrameFilter,
-    pub bucket_size_ms: u32,
-    pub limit: Option<u32>,
-    pub query_id: Option<String>,
-}
-
 pub async fn frequency(
     client: &Client,
     p: &FrequencyParams,
@@ -594,14 +537,6 @@ pub async fn frequency(
     })
 }
 
-#[derive(Debug, Deserialize)]
-pub struct DistributionParams {
-    #[serde(flatten)]
-    pub filter: FrameFilter,
-    pub byte_index: u8,
-    pub query_id: Option<String>,
-}
-
 pub async fn distribution(
     client: &Client,
     p: &DistributionParams,
@@ -641,15 +576,6 @@ pub async fn distribution(
     })
 }
 
-#[derive(Debug, Deserialize)]
-pub struct GapAnalysisParams {
-    #[serde(flatten)]
-    pub filter: FrameFilter,
-    pub gap_threshold_ms: f64,
-    pub limit: Option<u32>,
-    pub query_id: Option<String>,
-}
-
 pub async fn gap_analysis(
     client: &Client,
     p: &GapAnalysisParams,
@@ -686,18 +612,6 @@ pub async fn gap_analysis(
         results,
         stats: stats(t0, n, n),
     })
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PatternSearchParams {
-    /// Absent means [`DEFAULT_PROTOCOL`] — read its docs before widening this.
-    pub protocol: Option<Protocol>,
-    pub pattern: Vec<u8>,
-    pub pattern_mask: Vec<u8>,
-    pub start_time: Option<String>,
-    pub end_time: Option<String>,
-    pub limit: Option<u32>,
-    pub query_id: Option<String>,
 }
 
 pub async fn pattern_search(
@@ -744,13 +658,14 @@ pub async fn pattern_search(
         if data_bytes.len() < p.pattern.len() {
             continue;
         }
-        let match_positions: Vec<usize> = (0..=data_bytes.len() - p.pattern.len())
+        let match_positions: Vec<u64> = (0..=data_bytes.len() - p.pattern.len())
             .filter(|&start| {
                 (0..p.pattern.len()).all(|j| {
                     (data_bytes[start + j] & p.pattern_mask[j])
                         == (p.pattern[j] & p.pattern_mask[j])
                 })
             })
+            .map(|start| start as u64)
             .collect();
         if !match_positions.is_empty() {
             results.push(PatternSearchResult {
@@ -801,7 +716,7 @@ pub async fn inventory(
     client: &Client,
     start_time: Option<String>,
     end_time: Option<String>,
-    protocol: Option<Protocol>,
+    protocol: Option<wiretap_gateway::Protocol>,
 ) -> Result<Vec<InventoryEntry>, QueryError> {
     let map = |row: &tokio_postgres::Row| {
         let max_dlc = row.get::<_, i32>("max_dlc") as u16;
@@ -812,7 +727,7 @@ pub async fn inventory(
             first_us: row.get::<_, f64>("first_us") as i64,
             last_us: row.get::<_, f64>("last_us") as i64,
             max_dlc,
-            max_len: payload_len(protocol.unwrap_or(DEFAULT_PROTOCOL), max_dlc),
+            max_len: Some(payload_len(archive_protocol(protocol), max_dlc)),
         }
     };
 
@@ -856,7 +771,7 @@ pub async fn inventory(
 
 pub async fn time_bounds(
     client: &Client,
-    protocol: Option<Protocol>,
+    protocol: Option<wiretap_gateway::Protocol>,
 ) -> Result<TimeBounds, QueryError> {
     let (min_expr, max_expr, table) = if rollup_available(client).await {
         (
@@ -884,17 +799,6 @@ pub async fn time_bounds(
         min_ts_us: row.get::<_, Option<f64>>("min_us").map(|v| v as i64),
         max_ts_us: row.get::<_, Option<f64>>("max_us").map(|v| v as i64),
     })
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PayloadsParams {
-    /// Flattened, so the request body keeps the same top-level field names.
-    /// Shared rather than restated: this endpoint previously re-declared three
-    /// of these, and adding `protocol` to one and not the other is exactly the
-    /// drift that produced.
-    #[serde(flatten)]
-    pub filter: FrameFilter,
-    pub limit: Option<u32>,
 }
 
 /// Most-recent-N raw payloads for one frame id (headless byte analysis).
@@ -941,7 +845,7 @@ pub async fn frames_batch(
     end_time: Option<String>,
     after: Option<&str>,
     limit: u32,
-    protocol: Option<Protocol>,
+    protocol: Option<wiretap_gateway::Protocol>,
 ) -> Result<FrameBatch, QueryError> {
     let cursor = after.map(decode_cursor).transpose()?;
     let mut args = Args::default();
@@ -977,7 +881,7 @@ pub async fn frames_batch(
                 id: row.get::<_, i32>("id") as u32,
                 extended: bool_column(row, "extended"),
                 dlc: row.get::<_, i16>("dlc") as u16,
-                len: data.len() as u16,
+                len: Some(data.len() as u16),
                 is_fd: bool_column(row, "is_fd"),
                 bus: row.get::<_, i32>("bus") as u8,
                 dir: row.get("dir"),
@@ -1086,6 +990,18 @@ mod tests {
         assert_eq!(payload_len(Protocol::Can, 15), 64);
         assert_eq!(payload_len(Protocol::Modbus, 11), 11);
         assert_eq!(payload_len(Protocol::Modbus, 256), 256);
+    }
+
+    #[test]
+    fn a_requested_protocol_filters_on_its_own_tag_and_none_on_can() {
+        use wiretap_gateway::Protocol as Requested;
+        for requested in [Requested::Can, Requested::Modbus, Requested::Serial] {
+            assert_eq!(
+                serde_json::to_value(requested).unwrap(),
+                archive_protocol(Some(requested)).as_str()
+            );
+        }
+        assert_eq!(archive_protocol(None), Protocol::Can);
     }
 
     #[test]

@@ -23,6 +23,8 @@ All notable changes to this project are documented here. Entries go under
   cancelled query and a backend the key may not signal.
 - **Built on `wiretap-lib-rs` v0.19.11**, which adds ingest and import helpers
   and leaves the wire format alone. The ingest spec in the .deb names them.
+  The HTTP API's types now come from its `wiretap-gateway`: responses carry
+  the same fields and values, though some list their keys in another order.
 
 ### Fixed
 
