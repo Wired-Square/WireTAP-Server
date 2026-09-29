@@ -11,11 +11,9 @@
 //! silently: at-least-once delivery is the device's to complete, and it can only
 //! do that if a refusal is visible.
 //!
-//! The session loop mirrors the gateway's (`wiretap-backend/src/ingest/mod.rs`)
-//! because both serve the same protocol. They are deliberately not shared: the
-//! codec is, in `wiretap_protocol::ingest`, but sharing the *driver* would
-//! mean putting tokio into `wiretap-protocol`, which depends on nothing so
-//! that a client can speak its protocols without an async runtime.
+//! The session itself, shared with the gateway, is
+//! `wiretap_protocol::ingest::ServerSession`; this file is the socket, the
+//! token and the archive around it.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,7 +24,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 use wiretap_model::Secret;
-use wiretap_protocol::ingest as proto;
+use wiretap_protocol::ingest::{
+    self as proto, Action, CloseReason, IncomingBatch, ServerConfig, ServerSession, ShortBatch,
+};
 
 use crate::archive::Archive;
 use crate::settings::Ingest;
@@ -53,8 +53,7 @@ struct Config {
     /// Empty disables authentication, which is the Python's behaviour and what
     /// a closed private network deployment relies on.
     token: Secret,
-    idle_limit: Duration,
-    max_batch_frames: usize,
+    session: ServerConfig,
 }
 
 pub struct Server {
@@ -80,10 +79,19 @@ impl Server {
             listener,
             config: Arc::new(Config {
                 token: ingest.token.clone(),
-                idle_limit: Duration::from_secs_f64(
-                    ingest.keepalive_secs.max(0.0) * f64::from(IDLE_MULTIPLIER),
-                ),
-                max_batch_frames: ingest.max_batch_frames.max(1),
+                session: ServerConfig {
+                    // Strict, unlike the gateway's one-release tolerance of v1:
+                    // nothing deployed pushes to this listener but this
+                    // repository's own daemon.
+                    accept_v1: false,
+                    max_records: ingest.max_batch_frames,
+                    // Too short to even carry a sequence number, so there is
+                    // nothing to address a refusal to.
+                    short_batch: ShortBatch::Close,
+                    idle_limit: Some(Duration::from_secs_f64(
+                        ingest.keepalive_secs.max(0.0) * f64::from(IDLE_MULTIPLIER),
+                    )),
+                },
             }),
             archive,
         })
@@ -111,8 +119,6 @@ impl Server {
                 peer,
                 config: self.config.clone(),
                 archive: self.archive.clone(),
-                authed: false,
-                time_relative: false,
             };
             tokio::spawn(async move {
                 session.serve(stream).await;
@@ -127,29 +133,18 @@ struct Session {
     peer: SocketAddr,
     config: Arc<Config>,
     archive: Archive,
-    authed: bool,
-    /// The client's deltas are from an epoch of its own — usually its boot —
-    /// so the batch's own base is meaningless and is replaced on arrival.
-    time_relative: bool,
-}
-
-/// What to do with the connection after handling one message.
-enum Next {
-    Continue,
-    /// Close it. A device that has said something this server cannot act on
-    /// gets its connection dropped, so it reconnects and starts again.
-    Drop,
 }
 
 impl Session {
-    async fn serve(mut self, mut stream: TcpStream) {
-        let mut buf: Vec<u8> = Vec::new();
+    async fn serve(self, mut stream: TcpStream) {
+        let mut machine = ServerSession::new(self.config.session.clone());
+        let idle_limit = machine.idle_limit().unwrap_or(Duration::MAX);
         let mut read_buf = [0u8; READ_BUF];
 
         loop {
             // Any traffic counts as a keepalive, which is what lets a device on
             // a quiet bus hold the connection open with `PING` alone.
-            let read = tokio::time::timeout(self.config.idle_limit, stream.read(&mut read_buf));
+            let read = tokio::time::timeout(idle_limit, stream.read(&mut read_buf));
             let n = match read.await {
                 Ok(Ok(0)) | Ok(Err(_)) => return,
                 Ok(Ok(n)) => n,
@@ -158,71 +153,38 @@ impl Session {
                     return;
                 }
             };
-            buf.extend_from_slice(&read_buf[..n]);
+            machine.receive(&read_buf[..n]);
 
-            loop {
-                let frame = match proto::take_frame(&mut buf) {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) => break,
-                    // A length no message can have: the stream is not this
-                    // protocol, and nothing later in it can be trusted.
-                    Err(_) => {
+            while let Some(action) = machine.poll() {
+                let reply = match action {
+                    Action::Reply(bytes) => bytes,
+                    Action::Hello(hello) => {
+                        let status = self.hello(&hello);
+                        machine.answer_hello(status, now_us())
+                    }
+                    Action::HelloRefused(status) => machine.answer_hello(status, now_us()),
+                    Action::Batch(incoming) => {
+                        let seq = incoming.batch.seq;
+                        let status = self.batch(incoming);
+                        machine.ack(seq, status, self.archive.occupancy_pct())
+                    }
+                    Action::Nack { seq, status } => {
+                        machine.ack(seq, status, self.archive.occupancy_pct())
+                    }
+                    Action::Close(CloseReason::Framing) => {
                         warn!("Ingest client {} sent bogus length, dropping", self.peer);
                         return;
                     }
+                    Action::Close(_) => return,
                 };
-                let reply = self.handle(&frame);
-                if let Some(bytes) = reply.0 {
-                    if stream.write_all(&bytes).await.is_err() {
-                        return;
-                    }
-                }
-                if matches!(reply.1, Next::Drop) {
+                if stream.write_all(&reply).await.is_err() {
                     return;
                 }
             }
         }
     }
 
-    /// Answer one message: what to send back, and whether to stay connected.
-    fn handle(&mut self, frame: &proto::WireFrame) -> (Option<Vec<u8>>, Next) {
-        if !frame.crc_ok {
-            // Best effort, and worth the trouble: naming the sequence number
-            // lets the device resend that batch rather than time out waiting
-            // for an acknowledgement that is never coming.
-            if frame.mtype == proto::MSG_BATCH && frame.body.len() >= 4 {
-                let seq = u32::from_le_bytes(frame.body[0..4].try_into().unwrap());
-                return (Some(self.ack(seq, proto::ACK_CRC)), Next::Continue);
-            }
-            return (None, Next::Continue);
-        }
-
-        match frame.mtype {
-            proto::MSG_HELLO => self.hello(&frame.body),
-            proto::MSG_PING => (
-                Some(proto::encode_message(proto::MSG_PONG, b"")),
-                Next::Continue,
-            ),
-            proto::MSG_BATCH if !self.authed => (None, Next::Drop),
-            proto::MSG_BATCH => self.batch(&frame.body),
-            // Ignored rather than refused, as the protocol specifies for a
-            // message type the server does not know.
-            _ => (None, Next::Continue),
-        }
-    }
-
-    fn hello(&mut self, body: &[u8]) -> (Option<Vec<u8>>, Next) {
-        let now_us = system_time_to_us(SystemTime::now());
-        let ack = |status| Some(proto::encode_hello_ack(status, now_us as u64));
-
-        let Ok(hello) = proto::parse_hello(body) else {
-            return (None, Next::Drop);
-        };
-        // Strict, unlike the gateway's one-release tolerance of v1: nothing
-        // deployed pushes to this listener but this repository's own daemon.
-        if hello.version != proto::PROTO_VERSION {
-            return (ack(proto::HELLO_BAD_VERSION), Next::Drop);
-        }
+    fn hello(&self, hello: &proto::Hello) -> u8 {
         if !self.config.token.is_empty() {
             let expected = self.config.token.expose().as_bytes();
             // Constant time, and length-independent: a plain `==` would leak
@@ -230,12 +192,10 @@ impl Session {
             // measure.
             if !bool::from(hello.token.ct_eq(expected)) {
                 warn!("Ingest client {} failed auth", self.peer);
-                return (ack(proto::HELLO_BAD_AUTH), Next::Drop);
+                return proto::HELLO_BAD_AUTH;
             }
         }
 
-        self.authed = true;
-        self.time_relative = hello.time_relative;
         if !hello.database.is_empty() {
             // Recorded, not honoured: this server forwards to one gateway, and
             // the gateway is what routes a database. Saying so beats a device
@@ -246,41 +206,26 @@ impl Session {
                 self.peer, hello.database
             );
         }
-        (ack(proto::HELLO_OK), Next::Continue)
+        proto::HELLO_OK
     }
 
-    fn batch(&mut self, body: &[u8]) -> (Option<Vec<u8>>, Next) {
-        let Some(parsed) = proto::parse_batch(body, self.config.max_batch_frames) else {
-            // Too short to even carry a sequence number, so there is nothing to
-            // address a refusal to.
-            return (None, Next::Drop);
-        };
-        let batch = match parsed {
-            Ok(batch) => batch,
-            Err(seq) => return (Some(self.ack(seq, proto::ACK_MALFORMED)), Next::Continue),
-        };
-
+    fn batch(&self, incoming: IncomingBatch) -> u8 {
         // Refused before anything is enqueued: accepting a batch this server
         // will only drop would tell the device its frames are safe.
         if self.archive.is_closed() || self.archive.occupancy_pct() >= REFUSE_ABOVE_PCT {
-            return (
-                Some(self.ack(batch.seq, proto::ACK_OVERLOADED)),
-                Next::Continue,
-            );
+            return proto::ACK_OVERLOADED;
         }
 
-        let seq = batch.seq;
-        let arrival_us = system_time_to_us(SystemTime::now()) as u64;
-        for (ts_us, record) in batch.stamped(self.time_relative, arrival_us) {
+        for (ts_us, record) in incoming.batch.stamped(incoming.time_relative, now_us()) {
             self.archive
                 .enqueue(Arc::new(wire::decode(ts_us as i64, record)));
         }
-        (Some(self.ack(seq, proto::ACK_OK)), Next::Continue)
+        proto::ACK_OK
     }
+}
 
-    fn ack(&self, seq: u32, status: u8) -> Vec<u8> {
-        proto::encode_ack(seq, status, self.archive.occupancy_pct())
-    }
+fn now_us() -> u64 {
+    system_time_to_us(SystemTime::now()) as u64
 }
 
 #[cfg(test)]
@@ -352,8 +297,8 @@ mod tests {
 
     /// A real archive with a recording sink, so what a test observes is what
     /// came out of the queue rather than a shortcut around it.
-    fn archive_capturing(queue_size: usize) -> (Archive, Seen, watch::Sender<bool>) {
-        let batching = Batching {
+    fn batching(queue_size: usize) -> Batching {
+        Batching {
             // One frame per batch, sent almost immediately: a test wants each
             // enqueue visible, not the throughput the defaults are tuned for.
             size: 1,
@@ -364,10 +309,18 @@ mod tests {
             queue_flush_pct: 100,
             cache_origin: None,
             legacy_cache_path: None,
-        };
+        }
+    }
+
+    fn archive_capturing(queue_size: usize) -> (Archive, Seen, watch::Sender<bool>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let (archive, batcher, stop) =
-            crate::archive::channel(RecordingSink(seen.clone()), NullCache, &batching, 0.0, None);
+        let (archive, batcher, stop) = crate::archive::channel(
+            RecordingSink(seen.clone()),
+            NullCache,
+            &batching(queue_size),
+            0.0,
+            None,
+        );
         tokio::spawn(batcher.run());
         // The stop signal is handed back rather than dropped here: dropping it
         // would close the queue immediately and these tests would observe an
@@ -612,6 +565,45 @@ mod tests {
         let ack = proto::parse_ack(&reply(&mut c).await.body).unwrap();
         assert_eq!((ack.seq, ack.status), (4, proto::ACK_OVERLOADED));
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_ack_carries_the_queue_occupancy_refusals_too() {
+        // Never run, so the queue only fills.
+        let (archive, _batcher, _stop) = crate::archive::channel(
+            RecordingSink(Seen::default()),
+            NullCache,
+            &batching(10),
+            0.0,
+            None,
+        );
+        let server = Server::bind(&ingest_settings(""), archive).await.unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(server.run());
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&proto::encode_hello(b"", "", false))
+            .await
+            .unwrap();
+        reply(&mut c).await;
+
+        let records = [one_record(0, 1), one_record(1, 2), one_record(2, 3)].concat();
+        let good = proto::encode_batch(1, 0, 3, &records);
+        let mut corrupt = proto::encode_batch(2, 0, 1, &one_record(0, 1));
+        *corrupt.last_mut().unwrap() ^= 0xFF;
+        let mut over = 3u32.to_le_bytes().to_vec();
+        over.extend_from_slice(&0u64.to_le_bytes());
+        over.extend_from_slice(&5_000u16.to_le_bytes());
+        let over = proto::encode_message(proto::MSG_BATCH, &over);
+
+        for (msg, seq, status) in [
+            (good, 1, proto::ACK_OK),
+            (corrupt, 2, proto::ACK_CRC),
+            (over, 3, proto::ACK_MALFORMED),
+        ] {
+            c.write_all(&msg).await.unwrap();
+            let ack = proto::parse_ack(&reply(&mut c).await.body).unwrap();
+            assert_eq!((ack.seq, ack.status, ack.queue_pct), (seq, status, 30));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
