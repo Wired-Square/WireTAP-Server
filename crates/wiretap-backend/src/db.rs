@@ -91,6 +91,35 @@ impl DbSchemaState {
 
 pub use wiretap_protocol::ingest::valid_database_name;
 
+/// Why a capture database cannot be served: never, or not yet.
+#[derive(Debug)]
+pub enum DbError {
+    /// An invalid name, or a database that does not exist and will not be made.
+    Refused(String),
+    /// An outage, or a schema check or migration in progress.
+    Unavailable(String),
+}
+
+impl From<String> for DbError {
+    fn from(message: String) -> Self {
+        Self::Unavailable(message)
+    }
+}
+
+impl From<DbError> for String {
+    fn from(e: DbError) -> Self {
+        e.to_string()
+    }
+}
+
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(m) | Self::Unavailable(m) => f.write_str(m),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Databases {
     config: Arc<Config>,
@@ -514,9 +543,9 @@ impl Databases {
 
     /// Pool for an existing capture database. Errors if it doesn't exist —
     /// callers wanting auto-create go through `ensure_database` first.
-    pub async fn pool(&self, name: &str) -> Result<Pool, String> {
+    pub async fn pool(&self, name: &str) -> Result<Pool, DbError> {
         if !valid_database_name(name) {
-            return Err(format!("invalid database name '{name}'"));
+            return Err(DbError::Refused(format!("invalid database name '{name}'")));
         }
         {
             let pools = self.pools.lock().await;
@@ -527,7 +556,9 @@ impl Databases {
         // Existence before readiness: a typo should say "does not exist" rather
         // than fail deep inside a migration attempt against a missing database.
         if !self.database_exists(name).await? {
-            return Err(format!("database '{name}' does not exist"));
+            return Err(DbError::Refused(format!(
+                "database '{name}' does not exist"
+            )));
         }
         self.require_current(name).await?;
         let pool = self.build_pool(name)?;
@@ -587,15 +618,15 @@ impl Databases {
 
     /// Resolve a database for ingest/import: existing, or auto-created when
     /// the config allows. Returns the pool.
-    pub async fn ensure_database(&self, name: &str, allow_create: bool) -> Result<Pool, String> {
+    pub async fn ensure_database(&self, name: &str, allow_create: bool) -> Result<Pool, DbError> {
         if !valid_database_name(name) {
-            return Err(format!("invalid database name '{name}'"));
+            return Err(DbError::Refused(format!("invalid database name '{name}'")));
         }
         if !self.database_exists(name).await? {
             if !(allow_create && self.config.auto_create_databases) {
-                return Err(format!(
+                return Err(DbError::Refused(format!(
                     "database '{name}' does not exist (auto-create disabled)"
-                ));
+                )));
             }
             self.create_database(name).await?;
         }
@@ -604,21 +635,25 @@ impl Databases {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use wiretap_model::Secret;
 
-    fn unreachable_databases(auto_migrate: bool) -> Databases {
+    pub(crate) fn unreachable_databases(auto_migrate: bool) -> Databases {
         let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
-        Databases::new(Arc::new(Config {
+        Databases::new(Arc::new(config_at(closed_port, auto_migrate)))
+    }
+
+    pub(crate) fn config_at(pg_port: u16, auto_migrate: bool) -> Config {
+        Config {
             http_listen: String::new(),
             ingest_listen: String::new(),
             pg_host: "127.0.0.1".into(),
-            pg_port: closed_port,
+            pg_port,
             pg_user: "postgres".into(),
             pg_password: Secret::new("unused"),
             default_database: "wiretap".into(),
@@ -628,7 +663,7 @@ mod tests {
             ingest_keepalive_secs: 30.0,
             ingest_max_batch_frames: 256,
             log_buffer: 0,
-        }))
+        }
     }
 
     fn failed_ago(ago: Duration) -> DbSchemaState {

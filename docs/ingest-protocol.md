@@ -20,6 +20,11 @@ Requires `[forward]`; `[server].iface = ""` for ingest-only. The token is sent
 in clear text — deploy on a trusted network or wrap the connection in a VPN /
 stunnel if it crosses untrusted segments.
 
+The gateway refuses a HELLO `status = 4` (unavailable) when it cannot serve
+the database yet: PostgreSQL is down, or the database's schema is being
+checked or migrated. `status = 3` (bad database) is only for an invalid name,
+or a database that does not exist while auto-create is off.
+
 The gateway ACKs a batch it fails to write `status = 3` (overloaded), unless
 PostgreSQL refused the rows themselves with a data exception or an integrity
 constraint violation (SQLSTATE class 22 or 23): that is `status = 2`

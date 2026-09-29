@@ -210,14 +210,14 @@ impl BatchSink for ForwardSink {
         if ack.status != proto::HELLO_OK {
             // The version case names both sides: it is the one an operator
             // meets mid-upgrade, and "status=2" does not say which end.
-            let why = if ack.status == proto::HELLO_BAD_VERSION {
-                format!(
+            let why = match ack.status {
+                proto::HELLO_BAD_VERSION => format!(
                     ": this server speaks protocol v{}, the gateway v{}; upgrade the gateway first",
                     proto::PROTO_VERSION,
                     ack.accepted_version
-                )
-            } else {
-                String::new()
+                ),
+                proto::HELLO_UNAVAILABLE => ": the gateway's database is not available yet".into(),
+                _ => String::new(),
             };
             return Err(SinkError(format!(
                 "forward: HELLO rejected (status={}){why}",
@@ -486,6 +486,19 @@ mod tests {
         assert!(err.contains("status=2"), "{err}");
         assert!(err.contains("speaks protocol v2"), "{err}");
         assert!(err.contains("upgrade the gateway first"), "{err}");
+        let _ = gateway.await;
+    }
+
+    #[tokio::test]
+    async fn a_gateway_whose_database_is_not_ready_says_so() {
+        let (port, gateway) = fake_gateway(Script {
+            hello_status: proto::HELLO_UNAVAILABLE,
+            ..Script::default()
+        })
+        .await;
+        let err = sink(port, "").connect().await.unwrap_err().to_string();
+        assert!(err.contains("status=4"), "{err}");
+        assert!(err.contains("database is not available yet"), "{err}");
         let _ = gateway.await;
     }
 

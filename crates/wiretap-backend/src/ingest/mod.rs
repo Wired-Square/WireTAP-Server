@@ -21,7 +21,7 @@ use tokio_postgres::error::SqlState;
 use wiretap_protocol::ingest::*;
 
 use crate::config::Config;
-use crate::db::Databases;
+use crate::db::{Databases, DbError};
 use crate::keys::KeyStore;
 use writer::{copy_rows, FrameRow};
 
@@ -197,7 +197,10 @@ impl IngestServer {
             Ok(pool) => pool,
             Err(e) => {
                 tracing::warn!("ingest client {peer}: database '{database}': {e}");
-                return Err(HELLO_BAD_DATABASE);
+                return Err(match e {
+                    DbError::Refused(_) => HELLO_BAD_DATABASE,
+                    DbError::Unavailable(_) => HELLO_UNAVAILABLE,
+                });
             }
         };
 
@@ -271,6 +274,38 @@ fn now_us() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::tests::{config_at, unreachable_databases};
+
+    async fn hello_status(dbs: Databases, database: &str) -> u8 {
+        let server = IngestServer {
+            config: Arc::new(config_at(0, true)),
+            keys: KeyStore::new(dbs.clone(), Some("bootstrap")),
+            dbs,
+            sessions: Sessions::default(),
+        };
+        let hello = Hello {
+            version: PROTO_VERSION,
+            time_relative: false,
+            token: b"bootstrap".to_vec(),
+            database: database.into(),
+        };
+        match server.handle_hello(&hello, "192.0.2.10:40000").await {
+            Ok(_) => HELLO_OK,
+            Err(status) => status,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_database_outage_at_hello_is_unavailable_not_a_bad_database() {
+        let status = hello_status(unreachable_databases(true), "archive").await;
+        assert_eq!(status, HELLO_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_database_name_at_hello_is_a_bad_database() {
+        let status = hello_status(unreachable_databases(true), "no spaces").await;
+        assert_eq!(status, HELLO_BAD_DATABASE);
+    }
 
     #[tokio::test]
     async fn the_sessions_listing_names_each_sessions_protocol_version() {

@@ -28,6 +28,12 @@ All notable changes to this project are documented here. Entries go under
 - **`smoke_test.sh` takes all four arguments or none of its checks run.** It
   no longer falls back to the dev stack's addresses, and prints its usage
   instead.
+- **A HELLO the gateway cannot serve yet answers "unavailable", not "bad
+  database".** A PostgreSQL outage, or a schema check or migration in
+  progress, now refuses the HELLO with status 4, which a client backs off and
+  retries. Status 3 is left for an invalid database name, or a database that
+  does not exist while auto-create is off. The capture server's log says the
+  gateway's database is not available yet.
 
 ### Fixed
 
