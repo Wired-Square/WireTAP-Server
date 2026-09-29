@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
 
@@ -46,6 +46,10 @@ pub enum DbSchemaState {
 /// can start the gateway before PostgreSQL accepts connections, and the sweep
 /// then fails every database it reaches.
 const FAILED_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Bounds the startup handshake as well as the TCP connect, which is all
+/// tokio-postgres's own `connect_timeout` covers.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl DbSchemaState {
     fn current() -> Self {
@@ -133,6 +137,7 @@ pub struct Databases {
     /// version a database is at, and the reads it would otherwise block are
     /// exactly the ones it exists to make fast.
     rollup_rebuild: Arc<Mutex<HashMap<String, Instant>>>,
+    connect_timeout: Duration,
 }
 
 impl Databases {
@@ -143,6 +148,7 @@ impl Databases {
             create_lock: Arc::new(Mutex::new(())),
             schema_state: Arc::new(Mutex::new(HashMap::new())),
             rollup_rebuild: Arc::new(Mutex::new(HashMap::new())),
+            connect_timeout: CONNECT_TIMEOUT,
         }
     }
 
@@ -463,14 +469,19 @@ impl Databases {
         );
         Pool::builder(mgr)
             .max_size(8)
+            .create_timeout(Some(self.connect_timeout))
+            .runtime(Runtime::Tokio1)
             .build()
             .map_err(|e| format!("pool build failed: {e}"))
     }
 
     /// One-off (non-pooled) connection, used for CREATE DATABASE and bootstrap.
     pub async fn connect_raw(&self, database: &str) -> Result<tokio_postgres::Client, String> {
-        let (client, connection) = tokio_postgres::connect(&self.config.pg_dsn(database), NoTls)
+        let dsn = self.config.pg_dsn(database);
+        let connecting = tokio_postgres::connect(&dsn, NoTls);
+        let (client, connection) = tokio::time::timeout(self.connect_timeout, connecting)
             .await
+            .map_err(|_| format!("connect to '{database}' timed out"))?
             .map_err(|e| format!("connect to '{database}' failed: {e}"))?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
@@ -674,6 +685,24 @@ pub(crate) mod tests {
         }
     }
 
+    /// Behind a server that accepts connections and never says a word, like
+    /// one that is up but wedged.
+    async fn silent_databases() -> (Databases, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let dbs = Databases {
+            connect_timeout: Duration::from_millis(200),
+            ..Databases::new(Arc::new(config_at(port, true)))
+        };
+        (dbs, server)
+    }
+
     async fn state_of(dbs: &Databases, name: &str) -> DbSchemaState {
         dbs.schema_states().await[name].clone()
     }
@@ -719,5 +748,29 @@ pub(crate) mod tests {
         let answer = dbs.require_current("archive").await.unwrap_err();
         assert!(answer.ends_with("schema failed"), "{answer}");
         assert_eq!(state_of(&dbs, "archive").await.label(), "failed");
+    }
+
+    #[tokio::test]
+    async fn a_raw_connection_to_a_silent_server_gives_up() {
+        let (dbs, server) = silent_databases().await;
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(2), dbs.connect_raw("archive")).await;
+        assert!(
+            matches!(outcome, Ok(Err(_))),
+            "connect_raw was still waiting on a silent server after 2s"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_pooled_connection_to_a_silent_server_gives_up() {
+        let (dbs, server) = silent_databases().await;
+        let pool = dbs.build_pool("archive").unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), pool.get()).await;
+        assert!(
+            matches!(outcome, Ok(Err(_))),
+            "the pool was still waiting on a silent server after 2s"
+        );
+        server.abort();
     }
 }
