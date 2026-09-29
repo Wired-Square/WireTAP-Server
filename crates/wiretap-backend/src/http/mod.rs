@@ -43,6 +43,15 @@ impl From<String> for ApiError {
     }
 }
 
+impl From<sql::QueryError> for ApiError {
+    fn from(e: sql::QueryError) -> Self {
+        match e {
+            sql::QueryError::BadRequest(msg) => ApiError(StatusCode::BAD_REQUEST, msg),
+            sql::QueryError::Database(msg) => ApiError(StatusCode::SERVICE_UNAVAILABLE, msg),
+        }
+    }
+}
+
 fn forbidden(msg: &str) -> ApiError {
     ApiError(StatusCode::FORBIDDEN, msg.to_string())
 }
@@ -1013,6 +1022,19 @@ mod tests {
             },
         )]);
         assert!(!schema_consensus(&s).contains("sungrow"));
+    #[test]
+    fn a_query_blames_the_client_only_for_its_request() {
+        let status = |e| ApiError::from(e).into_response().status();
+        assert_eq!(
+            status(sql::QueryError::BadRequest("bad cursor".into())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(sql::QueryError::Database("Query failed: db error".into())),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
     }
 
     #[test]

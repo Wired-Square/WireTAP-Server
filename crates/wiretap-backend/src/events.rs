@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
 
 use crate::schema::db_error_detail;
+use crate::sql::QueryError;
+
+fn failed(what: &str) -> impl FnOnce(tokio_postgres::Error) -> QueryError + '_ {
+    move |e| QueryError::postgres(format!("{what}: {}", db_error_detail(&e)), &e)
+}
 
 /// Microseconds since the epoch throughout, as `time-bounds` and `frames`
 /// already speak to the desktop.
@@ -76,7 +81,7 @@ pub async fn list(
     start: Option<String>,
     end: Option<String>,
     limit: u32,
-) -> Result<Vec<Event>, String> {
+) -> Result<Vec<Event>, QueryError> {
     let rows = client
         .query(
             &format!(
@@ -88,11 +93,11 @@ pub async fn list(
             &[&start, &end, &i64::from(limit)],
         )
         .await
-        .map_err(|e| format!("event list failed: {}", db_error_detail(&e)))?;
+        .map_err(failed("event list failed"))?;
     Ok(rows.iter().map(Event::from_row).collect())
 }
 
-pub async fn create(client: &Client, new: &NewEvent) -> Result<Event, String> {
+pub async fn create(client: &Client, new: &NewEvent) -> Result<Event, QueryError> {
     let row = client
         .query_one(
             &format!(
@@ -106,14 +111,20 @@ pub async fn create(client: &Client, new: &NewEvent) -> Result<Event, String> {
             ],
         )
         .await
-        .map_err(|e| format!("event insert failed: {}", db_error_detail(&e)))?;
+        .map_err(failed("event insert failed"))?;
     Ok(Event::from_row(&row))
 }
 
 /// `None` when no event has that id.
-pub async fn update(client: &Client, id: i64, patch: &EventPatch) -> Result<Option<Event>, String> {
+pub async fn update(
+    client: &Client,
+    id: i64,
+    patch: &EventPatch,
+) -> Result<Option<Event>, QueryError> {
     if patch.ts_us.is_none() && patch.duration_us.is_none() && patch.note.is_none() {
-        return Err("nothing to change: give ts_us, duration_us or note".into());
+        return Err(QueryError::BadRequest(
+            "nothing to change: give ts_us, duration_us or note".into(),
+        ));
     }
     let ts = patch.ts_us.map(timestamp).transpose()?;
     let duration_us = patch.duration_us.map(duration).transpose()?;
@@ -130,15 +141,15 @@ pub async fn update(client: &Client, id: i64, patch: &EventPatch) -> Result<Opti
             &[&id, &ts, &duration_us, &patch.note],
         )
         .await
-        .map_err(|e| format!("event update failed: {}", db_error_detail(&e)))?;
+        .map_err(failed("event update failed"))?;
     Ok(row.as_ref().map(Event::from_row))
 }
 
 /// Whether an event with that id existed to delete.
-pub async fn delete(client: &Client, id: i64) -> Result<bool, String> {
+pub async fn delete(client: &Client, id: i64) -> Result<bool, QueryError> {
     let n = client
         .execute("DELETE FROM public.events WHERE id = $1", &[&id])
         .await
-        .map_err(|e| format!("event delete failed: {}", db_error_detail(&e)))?;
+        .map_err(failed("event delete failed"))?;
     Ok(n == 1)
 }

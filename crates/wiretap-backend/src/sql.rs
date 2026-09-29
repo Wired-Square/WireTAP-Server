@@ -8,10 +8,49 @@ use std::time::Instant;
 use base64::Engine;
 use futures_util::TryStreamExt;
 use serde::Deserialize;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
 
 use crate::types::*;
+
+/// Why a query gave no answer: something in the request, or the database.
+#[derive(Debug)]
+pub enum QueryError {
+    BadRequest(String),
+    Database(String),
+}
+
+impl From<String> for QueryError {
+    fn from(message: String) -> Self {
+        Self::BadRequest(message)
+    }
+}
+
+impl QueryError {
+    pub fn postgres(message: String, e: &tokio_postgres::Error) -> Self {
+        if refused_for_the_request(e.code()) {
+            Self::BadRequest(message)
+        } else {
+            Self::Database(message)
+        }
+    }
+}
+
+/// Errors the request earned: a value PostgreSQL could not take (class 22,
+/// such as an unparseable `start`), a query the client cancelled, or a
+/// backend an admin key may not signal.
+fn refused_for_the_request(code: Option<&SqlState>) -> bool {
+    code.is_some_and(|c| {
+        c.code().starts_with("22")
+            || *c == SqlState::QUERY_CANCELED
+            || *c == SqlState::INSUFFICIENT_PRIVILEGE
+    })
+}
+
+fn failed(what: &str) -> impl FnOnce(tokio_postgres::Error) -> QueryError + '_ {
+    move |e| QueryError::postgres(format!("{what}: {e}"), &e)
+}
 
 // ---------------------------------------------------------------------------
 // Parameter plumbing
@@ -139,7 +178,7 @@ pub struct ByteChangesParams {
 pub async fn byte_changes(
     client: &Client,
     p: &ByteChangesParams,
-) -> Result<ByteChangeQueryResult, String> {
+) -> Result<ByteChangeQueryResult, QueryError> {
     let t0 = Instant::now();
     let limit = p.limit.unwrap_or(10000);
     let mut args = Args::default();
@@ -165,7 +204,7 @@ pub async fn byte_changes(
     let rows = client
         .query(&query, &args.refs())
         .await
-        .map_err(|e| format!("Query failed: {e}"))?;
+        .map_err(failed("Query failed"))?;
     let results: Vec<ByteChangeResult> = rows
         .iter()
         .map(|row| ByteChangeResult {
@@ -192,7 +231,7 @@ pub struct FrameChangesParams {
 pub async fn frame_changes(
     client: &Client,
     p: &FrameChangesParams,
-) -> Result<FrameChangeQueryResult, String> {
+) -> Result<FrameChangeQueryResult, QueryError> {
     let t0 = Instant::now();
     let limit = p.limit.unwrap_or(10000);
     let mut args = Args::default();
@@ -209,7 +248,7 @@ pub async fn frame_changes(
     let rows = client
         .query(&query, &args.refs())
         .await
-        .map_err(|e| format!("Query failed: {e}"))?;
+        .map_err(failed("Query failed"))?;
     let results: Vec<FrameChangeResult> = rows
         .iter()
         .map(|row| {
@@ -254,7 +293,7 @@ pub struct MirrorValidationParams {
 pub async fn mirror_validation(
     client: &Client,
     p: &MirrorValidationParams,
-) -> Result<MirrorValidationQueryResult, String> {
+) -> Result<MirrorValidationQueryResult, QueryError> {
     let t0 = Instant::now();
     let limit = p.limit.unwrap_or(10000);
     let mut args = Args::default();
@@ -281,7 +320,7 @@ pub async fn mirror_validation(
     let rows = client
         .query(&query, &args.refs())
         .await
-        .map_err(|e| format!("Query failed: {e}"))?;
+        .map_err(failed("Query failed"))?;
     let results: Vec<MirrorValidationResult> = rows
         .iter()
         .map(|row| {
@@ -322,7 +361,7 @@ pub struct MuxStatisticsParams {
 pub async fn mux_statistics(
     client: &Client,
     p: &MuxStatisticsParams,
-) -> Result<MuxStatisticsQueryResult, String> {
+) -> Result<MuxStatisticsQueryResult, QueryError> {
     let t0 = Instant::now();
     let limit = p.limit.unwrap_or(500_000);
     let mux = p.mux_selector_byte as i32;
@@ -357,11 +396,11 @@ pub async fn mux_statistics(
     let count_rows = client
         .query(&count_query, &args.refs())
         .await
-        .map_err(|e| format!("Query failed: {e}"))?;
+        .map_err(failed("Query failed"))?;
     let byte_rows = client
         .query(&byte_query, &args.refs())
         .await
-        .map_err(|e| format!("Byte stats query failed: {e}"))?;
+        .map_err(failed("Byte stats query failed"))?;
 
     let mut cases: BTreeMap<u16, MuxCaseStats> = BTreeMap::new();
     let mut total_frames: u64 = 0;
@@ -414,7 +453,7 @@ pub async fn mux_statistics(
         let word_rows = client
             .query(&word_query, &args.refs())
             .await
-            .map_err(|e| format!("Word stats query failed: {e}"))?;
+            .map_err(failed("Word stats query failed"))?;
         for row in &word_rows {
             let mux_value = row.get::<_, i32>("mux_value") as u16;
             if let Some(case) = cases.get_mut(&mux_value) {
@@ -455,7 +494,7 @@ pub struct FirstLastParams {
 pub async fn first_last(
     client: &Client,
     p: &FirstLastParams,
-) -> Result<FirstLastQueryResult, String> {
+) -> Result<FirstLastQueryResult, QueryError> {
     let t0 = Instant::now();
     let mut args = Args::default();
     let w = p.filter.where_clause(&mut args);
@@ -468,9 +507,11 @@ pub async fn first_last(
             &args.refs(),
         )
         .await
-        .map_err(|e| format!("First query failed: {e}"))?;
+        .map_err(failed("First query failed"))?;
     if first_rows.is_empty() {
-        return Err("No frames found matching the filter".to_string());
+        return Err(QueryError::BadRequest(
+            "No frames found matching the filter".into(),
+        ));
     }
     let last_rows = client
         .query(
@@ -478,14 +519,14 @@ pub async fn first_last(
             &args.refs(),
         )
         .await
-        .map_err(|e| format!("Last query failed: {e}"))?;
+        .map_err(failed("Last query failed"))?;
     let count_rows = client
         .query(
             &format!("SELECT COUNT(*) AS count FROM public.capture_frame {w}"),
             &args.refs(),
         )
         .await
-        .map_err(|e| format!("Count query failed: {e}"))?;
+        .map_err(failed("Count query failed"))?;
 
     Ok(FirstLastQueryResult {
         results: FirstLastResult {
@@ -511,7 +552,7 @@ pub struct FrequencyParams {
 pub async fn frequency(
     client: &Client,
     p: &FrequencyParams,
-) -> Result<FrequencyQueryResult, String> {
+) -> Result<FrequencyQueryResult, QueryError> {
     let t0 = Instant::now();
     let limit = p.limit.unwrap_or(500_000);
     let bucket_us = p.bucket_size_ms as i64 * 1000;
@@ -530,7 +571,7 @@ pub async fn frequency(
     let rows = client
         .query(&query, &args.refs())
         .await
-        .map_err(|e| format!("Query failed: {e}"))?;
+        .map_err(failed("Query failed"))?;
     let mut rows_scanned = 0usize;
     let results: Vec<FrequencyBucket> = rows
         .iter()
@@ -564,7 +605,7 @@ pub struct DistributionParams {
 pub async fn distribution(
     client: &Client,
     p: &DistributionParams,
-) -> Result<DistributionQueryResult, String> {
+) -> Result<DistributionQueryResult, QueryError> {
     let t0 = Instant::now();
     let mut args = Args::default();
     let byte_idx = args.add(p.byte_index as i32);
@@ -576,7 +617,7 @@ pub async fn distribution(
     let rows = client
         .query(&query, &args.refs())
         .await
-        .map_err(|e| format!("Query failed: {e}"))?;
+        .map_err(failed("Query failed"))?;
     let mut results: Vec<DistributionResult> = Vec::new();
     let mut total: i64 = 0;
     for row in &rows {
@@ -612,7 +653,7 @@ pub struct GapAnalysisParams {
 pub async fn gap_analysis(
     client: &Client,
     p: &GapAnalysisParams,
-) -> Result<GapAnalysisQueryResult, String> {
+) -> Result<GapAnalysisQueryResult, QueryError> {
     let t0 = Instant::now();
     let limit = p.limit.unwrap_or(10000);
     let threshold = format!("{:?}", p.gap_threshold_ms);
@@ -631,7 +672,7 @@ pub async fn gap_analysis(
     let rows = client
         .query(&query, &args.refs())
         .await
-        .map_err(|e| format!("Query failed: {e}"))?;
+        .map_err(failed("Query failed"))?;
     let results: Vec<GapResult> = rows
         .iter()
         .map(|row| GapResult {
@@ -662,13 +703,15 @@ pub struct PatternSearchParams {
 pub async fn pattern_search(
     client: &Client,
     p: &PatternSearchParams,
-) -> Result<PatternSearchQueryResult, String> {
+) -> Result<PatternSearchQueryResult, QueryError> {
     let t0 = Instant::now();
     if p.pattern.len() != p.pattern_mask.len() {
-        return Err("Pattern and mask must have the same length".into());
+        return Err(QueryError::BadRequest(
+            "Pattern and mask must have the same length".into(),
+        ));
     }
     if p.pattern.is_empty() {
-        return Err("Pattern must not be empty".into());
+        return Err(QueryError::BadRequest("Pattern must not be empty".into()));
     }
     let result_limit = p.limit.unwrap_or(10000) as usize;
     let mut args = Args::default();
@@ -686,7 +729,7 @@ pub async fn pattern_search(
     let row_stream = client
         .query_raw(query.as_str(), refs.iter().map(|p| *p as &dyn ToSql))
         .await
-        .map_err(|e| format!("Query failed: {e}"))?;
+        .map_err(failed("Query failed"))?;
     futures_util::pin_mut!(row_stream);
 
     let mut rows_scanned = 0usize;
@@ -694,7 +737,7 @@ pub async fn pattern_search(
     while let Some(row) = row_stream
         .try_next()
         .await
-        .map_err(|e| format!("Row fetch failed: {e}"))?
+        .map_err(failed("Row fetch failed"))?
     {
         rows_scanned += 1;
         let data_bytes: Vec<u8> = row.get("data_bytes");
@@ -759,7 +802,7 @@ pub async fn inventory(
     start_time: Option<String>,
     end_time: Option<String>,
     protocol: Option<Protocol>,
-) -> Result<Vec<InventoryEntry>, String> {
+) -> Result<Vec<InventoryEntry>, QueryError> {
     let map = |row: &tokio_postgres::Row| {
         let max_dlc = row.get::<_, i32>("max_dlc") as u16;
         InventoryEntry {
@@ -790,7 +833,7 @@ pub async fn inventory(
                 &args.refs(),
             )
             .await
-            .map_err(|e| format!("Inventory rollup query failed: {e}"))?;
+            .map_err(failed("Inventory rollup query failed"))?;
         return Ok(rows.iter().map(map).collect());
     }
 
@@ -807,14 +850,14 @@ pub async fn inventory(
     let rows = client
         .query(&query, &args.refs())
         .await
-        .map_err(|e| format!("Inventory query failed: {e}"))?;
+        .map_err(failed("Inventory query failed"))?;
     Ok(rows.iter().map(map).collect())
 }
 
 pub async fn time_bounds(
     client: &Client,
     protocol: Option<Protocol>,
-) -> Result<TimeBounds, String> {
+) -> Result<TimeBounds, QueryError> {
     let (min_expr, max_expr, table) = if rollup_available(client).await {
         (
             "min(first_ts)",
@@ -836,7 +879,7 @@ pub async fn time_bounds(
             &args.refs(),
         )
         .await
-        .map_err(|e| format!("Time bounds query failed: {e}"))?;
+        .map_err(failed("Time bounds query failed"))?;
     Ok(TimeBounds {
         min_ts_us: row.get::<_, Option<f64>>("min_us").map(|v| v as i64),
         max_ts_us: row.get::<_, Option<f64>>("max_us").map(|v| v as i64),
@@ -855,7 +898,7 @@ pub struct PayloadsParams {
 }
 
 /// Most-recent-N raw payloads for one frame id (headless byte analysis).
-pub async fn payloads(client: &Client, p: &PayloadsParams) -> Result<Vec<Vec<u8>>, String> {
+pub async fn payloads(client: &Client, p: &PayloadsParams) -> Result<Vec<Vec<u8>>, QueryError> {
     let limit = p.limit.unwrap_or(1000);
     let mut args = Args::default();
     let sql = format!(
@@ -865,7 +908,7 @@ pub async fn payloads(client: &Client, p: &PayloadsParams) -> Result<Vec<Vec<u8>
     let rows = client
         .query(&sql, &args.refs())
         .await
-        .map_err(|e| format!("Payload fetch failed: {e}"))?;
+        .map_err(failed("Payload fetch failed"))?;
     Ok(rows.iter().map(|r| r.get("data_bytes")).collect())
 }
 
@@ -899,7 +942,7 @@ pub async fn frames_batch(
     after: Option<&str>,
     limit: u32,
     protocol: Option<Protocol>,
-) -> Result<FrameBatch, String> {
+) -> Result<FrameBatch, QueryError> {
     let cursor = after.map(decode_cursor).transpose()?;
     let mut args = Args::default();
     let mut sql = format!(
@@ -921,7 +964,7 @@ pub async fn frames_batch(
     let rows = client
         .query(&sql, &args.refs())
         .await
-        .map_err(|e| format!("Frame query failed: {e}"))?;
+        .map_err(failed("Frame query failed"))?;
     let exhausted = rows.len() < limit as usize + skip;
 
     let frames: Vec<FrameBatchRow> = rows
@@ -971,7 +1014,10 @@ pub async fn frames_batch(
 // Activity
 // ---------------------------------------------------------------------------
 
-pub async fn activity(client: &Client, database: &str) -> Result<DatabaseActivityResult, String> {
+pub async fn activity(
+    client: &Client,
+    database: &str,
+) -> Result<DatabaseActivityResult, QueryError> {
     let rows = client
         .query(
             "SELECT pid, datname AS database, usename AS username, application_name, \
@@ -984,7 +1030,7 @@ pub async fn activity(client: &Client, database: &str) -> Result<DatabaseActivit
             &[&database],
         )
         .await
-        .map_err(|e| format!("Activity query failed: {e}"))?;
+        .map_err(failed("Activity query failed"))?;
 
     let mut queries = Vec::new();
     let mut sessions = Vec::new();
@@ -1012,7 +1058,11 @@ pub async fn activity(client: &Client, database: &str) -> Result<DatabaseActivit
     Ok(DatabaseActivityResult { queries, sessions })
 }
 
-pub async fn signal_backend(client: &Client, pid: i32, terminate: bool) -> Result<bool, String> {
+pub async fn signal_backend(
+    client: &Client,
+    pid: i32,
+    terminate: bool,
+) -> Result<bool, QueryError> {
     let func = if terminate {
         "pg_terminate_backend"
     } else {
@@ -1021,7 +1071,7 @@ pub async fn signal_backend(client: &Client, pid: i32, terminate: bool) -> Resul
     let row = client
         .query_one(&format!("SELECT {func}($1)"), &[&pid])
         .await
-        .map_err(|e| format!("{func} failed: {e}"))?;
+        .map_err(|e| QueryError::postgres(format!("{func} failed: {e}"), &e))?;
     Ok(row.get(0))
 }
 
@@ -1036,6 +1086,20 @@ mod tests {
         assert_eq!(payload_len(Protocol::Can, 15), 64);
         assert_eq!(payload_len(Protocol::Modbus, 11), 11);
         assert_eq!(payload_len(Protocol::Modbus, 256), 256);
+    }
+
+    #[test]
+    fn a_value_postgres_refuses_is_the_requests_fault_and_an_outage_is_not() {
+        assert!(refused_for_the_request(Some(
+            &SqlState::INVALID_DATETIME_FORMAT
+        )));
+        assert!(refused_for_the_request(Some(&SqlState::QUERY_CANCELED)));
+        assert!(refused_for_the_request(Some(
+            &SqlState::INSUFFICIENT_PRIVILEGE
+        )));
+        assert!(!refused_for_the_request(None));
+        assert!(!refused_for_the_request(Some(&SqlState::ADMIN_SHUTDOWN)));
+        assert!(!refused_for_the_request(Some(&SqlState::UNDEFINED_TABLE)));
     }
 
     #[test]

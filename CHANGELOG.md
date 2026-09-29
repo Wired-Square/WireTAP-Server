@@ -11,6 +11,15 @@ All notable changes to this project are documented here. Entries go under
   `protocol_version` on each entry of `GET /v1/admin/ingest-sessions`: the
   version the device's HELLO spoke.
 
+### Changed
+
+- **A query that fails in the database answers 503, not 400.** `time-bounds`,
+  `inventory`, `frames`, `payloads`, `events`, the `query/*` endpoints and
+  `activity` now return 503 when PostgreSQL fails, as they already did when no
+  connection could be had. The message is unchanged. A value PostgreSQL
+  cannot take, such as an unparseable `start`, is still 400, as are a
+  cancelled query and a backend the key may not signal.
+
 ## [0.1.4] — 2026-09-29
 
 The capture daemon reads CAN and serial lines through `wiretap-lib-rs`, frames
