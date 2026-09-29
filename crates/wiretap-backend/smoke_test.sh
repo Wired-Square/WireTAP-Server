@@ -1,12 +1,16 @@
 #!/bin/bash
 # Phase B smoke test: endpoint coverage + auth matrix against a running stack.
-# Usage: ./smoke_test.sh [base-url] [admin-key] [seeded-db] [ingest-host:port]
 # With PGHOST and PGPASSWORD set, it also checks PostgreSQL itself through psql.
+# No defaults: a missing address once sent a run to the wrong stack.
 set -u
-BASE="${1:-http://localhost:8423}"
-ADMIN_KEY="${2:-dev-admin-key}"
-DB="${3:-vehicle_test}"
-INGEST="${4:-127.0.0.1:9323}"
+if [ $# -ne 4 ]; then
+    echo "Usage: $0 <base-url> <admin-key> <seeded-db> <ingest-host:port>" >&2
+    exit 2
+fi
+BASE="$1"
+ADMIN_KEY="$2"
+DB="$3"
+INGEST="$4"
 TOOLS="$(cd "$(dirname "$0")/../../tools" && pwd)"
 PASS=0; FAIL=0
 

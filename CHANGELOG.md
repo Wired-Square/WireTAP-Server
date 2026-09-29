@@ -25,6 +25,9 @@ All notable changes to this project are documented here. Entries go under
   and leaves the wire format alone. The ingest spec in the .deb names them.
   The HTTP API's types now come from its `wiretap-gateway`: responses carry
   the same fields and values, though some list their keys in another order.
+- **`smoke_test.sh` takes all four arguments or none of its checks run.** It
+  no longer falls back to the dev stack's addresses, and prints its usage
+  instead.
 
 ### Fixed
 

@@ -342,7 +342,7 @@ jobs:
             --database "$SMOKE_DB" --count 40
           PGHOST=127.0.0.1 PGPASSWORD="$POSTGRES_PASSWORD" \
             crates/wiretap-backend/smoke_test.sh \
-              http://127.0.0.1:8423 "$WIRETAP_ADMIN_KEY" "$SMOKE_DB"
+              http://127.0.0.1:8423 "$WIRETAP_ADMIN_KEY" "$SMOKE_DB" 127.0.0.1:9323
 
       - name: Stop the gateway
         if: always()

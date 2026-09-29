@@ -325,11 +325,11 @@ ids those checks expect (`0x7E0`–`0x7E3`):
 ```bash
 python3 ../../tools/test_ingest_client.py --host localhost --port 9323 \
     --token "$WIRETAP_ADMIN_KEY" --database vehicle_test --count 40
-./smoke_test.sh http://localhost:8423 "$WIRETAP_ADMIN_KEY" vehicle_test
+./smoke_test.sh http://localhost:8423 "$WIRETAP_ADMIN_KEY" vehicle_test localhost:9323
 ```
 
-Expect **53 passed, 0 failed**. The third argument is the seeded database and defaults to
-`vehicle_test`; the fourth is the ingest listener, `127.0.0.1:9323` by default, which the
-Modbus checks write through — it is the only path that carries a Modbus row. With
+Expect **53 passed, 0 failed**. All four arguments are required, and the script refuses to
+start without them. The third is the seeded database; the fourth is the ingest listener,
+which the Modbus checks write through — it is the only path that carries a Modbus row. With
 `PGHOST` and `PGPASSWORD` set (publish the port first, as the compose file's comment
 shows), three more reach PostgreSQL with `psql`: 56.
