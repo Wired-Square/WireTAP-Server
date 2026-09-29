@@ -16,6 +16,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use wiretap_protocol::import::take_record;
+use wiretap_protocol::ingest::RecordKind;
 
 use crate::db;
 use crate::events;
@@ -775,10 +776,20 @@ async fn import_capture(
         let done = chunk.is_none();
         // take_record shifts the buffer per record, so it is fed in bounded
         // pieces: a whole body chunk would make each chunk quadratic.
-        for piece in chunk.iter().flat_map(|bytes| bytes.chunks(IMPORT_FEED_BYTES)) {
+        for piece in chunk
+            .iter()
+            .flat_map(|bytes| bytes.chunks(IMPORT_FEED_BYTES))
+        {
             pending.extend_from_slice(piece);
             while let Some(r) = take_record(&mut pending).map_err(ApiError::from)? {
-                rows.push(FrameRow::can(r.ts_us, r.id_flags, r.bus, r.payload));
+                rows.push(FrameRow::new(
+                    r.ts_us,
+                    RecordKind::Can,
+                    r.id_flags,
+                    0,
+                    r.bus,
+                    r.payload,
+                ));
             }
         }
 

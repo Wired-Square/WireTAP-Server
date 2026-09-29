@@ -267,14 +267,8 @@ impl IngestServer {
         let seq = batch.seq;
         let rows: Vec<FrameRow> = batch
             .stamped(session.time_relative, Utc::now().timestamp_micros() as u64)
-            .map(|(ts_us, rec)| {
-                let ts_us = ts_us as i64;
-                match rec.kind {
-                    RecordKind::Can => FrameRow::can(ts_us, rec.id_flags, rec.bus, rec.payload),
-                    RecordKind::Modbus => {
-                        FrameRow::modbus(ts_us, rec.id_flags, rec.flags, rec.bus, rec.payload)
-                    }
-                }
+            .map(|(ts_us, r)| {
+                FrameRow::new(ts_us as i64, r.kind, r.id_flags, r.flags, r.bus, r.payload)
             })
             .collect();
         let count = rows.len() as u64;
