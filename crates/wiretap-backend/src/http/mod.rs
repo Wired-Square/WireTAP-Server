@@ -15,7 +15,7 @@ use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use wiretap_protocol::ingest::RecordKind;
+use wiretap_protocol::import::take_record;
 
 use crate::db;
 use crate::events;
@@ -735,12 +735,11 @@ struct ImportQuery {
     create: bool,
 }
 
-const IMPORT_RECORD_HEADER: usize = 14; // ts_us u64, id_flags u32, bus u8, len u8
 const IMPORT_CHUNK_ROWS: usize = 8192;
+const IMPORT_FEED_BYTES: usize = 4096;
 
-/// Streaming capture import: body is a sequence of flat binary records
-/// `ts_us u64 LE, id_flags u32 LE, bus u8, len u8, payload` (id_flags packed
-/// as in the TCP ingest protocol). COPYed in chunks as the body streams.
+/// Streaming capture import: the body is `wiretap_protocol::import` records
+/// back to back, COPYed in chunks as it streams.
 async fn import_capture(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
@@ -764,7 +763,7 @@ async fn import_capture(
         .map_err(not_found)?;
 
     let mut stream = req.into_body().into_data_stream();
-    let mut pending: Vec<u8> = Vec::with_capacity(65536);
+    let mut pending: Vec<u8> = Vec::new();
     let mut rows: Vec<FrameRow> = Vec::with_capacity(IMPORT_CHUNK_ROWS);
     let mut imported: u64 = 0;
 
@@ -774,31 +773,14 @@ async fn import_capture(
             .await
             .map_err(|e| ApiError::from(format!("body read failed: {e}")))?;
         let done = chunk.is_none();
-        if let Some(bytes) = chunk {
-            pending.extend_from_slice(&bytes);
-        }
-
-        // Drain complete records from the pending buffer
-        let mut off = 0;
-        while pending.len() >= off + IMPORT_RECORD_HEADER {
-            let plen = pending[off + 13] as usize;
-            let max = RecordKind::Can.max_payload();
-            if plen > max {
-                return Err(ApiError::from(format!(
-                    "record payload length {plen} > {max}"
-                )));
+        // take_record shifts the buffer per record, so it is fed in bounded
+        // pieces: a whole body chunk would make each chunk quadratic.
+        for piece in chunk.iter().flat_map(|bytes| bytes.chunks(IMPORT_FEED_BYTES)) {
+            pending.extend_from_slice(piece);
+            while let Some(r) = take_record(&mut pending).map_err(ApiError::from)? {
+                rows.push(FrameRow::can(r.ts_us, r.id_flags, r.bus, r.payload));
             }
-            if pending.len() < off + IMPORT_RECORD_HEADER + plen {
-                break;
-            }
-            let ts_us = i64::from_le_bytes(pending[off..off + 8].try_into().unwrap());
-            let id_flags = u32::from_le_bytes(pending[off + 8..off + 12].try_into().unwrap());
-            let bus = pending[off + 12];
-            let data = pending[off + 14..off + 14 + plen].to_vec();
-            rows.push(FrameRow::can(ts_us, id_flags, bus, data));
-            off += IMPORT_RECORD_HEADER + plen;
         }
-        pending.drain(..off);
 
         if rows.len() >= IMPORT_CHUNK_ROWS || (done && !rows.is_empty()) {
             crate::ingest::writer::copy_rows(&pool, &rows)
