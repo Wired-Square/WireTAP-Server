@@ -20,10 +20,14 @@
 #   0. Ask whether to move the pinned TimescaleDB image (the backend's deploy
 #      compose, its TrueNAS example, db/Dockerfile). That is a deployment: engine
 #      first, `ALTER EXTENSION timescaledb UPDATE` per database, gateway restart.
-#   1. Write the debian/changelog entry for the new version, by hand. The
-#      pre-release hook refuses to go on without it: it is prose about an
-#      upgrade path, and nothing can generate it.
-#   2. `cargo release <level> -x` — bumps, runs the gates, commits, tags locally.
+#   1. Write the debian/changelog entry by hand, headed
+#      `wiretap-server (<version>) UNRELEASED; urgency=medium`, and commit it.
+#      It is prose about an upgrade path, and nothing can generate it. While
+#      it says UNRELEASED, make-deb.sh and the contract check read the entry
+#      below it, so this commit still builds a package.
+#   2. `cargo release <level> -x` — bumps, stamps that entry with the version
+#      and `bookworm`, runs the gates, commits, tags locally. Without an
+#      UNRELEASED entry the pre-release hook refuses.
 #   3. `git push origin main` — wait for CI to go green on that commit.
 #   4. `git push origin v<version>` — this is what drafts the release, builds
 #      both .deb files and pushes the two-architecture gateway image.
@@ -48,6 +52,14 @@ pre-release-commit-message = "Release v{{version}}"
 # which is the wrong style for this repo and names one arbitrary crate — the tag
 # covers all five. Matches the release title release.yml gives the draft.
 tag-message = "WireTAP Server v{{version}}"
+
+# Stamps the UNRELEASED debian/changelog entry. Every crate runs it, relative to
+# its own directory, and each runs its replacements just before its own hook: so
+# the first crate stamps the entry before any hook reads it, and `min = 0` lets
+# the rest find it done. With no such entry, the hook's contract check refuses.
+pre-release-replacements = [
+    { file = "../../debian/changelog", search = '^wiretap-server \([^)]*\) UNRELEASED;', replace = "wiretap-server ({{version}}) bookworm;", min = 0 },
+]
 
 # Runs after the version is written into Cargo.toml and before anything is
 # committed or tagged, so a tag is never cut from a red tree or from a tree whose

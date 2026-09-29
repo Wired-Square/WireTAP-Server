@@ -89,22 +89,20 @@ done
 cargo_version="$(awk '/^\[workspace\.package\]/{f=1} f && /^version[[:space:]]*=/{gsub(/[",]/,"",$3); print $3; exit}' Cargo.toml)"
 [ -n "$cargo_version" ] || fail "could not read [workspace.package] version from Cargo.toml"
 
-if command -v dpkg-parsechangelog >/dev/null 2>&1; then
-	deb_version="$(dpkg-parsechangelog -l debian/changelog -S Version)"
-else
-	# Same field, without the Debian tooling — this runs on macOS too.
-	deb_version="$(sed -n '1s/^[^(]*(\([^)]*\)).*/\1/p' debian/changelog)"
-fi
-[ -n "$deb_version" ] || fail "could not read a version from debian/changelog"
+# The newest released entry. One headed UNRELEASED is the next release's prose,
+# which the release itself stamps with the version.
+deb_version="$(awk '/^[^ ]/ && !/\) UNRELEASED;/ { sub(/^[^(]*\(/, ""); sub(/\).*/, ""); print; exit }' debian/changelog)"
+[ -n "$deb_version" ] || fail "could not read a released version from debian/changelog"
 
 # debian/changelog carries the packaging revision, so 0.1.0 and 0.1.0-2 are both
 # releases of 0.1.0. Compare the upstream part, which is what must match.
 [ "${deb_version%%-*}" = "$cargo_version" ] || fail "$(cat <<EOF
 debian/changelog names ${deb_version}, Cargo.toml names ${cargo_version}.
 
-Add the entry for ${cargo_version} to debian/changelog before releasing. It is
-prose about an upgrade path and nothing can generate it; make-deb.sh would
-otherwise refuse to build the package, after the tag had been cut.
+Commit an UNRELEASED entry to debian/changelog before releasing, for the release
+to stamp (release.toml, step 1). It is prose about an upgrade path and nothing
+can generate it; make-deb.sh would otherwise refuse to build the package, after
+the tag had been cut.
 EOF
 )"
 

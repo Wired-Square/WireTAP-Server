@@ -171,9 +171,16 @@ same() {  # same <what> <wanted> <got>
 CONF_TOML="$(maint_var postinst CONFIG_DIR)/wiretap-server.toml"
 
 # The changelog is installed into the package, so an entry naming a version no
-# package ever has is documentation of a release that does not exist.
-same "the changelog version" "${version}" \
-	"$(dpkg-parsechangelog -l "${DEBIAN}/changelog" -S Version)"
+# package ever has is documentation of a release that does not exist. An
+# UNRELEASED entry on top is the next release's prose, which a snapshot may
+# carry and a release may not; the entry below it is the one that must match.
+changelog() { dpkg-parsechangelog -l "${DEBIAN}/changelog" "$@"; }
+released_offset=0
+if [ "$(changelog -S Distribution)" = UNRELEASED ]; then
+	[ -z "${tag:-}" ] || die "debian/changelog's newest entry is still UNRELEASED at ${tag}"
+	released_offset=1
+fi
+same "the changelog version" "${version}" "$(changelog -o "${released_offset}" -c 1 -S Version)"
 
 if ! grep -qE '^ExecStart=/usr/bin/wiretap-server( |$)' "${UNIT}"; then
 	die "packaging/${PKG}.service does not ExecStart /usr/bin/wiretap-server.
