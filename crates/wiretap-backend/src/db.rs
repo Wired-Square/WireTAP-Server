@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use tokio::sync::Mutex;
@@ -26,16 +26,39 @@ use crate::schema;
 /// is the same path a gateway restart takes, and it is drilled.
 #[derive(Clone, Debug)]
 pub enum DbSchemaState {
-    Current { version: i32 },
-    Pending { version: i32 },
-    Migrating { since: Instant },
-    Failed { version: i32, error: String },
+    Current {
+        version: i32,
+    },
+    Pending {
+        version: i32,
+    },
+    Migrating {
+        since: Instant,
+    },
+    Failed {
+        version: i32,
+        error: String,
+        since: Instant,
+    },
 }
+
+/// How long a failed database waits before a request may try it again. A NAS
+/// can start the gateway before PostgreSQL accepts connections, and the sweep
+/// then fails every database it reaches.
+const FAILED_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 impl DbSchemaState {
     fn current() -> Self {
         Self::Current {
             version: schema::SCHEMA_VERSION,
+        }
+    }
+
+    fn failed(version: i32, error: String) -> Self {
+        Self::Failed {
+            version,
+            error,
+            since: Instant::now(),
         }
     }
 
@@ -154,7 +177,14 @@ impl Databases {
     /// Bring one database to the current schema, probing it first.
     /// Idempotent, and safe to call on a database that is already current.
     pub async fn migrate_one(&self, name: &str) -> Result<(), String> {
-        let at = self.probe_version(name).await?;
+        let at = match self.probe_version(name).await {
+            Ok(at) => at,
+            Err(e) => {
+                self.set_state(name, DbSchemaState::failed(0, e.clone()))
+                    .await;
+                return Err(e);
+            }
+        };
         self.migrate_from(name, at).await
     }
 
@@ -226,14 +256,8 @@ impl Databases {
             }
             Err(e) => {
                 tracing::error!(database = name, "schema migration failed: {e}");
-                self.set_state(
-                    name,
-                    DbSchemaState::Failed {
-                        version: at.unwrap_or(0),
-                        error: e.clone(),
-                    },
-                )
-                .await;
+                self.set_state(name, DbSchemaState::failed(at.unwrap_or(0), e.clone()))
+                    .await;
             }
         }
         result
@@ -276,14 +300,7 @@ impl Databases {
                     ours.push((name.clone(), v));
                 }
                 Err(e) => {
-                    self.set_state(
-                        name,
-                        DbSchemaState::Failed {
-                            version: 0,
-                            error: e,
-                        },
-                    )
-                    .await;
+                    self.set_state(name, DbSchemaState::failed(0, e)).await;
                 }
             }
         }
@@ -524,28 +541,47 @@ impl Databases {
     /// Refuse anything not at the current schema. A database never seen before —
     /// restored from a backup, or created between sweeps — is migrated here
     /// rather than left permanently unusable, unless automatic migration is off.
+    /// So is one that failed, once [`FAILED_RETRY_INTERVAL`] has passed.
     async fn require_current(&self, name: &str) -> Result<(), String> {
-        let known = self.schema_state.lock().await.get(name).cloned();
-        match known {
-            Some(DbSchemaState::Current { .. }) => Ok(()),
-            Some(state) => Err(format!(
-                "database '{name}' is not ready: schema {}",
-                state.label()
-            )),
-            None if self.config.auto_migrate => {
-                // Owned by the process, not by this request: axum drops a
-                // handler future when the client disconnects, and a migration
-                // dropped mid-flight would leave the state at `Migrating`
-                // forever. Start it and answer "not ready" — every caller
-                // already handles that, and a capture server caches and retries.
-                let this = self.clone();
-                let owned = name.to_string();
-                tokio::spawn(async move { this.migrate_one(&owned).await });
-                Err(format!("database '{name}' is being checked; retry shortly"))
+        let mut states = self.schema_state.lock().await;
+        let check = match states.get(name) {
+            Some(DbSchemaState::Current { .. }) => return Ok(()),
+            Some(DbSchemaState::Failed { since, .. })
+                if self.config.auto_migrate && since.elapsed() >= FAILED_RETRY_INTERVAL =>
+            {
+                // Claimed under the lock, so concurrent requests see it busy
+                // rather than each starting a retry of their own.
+                states.insert(
+                    name.to_string(),
+                    DbSchemaState::Migrating {
+                        since: Instant::now(),
+                    },
+                );
+                true
             }
-            None => Err(format!(
+            Some(state) => {
+                return Err(format!(
+                    "database '{name}' is not ready: schema {}",
+                    state.label()
+                ));
+            }
+            None => self.config.auto_migrate,
+        };
+        drop(states);
+        if check {
+            // Owned by the process, not by this request: axum drops a
+            // handler future when the client disconnects, and a migration
+            // dropped mid-flight would leave the state at `Migrating`
+            // forever. Start it and answer "not ready" — every caller
+            // already handles that, and a capture server caches and retries.
+            let this = self.clone();
+            let owned = name.to_string();
+            tokio::spawn(async move { this.migrate_one(&owned).await });
+            Err(format!("database '{name}' is being checked; retry shortly"))
+        } else {
+            Err(format!(
                 "database '{name}' has not been checked and WIRETAP_AUTO_MIGRATE is off"
-            )),
+            ))
         }
     }
 
@@ -564,5 +600,89 @@ impl Databases {
             self.create_database(name).await?;
         }
         self.pool(name).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiretap_model::Secret;
+
+    fn unreachable_databases(auto_migrate: bool) -> Databases {
+        let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        Databases::new(Arc::new(Config {
+            http_listen: String::new(),
+            ingest_listen: String::new(),
+            pg_host: "127.0.0.1".into(),
+            pg_port: closed_port,
+            pg_user: "postgres".into(),
+            pg_password: Secret::new("unused"),
+            default_database: "wiretap".into(),
+            bootstrap_admin_key: None,
+            auto_create_databases: false,
+            auto_migrate,
+            ingest_keepalive_secs: 30.0,
+            ingest_max_batch_frames: 256,
+            log_buffer: 0,
+        }))
+    }
+
+    fn failed_ago(ago: Duration) -> DbSchemaState {
+        DbSchemaState::Failed {
+            version: 1,
+            error: "connection refused".into(),
+            since: Instant::now().checked_sub(ago).unwrap(),
+        }
+    }
+
+    async fn state_of(dbs: &Databases, name: &str) -> DbSchemaState {
+        dbs.schema_states().await[name].clone()
+    }
+
+    #[tokio::test]
+    async fn a_failed_database_is_retried_once_the_interval_has_passed() {
+        let dbs = unreachable_databases(true);
+
+        dbs.set_state("archive", failed_ago(Duration::ZERO)).await;
+        let early = dbs.require_current("archive").await.unwrap_err();
+        assert!(early.ends_with("schema failed"), "{early}");
+
+        dbs.set_state("archive", failed_ago(FAILED_RETRY_INTERVAL))
+            .await;
+        let due = dbs.require_current("archive").await.unwrap_err();
+        assert!(due.ends_with("being checked; retry shortly"), "{due}");
+
+        let during = dbs.require_current("archive").await.unwrap_err();
+        assert!(during.ends_with("schema migrating"), "{during}");
+
+        let settled = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let DbSchemaState::Failed { since, .. } = state_of(&dbs, "archive").await {
+                    return since;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the retry never settled");
+        assert!(
+            settled.elapsed() < FAILED_RETRY_INTERVAL,
+            "a failed retry restarts the interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_database_stays_failed_when_automatic_migration_is_off() {
+        let dbs = unreachable_databases(false);
+        dbs.set_state("archive", failed_ago(FAILED_RETRY_INTERVAL * 2))
+            .await;
+
+        let answer = dbs.require_current("archive").await.unwrap_err();
+        assert!(answer.ends_with("schema failed"), "{answer}");
+        assert_eq!(state_of(&dbs, "archive").await.label(), "failed");
     }
 }

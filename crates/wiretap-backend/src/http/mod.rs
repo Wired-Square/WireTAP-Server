@@ -967,6 +967,7 @@ mod tests {
                 db::DbSchemaState::Failed {
                     version: 0,
                     error: "boom".into(),
+                    since: Instant::now(),
                 },
             ),
         ]);
@@ -981,6 +982,7 @@ mod tests {
             db::DbSchemaState::Failed {
                 version: 0,
                 error: "connection to sungrow_ben_wired refused".into(),
+                since: Instant::now(),
             },
         )]);
         assert!(!schema_consensus(&s).contains("sungrow"));

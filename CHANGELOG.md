@@ -37,6 +37,10 @@ All notable changes to this project are documented here. Entries go under
 - **`GET /v1/databases` no longer holds a connection open to every capture
   database.** Its rollup probe left one idle for as long as the gateway ran;
   it now connects for the probe and closes the connection after it.
+- **A database that failed its schema check is tried again.** One that failed
+  while PostgreSQL was down, as when the gateway starts first after a reboot,
+  refused reads and writes until a restart. With `WIRETAP_AUTO_MIGRATE` on, a
+  request now retries it once 30 seconds have passed since the failure.
 
 ## [0.1.4] — 2026-09-29
 
