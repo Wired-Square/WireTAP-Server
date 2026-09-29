@@ -767,7 +767,7 @@ async fn import_capture(
         if rows.len() >= IMPORT_CHUNK_ROWS || (done && !rows.is_empty()) {
             crate::ingest::writer::copy_rows(&pool, &rows)
                 .await
-                .map_err(|e| ApiError::from(e.to_string()))?;
+                .map_err(sql::QueryError::from)?;
             imported += rows.len() as u64;
             rows.clear();
         }

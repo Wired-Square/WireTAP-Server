@@ -132,6 +132,22 @@ impl CopyError {
     }
 }
 
+/// A data exception (class 22) or an integrity constraint violation (class 23):
+/// the database refused the rows themselves, so a retry fails the same way.
+pub fn refused_the_rows(code: Option<&SqlState>) -> bool {
+    code.is_some_and(|c| matches!(&c.code()[..2], "22" | "23"))
+}
+
+impl From<CopyError> for crate::sql::QueryError {
+    fn from(e: CopyError) -> Self {
+        if refused_the_rows(e.code.as_ref()) {
+            Self::BadRequest(e.message)
+        } else {
+            Self::Database(e.message)
+        }
+    }
+}
+
 /// COPY a slice of rows into public.capture_frame.
 ///
 /// **The base table, not the `can_frame` view.** The view exists so readers on
@@ -235,5 +251,27 @@ mod tests {
         let err = copy_text(&[row]).unwrap_err();
         assert_eq!(err.code, Some(SqlState::DATETIME_FIELD_OVERFLOW));
         assert!(err.to_string().contains("timestamp out of range"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_import_blames_the_request_only_for_rows_the_database_refused() {
+        use crate::sql::QueryError;
+        let classify = |code: Option<SqlState>| {
+            QueryError::from(CopyError {
+                code,
+                message: "copy finish: db error".into(),
+            })
+        };
+        for code in [
+            SqlState::DATETIME_FIELD_OVERFLOW,
+            SqlState::UNIQUE_VIOLATION,
+        ] {
+            let e = classify(Some(code.clone()));
+            assert!(matches!(e, QueryError::BadRequest(_)), "{code:?}");
+        }
+        for code in [Some(SqlState::CONNECTION_FAILURE), None] {
+            let e = classify(code.clone());
+            assert!(matches!(e, QueryError::Database(_)), "{code:?}");
+        }
     }
 }

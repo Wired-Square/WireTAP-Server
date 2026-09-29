@@ -21,6 +21,9 @@ All notable changes to this project are documented here. Entries go under
   connection could be had. The message is unchanged. A value PostgreSQL
   cannot take, such as an unparseable `start`, is still 400, as are a
   cancelled query and a backend the key may not signal.
+- **A capture import that fails in the database answers 503, not 400.** Rows
+  PostgreSQL refuses with a data exception or integrity violation (SQLSTATE
+  class 22 or 23) are still 400.
 - **Built on `wiretap-lib-rs` v0.19.12**, which adds ingest and import helpers
   and leaves the wire format alone. The ingest spec in the .deb names them.
   The HTTP API's types now come from its `wiretap-gateway`: responses carry

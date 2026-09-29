@@ -229,7 +229,7 @@ impl IngestServer {
     /// Write one batch to Postgres, then ACK. The client only treats frames as
     /// delivered once they are durably stored; a DB failure yields ACK_OVERLOADED
     /// so the device caches and retries (no frames are buffered in gateway RAM),
-    /// unless no retry could store it (see [`ack_for_copy_error`]).
+    /// unless no retry could store it (see [`writer::refused_the_rows`]).
     async fn handle_batch(&self, incoming: IncomingBatch, session: &Session) -> u8 {
         let seq = incoming.batch.seq;
         let rows: Vec<FrameRow> = incoming
@@ -257,13 +257,11 @@ impl IngestServer {
     }
 }
 
-/// ACK_MALFORMED for a refusal of the rows themselves, a data exception
-/// (class 22) or an integrity constraint violation (class 23), which would fail
-/// identically on every retry; ACK_OVERLOADED for anything that may pass later.
 fn ack_for_copy_error(code: Option<&SqlState>) -> u8 {
-    match code.map(|c| &c.code()[..2]) {
-        Some("22" | "23") => ACK_MALFORMED,
-        _ => ACK_OVERLOADED,
+    if writer::refused_the_rows(code) {
+        ACK_MALFORMED
+    } else {
+        ACK_OVERLOADED
     }
 }
 
