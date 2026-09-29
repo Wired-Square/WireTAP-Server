@@ -99,14 +99,15 @@ jobs:
       # with the rest of this job rather than repeated inside an image build.
       #
       # NOTE: this duplicates the `timescaledb` service in
-      # crates/wiretap-backend/docker-compose.yml and the two must move
-      # together. It cannot be shared — an Actions service container accepts no
-      # `command:`, so the compose file's
+      # crates/wiretap-backend/docker-compose.yml, and its image is the engine
+      # the deployments pin (db/Dockerfile); they move together. It cannot be
+      # shared — an Actions service container accepts no `command:`, so the
+      # compose file's
       # `-c shared_preload_libraries=timescaledb` cannot be passed here, and
       # this relies on the image's own entrypoint running `timescaledb-tune` at
       # init. If `CREATE EXTENSION timescaledb` ever fails, that is why.
       timescaledb:
-        image: timescale/timescaledb:latest-pg16
+        image: timescale/timescaledb:2.29.2-pg16
         env:
           # Throwaway, for a container reachable only from this job.
           POSTGRES_PASSWORD: ci-postgres

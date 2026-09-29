@@ -18,8 +18,9 @@
 # follow a green run, which means:
 #
 #   0. Ask whether to move the pinned TimescaleDB image (the backend's deploy
-#      compose, its TrueNAS example, db/Dockerfile). That is a deployment: engine
-#      first, `ALTER EXTENSION timescaledb UPDATE` per database, gateway restart.
+#      compose, its TrueNAS example, db/Dockerfile, CI's service in ci.yml).
+#      That is a deployment: engine first, `ALTER EXTENSION timescaledb UPDATE`
+#      per database, gateway restart.
 #   1. Write the debian/changelog entry by hand, headed
 #      `wiretap-server (<version>) UNRELEASED; urgency=medium`, and commit it.
 #      It is prose about an upgrade path, and nothing can generate it. While
