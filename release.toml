@@ -17,6 +17,9 @@
 # ref — so a tag pushed alongside its commit races CI and loses. The tag has to
 # follow a green run, which means:
 #
+#   0. Ask whether to move the pinned TimescaleDB image (the backend's deploy
+#      compose, its TrueNAS example, db/Dockerfile). That is a deployment: engine
+#      first, `ALTER EXTENSION timescaledb UPDATE` per database, gateway restart.
 #   1. Write the debian/changelog entry for the new version, by hand. The
 #      pre-release hook refuses to go on without it: it is prose about an
 #      upgrade path, and nothing can generate it.
