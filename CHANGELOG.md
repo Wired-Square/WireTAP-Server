@@ -26,6 +26,9 @@ All notable changes to this project are documented here. Entries go under
 
 ### Fixed
 
+- **The Ingest view no longer lists sessions that have gone.** A device that
+  sent a second HELLO, or whose connection failed mid-reply, left its entry
+  behind until the gateway restarted.
 - **`GET /v1/databases` no longer holds a connection open to every capture
   database.** Its rollup probe left one idle for as long as the gateway ran;
   it now connects for the probe and closes the connection after it.

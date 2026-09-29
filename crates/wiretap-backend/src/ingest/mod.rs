@@ -51,6 +51,10 @@ impl Sessions {
         self.inner.lock().await.insert(id, info);
         id
     }
+
+    async fn close(&self, id: u64) {
+        self.inner.lock().await.remove(&id);
+    }
 }
 
 pub struct IngestServer {
@@ -90,7 +94,21 @@ impl IngestServer {
         }
     }
 
-    async fn handle_client(&self, mut stream: TcpStream, peer: &str) -> Result<(), String> {
+    async fn handle_client(&self, stream: TcpStream, peer: &str) -> Result<(), String> {
+        let mut authed = None;
+        let result = self.serve(stream, peer, &mut authed).await;
+        if let Some(session) = authed {
+            self.sessions.close(session.id).await;
+        }
+        result
+    }
+
+    async fn serve(
+        &self,
+        mut stream: TcpStream,
+        peer: &str,
+        authed: &mut Option<Session>,
+    ) -> Result<(), String> {
         let mut machine = ServerSession::new(ServerConfig {
             accept_v1: true,
             max_records: self.config.ingest_max_batch_frames,
@@ -101,15 +119,14 @@ impl IngestServer {
         });
         let idle_limit = machine.idle_limit().unwrap_or(Duration::MAX);
         let mut read_buf = [0u8; 65536];
-        let mut authed: Option<Session> = None;
 
-        let result = loop {
+        loop {
             // Read with idle timeout (any traffic counts as keepalive)
             let n = match tokio::time::timeout(idle_limit, stream.read(&mut read_buf)).await {
-                Ok(Ok(0)) => break Ok(()),
+                Ok(Ok(0)) => return Ok(()),
                 Ok(Ok(n)) => n,
-                Ok(Err(e)) => break Err(format!("read: {e}")),
-                Err(_) => break Err("idle timeout".into()),
+                Ok(Err(e)) => return Err(format!("read: {e}")),
+                Err(_) => return Err("idle timeout".into()),
             };
             machine.receive(&read_buf[..n]);
 
@@ -119,7 +136,9 @@ impl IngestServer {
                     Action::Hello(hello) => {
                         let status = match self.handle_hello(&hello, peer).await {
                             Ok(session) => {
-                                authed = Some(session);
+                                if let Some(previous) = authed.replace(session) {
+                                    self.sessions.close(previous.id).await;
+                                }
                                 HELLO_OK
                             }
                             Err(status) => status,
@@ -134,34 +153,15 @@ impl IngestServer {
                         machine.ack(seq, status, 0)
                     }
                     Action::Nack { seq, status } => machine.ack(seq, status, 0),
-                    Action::Close(CloseReason::Refused(_)) => {
-                        return self.finish(authed, Ok(())).await
-                    }
-                    Action::Close(reason) => {
-                        return self
-                            .finish(authed, Err(format!("closed: {reason:?}")))
-                            .await
-                    }
+                    Action::Close(CloseReason::Refused(_)) => return Ok(()),
+                    Action::Close(reason) => return Err(format!("closed: {reason:?}")),
                 };
                 stream
                     .write_all(&reply)
                     .await
                     .map_err(|e| format!("write: {e}"))?;
             }
-        };
-        self.finish(authed, result).await
-    }
-
-    /// Deregister the session (if any) and pass the result through.
-    async fn finish(
-        &self,
-        authed: Option<Session>,
-        result: Result<(), String>,
-    ) -> Result<(), String> {
-        if let Some(session) = authed {
-            self.sessions.inner.lock().await.remove(&session.id);
         }
-        result
     }
 
     /// The established session, or the status that refuses the HELLO.
