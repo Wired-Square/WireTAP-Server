@@ -1,4 +1,4 @@
-wiretap-server (0.1.5) UNRELEASED; urgency=medium
+wiretap-server (0.1.5) bookworm; urgency=medium
 
   * A batch the gateway refuses for its contents is kept in
     cache.dead-letter.db beside the disk cache, in the cache's own format,
