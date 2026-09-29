@@ -7,8 +7,12 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
-- **Built on `wiretap-lib-rs` v0.20.0**, which takes the id width when
+- **Built on `wiretap-lib-rs` v0.20.1**, which takes the id width when
   recognising a Test Pattern frame and leaves the wire format alone.
+- **A line's catalogue is read for its Modbus RTU rules and name only**, which
+  makes the musl binary about 290 KB smaller. A catalogue's other sections,
+  such as its frames, `meta.version` and endianness, are no longer checked at
+  startup.
 
 ### Fixed
 
@@ -17,6 +21,8 @@ All notable changes to this project are documented here. Entries go under
   extended `0x7E5`, was taken for a Test Pattern frame, and during a run was
   echoed as a sweep request. The 11-bit ids are now matched on standard frames
   only.
+- **A catalogue with an empty `meta.name` is refused at startup**, as one
+  with no name at all already was, rather than listed nameless.
 
 ## [0.1.5] — 2026-09-29
 

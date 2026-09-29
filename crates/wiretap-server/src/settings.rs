@@ -14,7 +14,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use wiretap_catalog::{validate::validate, Catalog, LineSettings, ModbusRtuOptions, Parity};
+use wiretap_catalog::{rtu_rules, LineSettings, ModbusRtuOptions, Parity};
 use wiretap_model::config::{DeviceSection, FileConfig};
 use wiretap_model::{parse_ifaces, Direction, Secret, SourceId};
 use wiretap_protocol::ingest::valid_database_name;
@@ -162,23 +162,21 @@ impl LineCatalogue {
         Self::read(path)
     }
 
-    /// Validated before it is parsed: the parser drops a rule it cannot read,
-    /// which leaves that code to the CRC search.
+    /// Refuses a rule the parser would drop, which would leave that code to the
+    /// CRC search.
     pub(crate) fn read(path: &str) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read catalog {path}: {e}"))?;
-        let findings: Vec<String> = validate(&text)
-            .into_iter()
-            .map(|f| format!("{}: {}", f.field, f.message))
-            .collect();
-        if !findings.is_empty() {
-            return Err(format!("catalog {path}: {}", findings.join("; ")));
+        let r = rtu_rules(&text).map_err(|e| format!("catalog {path}: {e}"))?;
+        if r.name.is_empty() {
+            return Err(format!(
+                "catalog {path}: meta.name: Catalog name must not be empty"
+            ));
         }
-        let catalog = Catalog::parse(&text).map_err(|e| format!("catalog {path}: {e}"))?;
         Ok(Self {
             path: path.to_owned(),
-            rtu: catalog.rtu_options(),
-            name: catalog.meta.name,
+            rtu: r.options,
+            name: r.name,
         })
     }
 }
@@ -1981,7 +1979,7 @@ mod tests {
     const DECLARES_0X60: &str = "[meta]\nname = \"test\"\n[meta.modbus.function_code.0x60]\n";
 
     #[test]
-    fn a_catalogue_is_validated_before_it_is_parsed() {
+    fn a_catalogue_rule_the_parser_would_drop_is_refused() {
         let valid = catalogue_file(
             "valid",
             &format!("{DECLARES_0X60}lengths = [{{ len = {{ fixed = 11 }} }}]\n"),
@@ -1998,14 +1996,17 @@ mod tests {
         let broken = catalogue_file("syntax", "[meta\n");
         let err = LineCatalogue::read(&broken).unwrap_err();
         assert!(
-            err.starts_with(&format!("catalog {broken}: toml: ")),
+            err.starts_with(&format!("catalog {broken}: catalogue is not valid TOML: ")),
             "{err}"
         );
         std::fs::remove_file(&broken).unwrap();
 
         let no_len =
             format!("{DECLARES_0X60}lengths = [{{ when = {{ offset = 4, value = 3 }} }}]\n");
-        assert!(Catalog::parse(&no_len).is_ok(), "the parser drops the rule");
+        assert!(
+            wiretap_catalog::Catalog::parse(&no_len).is_ok(),
+            "the parser drops the rule"
+        );
         let dropped = catalogue_file("no-len", &no_len);
         let err = LineCatalogue::read(&dropped).unwrap_err();
         assert!(
@@ -2015,6 +2016,29 @@ mod tests {
             "{err}"
         );
         std::fs::remove_file(&dropped).unwrap();
+    }
+
+    #[test]
+    fn a_catalogue_named_nothing_is_refused() {
+        let path = catalogue_file("unnamed", &DECLARES_0X60.replace("\"test\"", "\"\""));
+        let err = LineCatalogue::read(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            err.unwrap_err(),
+            format!("catalog {path}: meta.name: Catalog name must not be empty")
+        );
+    }
+
+    #[test]
+    fn a_catalogue_with_no_name_is_refused() {
+        let path = catalogue_file("nameless", "[meta]\n[meta.modbus.function_code.0x60]\n");
+        let err = LineCatalogue::read(&path);
+        std::fs::remove_file(&path).unwrap();
+        let err = err.unwrap_err();
+        assert!(
+            err.starts_with(&format!("catalog {path}: meta.name")),
+            "{err}"
+        );
     }
 
     #[test]

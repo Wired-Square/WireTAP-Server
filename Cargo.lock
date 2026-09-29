@@ -2581,8 +2581,8 @@ version = "0.1.5"
 
 [[package]]
 name = "wiretap-catalog"
-version = "0.20.0"
-source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.0#a3639d7c858596c4e484622761099fcbda6063ff"
+version = "0.20.1"
+source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.1#7bcaf8a91a9301ed4fae13e51488d66168952079"
 dependencies = [
  "can-dbc",
  "rust_decimal",
@@ -2598,8 +2598,8 @@ dependencies = [
 
 [[package]]
 name = "wiretap-checksum"
-version = "0.20.0"
-source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.0#a3639d7c858596c4e484622761099fcbda6063ff"
+version = "0.20.1"
+source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.1#7bcaf8a91a9301ed4fae13e51488d66168952079"
 dependencies = [
  "rayon",
  "serde",
@@ -2608,8 +2608,8 @@ dependencies = [
 
 [[package]]
 name = "wiretap-decode"
-version = "0.20.0"
-source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.0#a3639d7c858596c4e484622761099fcbda6063ff"
+version = "0.20.1"
+source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.1#7bcaf8a91a9301ed4fae13e51488d66168952079"
 dependencies = [
  "rust_decimal",
  "serde",
@@ -2617,16 +2617,16 @@ dependencies = [
 
 [[package]]
 name = "wiretap-gateway"
-version = "0.20.0"
-source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.0#a3639d7c858596c4e484622761099fcbda6063ff"
+version = "0.20.1"
+source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.1#7bcaf8a91a9301ed4fae13e51488d66168952079"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "wiretap-io"
-version = "0.20.0"
-source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.0#a3639d7c858596c4e484622761099fcbda6063ff"
+version = "0.20.1"
+source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.1#7bcaf8a91a9301ed4fae13e51488d66168952079"
 dependencies = [
  "libc",
  "nix 0.29.0",
@@ -2649,13 +2649,13 @@ dependencies = [
 
 [[package]]
 name = "wiretap-protocol"
-version = "0.20.0"
-source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.0#a3639d7c858596c4e484622761099fcbda6063ff"
+version = "0.20.1"
+source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.1#7bcaf8a91a9301ed4fae13e51488d66168952079"
 
 [[package]]
 name = "wiretap-serialport"
 version = "0.1.0"
-source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.0#a3639d7c858596c4e484622761099fcbda6063ff"
+source = "git+https://github.com/Wired-Square/wiretap-lib-rs.git?tag=v0.20.1#7bcaf8a91a9301ed4fae13e51488d66168952079"
 dependencies = [
  "serialport",
 ]
