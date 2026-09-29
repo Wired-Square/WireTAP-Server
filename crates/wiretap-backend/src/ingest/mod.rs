@@ -30,6 +30,7 @@ pub struct IngestSessionInfo {
     pub peer: String,
     pub key_name: String,
     pub database: String,
+    pub protocol_version: u8,
     pub frames: u64,
     pub batches: u64,
     pub connected_at: DateTime<Utc>,
@@ -44,6 +45,12 @@ pub struct Sessions {
 impl Sessions {
     pub async fn list(&self) -> Vec<IngestSessionInfo> {
         self.inner.lock().await.values().cloned().collect()
+    }
+
+    async fn open(&self, info: IngestSessionInfo) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.inner.lock().await.insert(id, info);
+        id
     }
 }
 
@@ -220,18 +227,18 @@ impl IngestServer {
             }
         };
 
-        let session_id = self.sessions.next_id.fetch_add(1, Ordering::Relaxed);
-        self.sessions.inner.lock().await.insert(
-            session_id,
-            IngestSessionInfo {
+        let session_id = self
+            .sessions
+            .open(IngestSessionInfo {
                 peer: peer.to_string(),
                 key_name: info.name,
                 database: database.clone(),
+                protocol_version: hello.version,
                 frames: 0,
                 batches: 0,
                 connected_at: Utc::now(),
-            },
-        );
+            })
+            .await;
         tracing::info!(
             "ingest client {peer} authenticated, database '{database}', protocol v{}",
             hello.version
@@ -289,5 +296,28 @@ impl IngestServer {
                 proto::encode_ack(seq, ACK_OVERLOADED, 0)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_sessions_listing_names_each_sessions_protocol_version() {
+        let sessions = Sessions::default();
+        sessions
+            .open(IngestSessionInfo {
+                peer: "192.0.2.10:40000".into(),
+                key_name: "bench".into(),
+                database: "wiretap".into(),
+                protocol_version: 2,
+                frames: 0,
+                batches: 0,
+                connected_at: Utc::now(),
+            })
+            .await;
+        let listed = serde_json::to_value(sessions.list().await).unwrap();
+        assert_eq!(listed[0]["protocol_version"], 2);
     }
 }

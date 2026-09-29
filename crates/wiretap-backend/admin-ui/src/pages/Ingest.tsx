@@ -29,6 +29,7 @@ export default function Ingest() {
             <th>Peer</th>
             <th>Key</th>
             <th>Database</th>
+            <th>Protocol</th>
             <th>Frames</th>
             <th>Batches</th>
             <th>Connected</th>
@@ -40,6 +41,7 @@ export default function Ingest() {
               <td className="mono">{s.peer}</td>
               <td>{s.key_name}</td>
               <td className="mono">{s.database}</td>
+              <td>v{s.protocol_version}</td>
               <td>{s.frames.toLocaleString()}</td>
               <td>{s.batches.toLocaleString()}</td>
               <td className="muted">{new Date(s.connected_at).toLocaleTimeString()}</td>
@@ -47,7 +49,7 @@ export default function Ingest() {
           ))}
           {sessions.length === 0 && (
             <tr>
-              <td colSpan={6} className="muted">
+              <td colSpan={7} className="muted">
                 No ingest devices connected. (Refreshes every 2 s.)
               </td>
             </tr>

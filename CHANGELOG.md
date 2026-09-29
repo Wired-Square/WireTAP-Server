@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **The admin UI's Ingest tab shows each device's protocol version**, from
+  `protocol_version` on each entry of `GET /v1/admin/ingest-sessions`: the
+  version the device's HELLO spoke.
+
 ## [0.1.4] — 2026-09-29
 
 The capture daemon reads CAN and serial lines through `wiretap-lib-rs`, frames

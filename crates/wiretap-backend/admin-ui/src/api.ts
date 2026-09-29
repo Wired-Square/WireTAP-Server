@@ -129,6 +129,7 @@ export interface IngestSession {
   peer: string;
   key_name: string;
   database: string;
+  protocol_version: number;
   frames: number;
   batches: number;
   connected_at: string;
