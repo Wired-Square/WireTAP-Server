@@ -17,12 +17,11 @@ use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use wiretap_protocol::ingest as proto;
+use wiretap_protocol::ingest::*;
 
 use crate::config::Config;
 use crate::db::Databases;
 use crate::keys::KeyStore;
-use proto::*;
 use writer::{copy_rows, FrameRow};
 
 #[derive(Debug, Serialize, Clone)]
@@ -65,9 +64,6 @@ pub struct IngestServer {
 struct Session {
     pool: Pool,
     id: u64,
-    time_relative: bool,
-    /// The parser for the version the client announced.
-    parse: BatchParser,
 }
 
 impl IngestServer {
@@ -95,8 +91,15 @@ impl IngestServer {
     }
 
     async fn handle_client(&self, mut stream: TcpStream, peer: &str) -> Result<(), String> {
-        let idle_limit = Duration::from_secs_f64(self.config.ingest_keepalive_secs * 3.0);
-        let mut buf: Vec<u8> = Vec::with_capacity(8192);
+        let mut machine = ServerSession::new(ServerConfig {
+            accept_v1: true,
+            max_records: self.config.ingest_max_batch_frames,
+            short_batch: ShortBatch::NackSeqZero,
+            idle_limit: Some(Duration::from_secs_f64(
+                self.config.ingest_keepalive_secs * 3.0,
+            )),
+        });
+        let idle_limit = machine.idle_limit().unwrap_or(Duration::MAX);
         let mut read_buf = [0u8; 65536];
         let mut authed: Option<Session> = None;
 
@@ -108,59 +111,42 @@ impl IngestServer {
                 Ok(Err(e)) => break Err(format!("read: {e}")),
                 Err(_) => break Err("idle timeout".into()),
             };
-            buf.extend_from_slice(&read_buf[..n]);
+            machine.receive(&read_buf[..n]);
 
-            loop {
-                let frame = match proto::take_frame(&mut buf) {
-                    Ok(Some(f)) => f,
-                    Ok(None) => break,
-                    Err(e) => return self.finish(authed, Err(e)).await,
-                };
-
-                if !frame.crc_ok {
-                    // Best effort: a corrupt BATCH can be retried by seq
-                    if frame.mtype == MSG_BATCH && frame.body.len() >= 4 {
-                        let seq = u32::from_le_bytes(frame.body[0..4].try_into().unwrap());
-                        stream
-                            .write_all(&proto::encode_ack(seq, ACK_CRC, 0))
-                            .await
-                            .map_err(|e| format!("write: {e}"))?;
-                    }
-                    continue;
-                }
-
-                match frame.mtype {
-                    MSG_HELLO => match self.handle_hello(&frame.body, peer).await {
-                        Ok((ack, session)) => {
-                            stream
-                                .write_all(&ack)
-                                .await
-                                .map_err(|e| format!("write: {e}"))?;
-                            match session {
-                                Some(s) => authed = Some(s),
-                                None => return self.finish(authed, Ok(())).await,
+            while let Some(action) = machine.poll() {
+                let reply = match action {
+                    Action::Reply(bytes) => bytes,
+                    Action::Hello(hello) => {
+                        let status = match self.handle_hello(&hello, peer).await {
+                            Ok(session) => {
+                                authed = Some(session);
+                                HELLO_OK
                             }
-                        }
-                        Err(e) => return self.finish(authed, Err(e)).await,
-                    },
-                    MSG_PING => {
-                        stream
-                            .write_all(&proto::encode_message(MSG_PONG, b""))
-                            .await
-                            .map_err(|e| format!("write: {e}"))?;
-                    }
-                    MSG_BATCH => {
-                        let Some(session) = authed.as_ref() else {
-                            return self.finish(authed, Err("batch before hello".into())).await;
+                            Err(status) => status,
                         };
-                        let ack = self.handle_batch(&frame.body, session).await;
-                        stream
-                            .write_all(&ack)
-                            .await
-                            .map_err(|e| format!("write: {e}"))?;
+                        machine.answer_hello(status, now_us())
                     }
-                    _ => {} // unknown type: ignore (forward compatibility)
-                }
+                    Action::HelloRefused(status) => machine.answer_hello(status, now_us()),
+                    Action::Batch(incoming) => {
+                        let session = authed.as_ref().expect("a batch follows an accepted HELLO");
+                        let seq = incoming.batch.seq;
+                        let status = self.handle_batch(incoming, session).await;
+                        machine.ack(seq, status, 0)
+                    }
+                    Action::Nack { seq, status } => machine.ack(seq, status, 0),
+                    Action::Close(CloseReason::Refused(_)) => {
+                        return self.finish(authed, Ok(())).await
+                    }
+                    Action::Close(reason) => {
+                        return self
+                            .finish(authed, Err(format!("closed: {reason:?}")))
+                            .await
+                    }
+                };
+                stream
+                    .write_all(&reply)
+                    .await
+                    .map_err(|e| format!("write: {e}"))?;
             }
         };
         self.finish(authed, result).await
@@ -178,29 +164,16 @@ impl IngestServer {
         result
     }
 
-    /// Returns the HELLO_ACK to send plus the established session (None when
-    /// the ACK is a rejection and the connection should close after sending).
-    async fn handle_hello(
-        &self,
-        body: &[u8],
-        peer: &str,
-    ) -> Result<(Vec<u8>, Option<Session>), String> {
-        let now_us = Utc::now().timestamp_micros() as u64;
-        let reject = |status: u8| Ok((proto::encode_hello_ack(status, now_us), None));
-
-        let hello = proto::parse_hello(body).map_err(|e| format!("bad hello: {e}"))?;
-        let Some(parse) = proto::batch_parser(hello.version) else {
-            return reject(HELLO_BAD_VERSION);
-        };
-
+    /// The established session, or the status that refuses the HELLO.
+    async fn handle_hello(&self, hello: &Hello, peer: &str) -> Result<Session, u8> {
         let key = String::from_utf8_lossy(&hello.token).into_owned();
         let Some(info) = self.keys.validate(&key).await else {
             tracing::warn!("ingest client {peer} failed auth");
-            return reject(HELLO_BAD_AUTH);
+            return Err(HELLO_BAD_AUTH);
         };
         if !info.role.allows_ingest() {
             tracing::warn!("ingest client {peer} key '{}' lacks ingest role", info.name);
-            return reject(HELLO_BAD_AUTH);
+            return Err(HELLO_BAD_AUTH);
         }
 
         // Resolve the target database: explicit > key pin > server default.
@@ -212,7 +185,7 @@ impl IngestServer {
                     "ingest client {peer} key '{}' pinned to '{pin}' requested '{requested}'",
                     info.name
                 );
-                return reject(HELLO_BAD_AUTH);
+                return Err(HELLO_BAD_AUTH);
             }
             (Some(pin), _) => pin.clone(),
             (None, "") => self.dbs.default_database().to_string(),
@@ -223,7 +196,7 @@ impl IngestServer {
             Ok(pool) => pool,
             Err(e) => {
                 tracing::warn!("ingest client {peer}: database '{database}': {e}");
-                return reject(HELLO_BAD_DATABASE);
+                return Err(HELLO_BAD_DATABASE);
             }
         };
 
@@ -243,30 +216,20 @@ impl IngestServer {
             "ingest client {peer} authenticated, database '{database}', protocol v{}",
             hello.version
         );
-        Ok((
-            proto::encode_hello_ack(HELLO_OK, now_us),
-            Some(Session {
-                pool,
-                id: session_id,
-                time_relative: hello.time_relative,
-                parse,
-            }),
-        ))
+        Ok(Session {
+            pool,
+            id: session_id,
+        })
     }
 
     /// Write one batch to Postgres, then ACK. The client only treats frames as
     /// delivered once they are durably stored; a DB failure yields ACK_OVERLOADED
     /// so the device caches and retries (no frames are buffered in gateway RAM).
-    async fn handle_batch(&self, body: &[u8], session: &Session) -> Vec<u8> {
-        let batch = match (session.parse)(body, self.config.ingest_max_batch_frames) {
-            None => return proto::encode_ack(0, ACK_MALFORMED, 0),
-            Some(Err(seq)) => return proto::encode_ack(seq, ACK_MALFORMED, 0),
-            Some(Ok(b)) => b,
-        };
-
-        let seq = batch.seq;
-        let rows: Vec<FrameRow> = batch
-            .stamped(session.time_relative, Utc::now().timestamp_micros() as u64)
+    async fn handle_batch(&self, incoming: IncomingBatch, session: &Session) -> u8 {
+        let seq = incoming.batch.seq;
+        let rows: Vec<FrameRow> = incoming
+            .batch
+            .stamped(incoming.time_relative, now_us())
             .map(|(ts_us, r)| {
                 FrameRow::new(ts_us as i64, r.kind, r.id_flags, r.flags, r.bus, r.payload)
             })
@@ -279,14 +242,18 @@ impl IngestServer {
                     s.frames += count;
                     s.batches += 1;
                 }
-                proto::encode_ack(seq, ACK_OK, 0)
+                ACK_OK
             }
             Err(e) => {
                 tracing::warn!("ingest write failed (seq {seq}): {e}");
-                proto::encode_ack(seq, ACK_OVERLOADED, 0)
+                ACK_OVERLOADED
             }
         }
     }
+}
+
+fn now_us() -> u64 {
+    Utc::now().timestamp_micros() as u64
 }
 
 #[cfg(test)]
