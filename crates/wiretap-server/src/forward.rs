@@ -99,6 +99,14 @@ impl ForwardSink {
         }
         let ack = proto::parse_ack(&frame.body)
             .map_err(|_| SinkError("forward: malformed ACK".into()))?;
+        // A gateway that cannot read a batch's seq refuses it as seq 0.
+        let unread_seq = ack.seq == 0 && ack.status == proto::ACK_MALFORMED;
+        if ack.seq != seq && !unread_seq {
+            return Err(SinkError(format!(
+                "forward: ACK for seq={} while awaiting seq={seq}",
+                ack.seq
+            )));
+        }
         match ack.status {
             proto::ACK_OK => Ok(()),
             // Back-pressure, and the reason this protocol has an ACK at all:
@@ -861,5 +869,39 @@ mod tests {
             err.to_string().starts_with("forward: connect failed"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_ack_carrying_another_batchs_seq_fails_the_exchange() {
+        let (port, gateway) = fake_gateway(Script::default()).await;
+        let mut s = sink(port, "");
+        s.connect().await.unwrap();
+        s.send_chunk(&[sample(1, 1)], 1)
+            .await
+            .expect("acknowledged");
+        let stale = proto::encode_ack(1, proto::ACK_OK, 0);
+        s.conn.as_mut().unwrap().rx.extend_from_slice(&stale);
+
+        let err = s.send_chunk(&[sample(2, 2)], 2).await.unwrap_err();
+        assert!(err.to_string().contains("seq=1"), "{err}");
+        assert!(err.to_string().contains("seq=2"), "{err}");
+        s.close().await;
+        let _ = gateway.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_malformed_nack_for_seq_zero_is_still_quarantined() {
+        let dir = TempDir::new("seq-zero");
+        let (port, gateway) = fake_gateway(Script::default()).await;
+        let mut s = sink_caching_at(port, dir.0.join("cache.db"));
+        s.connect().await.unwrap();
+        let unread_seq = proto::encode_ack(0, proto::ACK_MALFORMED, 0);
+        s.conn.as_mut().unwrap().rx.extend_from_slice(&unread_seq);
+
+        s.send_chunk(&[sample(1, 1)], 1)
+            .await
+            .expect("quarantined, not failed");
+        s.close().await;
+        let _ = gateway.await;
     }
 }

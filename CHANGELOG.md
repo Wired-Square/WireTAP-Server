@@ -31,6 +31,11 @@ All notable changes to this project are documented here. Entries go under
 
 ### Fixed
 
+- **The capture server checks that an ACK is for the batch it sent.** One
+  carrying another batch's sequence number was taken as this batch's answer;
+  it now fails the exchange, and the batch is cached and retried. A
+  "malformed" answer for sequence 0, which the gateway gives a batch it
+  cannot read one from, is handled as before.
 - **The Ingest view no longer lists sessions that have gone.** A device that
   sent a second HELLO, or whose connection failed mid-reply, left its entry
   behind until the gateway restarted.
