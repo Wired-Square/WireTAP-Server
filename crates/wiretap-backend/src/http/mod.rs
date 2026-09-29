@@ -15,7 +15,7 @@ use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use wiretap_protocol::import::take_record;
+use wiretap_protocol::import::parse_record;
 use wiretap_protocol::ingest::RecordKind;
 
 use crate::db;
@@ -737,7 +737,6 @@ struct ImportQuery {
 }
 
 const IMPORT_CHUNK_ROWS: usize = 8192;
-const IMPORT_FEED_BYTES: usize = 4096;
 
 /// Streaming capture import: the body is `wiretap_protocol::import` records
 /// back to back, COPYed in chunks as it streams.
@@ -774,14 +773,11 @@ async fn import_capture(
             .await
             .map_err(|e| ApiError::from(format!("body read failed: {e}")))?;
         let done = chunk.is_none();
-        // take_record shifts the buffer per record, so it is fed in bounded
-        // pieces: a whole body chunk would make each chunk quadratic.
-        for piece in chunk
-            .iter()
-            .flat_map(|bytes| bytes.chunks(IMPORT_FEED_BYTES))
-        {
-            pending.extend_from_slice(piece);
-            while let Some(r) = take_record(&mut pending).map_err(ApiError::from)? {
+        if let Some(bytes) = chunk {
+            pending.extend_from_slice(&bytes);
+            let mut read = 0;
+            while let Some((r, consumed)) = parse_record(&pending[read..])? {
+                read += consumed;
                 rows.push(FrameRow::new(
                     r.ts_us,
                     RecordKind::Can,
@@ -791,6 +787,7 @@ async fn import_capture(
                     r.payload,
                 ));
             }
+            pending.drain(..read);
         }
 
         if rows.len() >= IMPORT_CHUNK_ROWS || (done && !rows.is_empty()) {
