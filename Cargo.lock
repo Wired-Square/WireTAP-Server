@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap-backend"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "axum",
  "base64",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap-build-id"
-version = "0.1.5"
+version = "0.1.6"
 
 [[package]]
 name = "wiretap-catalog"
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap-model"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2662,7 +2662,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap-server"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "libc",

@@ -1,4 +1,4 @@
-wiretap-server (0.1.6) UNRELEASED; urgency=medium
+wiretap-server (0.1.6) bookworm; urgency=medium
 
   * A modbus-rtu line's catalogue is read for its RTU rules and name only,
     and the binary is about 290 KB smaller. Its other sections (frames,
