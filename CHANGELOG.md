@@ -5,6 +5,11 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Changed
+
+- **Built on `wiretap-lib-rs` v0.20.2.** A catalogue whose `meta.name` is not a
+  string is refused as such, rather than as an empty name.
+
 ## [0.1.6] — 2026-09-29
 
 The capture daemon reads a line's catalogue for its Modbus RTU rules alone,
@@ -13,7 +18,7 @@ request. No gateway or schema change.
 
 ### Changed
 
-- **Built on `wiretap-lib-rs` v0.20.1**, which takes the id width when
+- **Built on `wiretap-lib-rs` v0.20.2**, which takes the id width when
   recognising a Test Pattern frame and leaves the wire format alone.
 - **A line's catalogue is read for its Modbus RTU rules and name only**, which
   makes the musl binary about 290 KB smaller. A catalogue's other sections,

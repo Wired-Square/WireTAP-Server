@@ -2030,6 +2030,17 @@ mod tests {
     }
 
     #[test]
+    fn a_catalogue_whose_name_is_not_a_string_says_so() {
+        let path = catalogue_file("numbered", &DECLARES_0X60.replace("\"test\"", "5"));
+        let err = LineCatalogue::read(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            err.unwrap_err(),
+            format!("catalog {path}: meta.name: Catalog name must be a string")
+        );
+    }
+
+    #[test]
     fn a_catalogue_with_no_name_is_refused() {
         let path = catalogue_file("nameless", "[meta]\n[meta.modbus.function_code.0x60]\n");
         let err = LineCatalogue::read(&path);
