@@ -289,12 +289,10 @@ fn schema_consensus(states: &std::collections::HashMap<String, db::DbSchemaState
 /// an earlier version measured only the newest stored bucket, which reports a
 /// rollup with a hole underneath as healthy — the exact state worth showing.
 async fn rollup_state(dbs: &db::Databases, name: &str) -> Option<(&'static str, Option<i64>)> {
-    // Pooled, not `connect_raw`: both admin pages poll this every 2 s while
-    // anything is busy, and a fresh connect per database per poll is a backend
-    // process and a SCRAM handshake each time. Callers only reach here for a
-    // database already known Current, so the pool's own gate passes through.
-    let pool = dbs.pool(name).await.ok()?;
-    let client = pool.get().await.ok()?;
+    // Not pooled: a pool keeps its idle connection for good, so probing every
+    // database through one left a backend open per database for days. A
+    // connect per poll costs little, as the UI polls only while something is busy.
+    let client = dbs.connect_raw(name).await.ok()?;
     match schema::rollup_status(&client).await.ok()? {
         schema::RollupState::Empty => Some(("empty", None)),
         schema::RollupState::Incomplete => Some(("incomplete", None)),
@@ -1022,6 +1020,8 @@ mod tests {
             },
         )]);
         assert!(!schema_consensus(&s).contains("sungrow"));
+    }
+
     #[test]
     fn a_query_blames_the_client_only_for_its_request() {
         let status = |e| ApiError::from(e).into_response().status();
@@ -1033,8 +1033,6 @@ mod tests {
             status(sql::QueryError::Database("Query failed: db error".into())),
             StatusCode::SERVICE_UNAVAILABLE
         );
-    }
-
     }
 
     #[test]

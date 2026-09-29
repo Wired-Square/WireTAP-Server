@@ -20,6 +20,12 @@ All notable changes to this project are documented here. Entries go under
   cannot take, such as an unparseable `start`, is still 400, as are a
   cancelled query and a backend the key may not signal.
 
+### Fixed
+
+- **`GET /v1/databases` no longer holds a connection open to every capture
+  database.** Its rollup probe left one idle for as long as the gateway ran;
+  it now connects for the probe and closes the connection after it.
+
 ## [0.1.4] — 2026-09-29
 
 The capture daemon reads CAN and serial lines through `wiretap-lib-rs`, frames
