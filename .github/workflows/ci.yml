@@ -199,7 +199,7 @@ jobs:
           cargo test -p wiretap-server --test vcan_loopback --locked -- \
             --ignored --test-threads=1 --nocapture
 
-      # To a file, not to the void. This job now makes 29 HTTP assertions plus
+      # To a file, not to the void. This job makes the smoke assertions plus
       # the conformance suite against this process, and a backgrounded stdout
       # from a step that then exits is orphaned - so every one of them would
       # fail with nothing to read. The stop step dumps it.
@@ -309,7 +309,7 @@ jobs:
           echo "pushed=$pushed"
           test "$pushed" = "3200" || { echo "expected 3200 pushed frames, got $pushed" >&2; exit 1; }
 
-      # The gateway's own endpoint and auth-matrix suite, 29 checks. It has
+      # The gateway's own endpoint and auth-matrix suite. It has
       # only ever run when somebody remembered to, which is exactly how the
       # Dockerfile came to be broken for two days — and it needs no more than
       # the gateway this job already has running.
@@ -340,8 +340,9 @@ jobs:
           python3 tools/test_ingest_client.py \
             --host 127.0.0.1 --port 9323 --token "$WIRETAP_ADMIN_KEY" \
             --database "$SMOKE_DB" --count 40
-          crates/wiretap-backend/smoke_test.sh \
-            http://127.0.0.1:8423 "$WIRETAP_ADMIN_KEY" "$SMOKE_DB"
+          PGHOST=127.0.0.1 PGPASSWORD="$POSTGRES_PASSWORD" \
+            crates/wiretap-backend/smoke_test.sh \
+              http://127.0.0.1:8423 "$WIRETAP_ADMIN_KEY" "$SMOKE_DB"
 
       - name: Stop the gateway
         if: always()

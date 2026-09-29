@@ -1,6 +1,7 @@
 #!/bin/bash
 # Phase B smoke test: endpoint coverage + auth matrix against a running stack.
 # Usage: ./smoke_test.sh [base-url] [admin-key] [seeded-db] [ingest-host:port]
+# With PGHOST and PGPASSWORD set, it also checks PostgreSQL itself through psql.
 set -u
 BASE="${1:-http://localhost:8423}"
 ADMIN_KEY="${2:-dev-admin-key}"
@@ -87,6 +88,8 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H "$R" -H "$J" -d '{}' "
 [ "$code" = "400" ]; check "an empty patch is a 400" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" -H "$J" -d '{"ts_us":1,"duration_us":-1}' "$BASE/v1/db/$DB/events")
 [ "$code" = "400" ]; check "a negative duration is a 400" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" "$BASE/v1/db/$DB/events?start=garbage")
+[ "$code" = "400" ]; check "a start PostgreSQL cannot parse is a 400" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$R" "$BASE/v1/db/$DB/events/$eid")
 [ "$code" = "204" ]; check "delete event -> 204" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$R" "$BASE/v1/db/$DB/events/$eid")
@@ -124,6 +127,18 @@ fd = encode_record(0, 0x7F0, bytes(range(12)), fd=True)
 assert c.send_batch(1, [rec, fd], base_ts_us=int(time.time() * 1_000_000))[1] == 0
 PYEOF
 check "modbus record and FD frame ingested over TCP" $?
+# A set, not a count: the session above may not have closed yet.
+PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ingest_key" "$IMPORT_DB" "$BASE" "$ADMIN_KEY" <<'PYEOF'
+import json, sys, urllib.request
+from test_ingest_client import ReferenceClient
+host, port, token, db, base, admin = sys.argv[1:]
+clients = [ReferenceClient(host, int(port), token=token, database=db, version=v) for v in (1, 2)]
+assert all(c.hello()[0] == 0 for c in clients)
+req = urllib.request.Request(f"{base}/v1/admin/ingest-sessions", headers={"Authorization": f"Bearer {admin}"})
+sessions = json.load(urllib.request.urlopen(req))["sessions"]
+assert {s["protocol_version"] for s in sessions if s["key_name"] == "smoke-ingest" and s["database"] == db} == {1, 2}
+PYEOF
+check "ingest-sessions names the version each HELLO spoke (v1 and v2)" $?
 curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory?protocol=modbus" | grep -q '"frame_id":259'; check "inventory lists modbus rows when asked (unit 1, FC03 = 0x0103)" $?
 ! curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory" | grep -q '"frame_id":259'; check "inventory hides modbus rows by default" $?
 curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/time-bounds?protocol=modbus" | grep -q '"min_ts_us":[0-9]'; check "time-bounds by protocol" $?
@@ -156,6 +171,24 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" "$BASE/v1/databases")
 [ "$code" = "401" ]; check "revoked key -> 401 immediately" $?
 curl -fsS -X POST -H "$A" "$BASE/v1/admin/keys/$kid/restore" | grep -q restored; check "restore read key" $?
 curl -fsS -X DELETE -H "$A" "$BASE/v1/admin/keys/$kid" | grep -q deleted; check "delete read key" $?
+
+# --- against PostgreSQL directly, on a database only this block touches ---
+if [ -n "${PGHOST:-}" ]; then
+    PROBE_DB="smoke_probe_$(date +%s)"
+    backends() { psql -U postgres -d postgres -tAc "SELECT count(*) FROM pg_stat_activity WHERE datname = '$PROBE_DB' AND backend_type = 'client backend'"; }
+    curl -fsS -H "$A" -H "$J" -d "{\"name\":\"$PROBE_DB\"}" "$BASE/v1/databases" >/dev/null
+    curl -fsS -H "$A" "$BASE/v1/databases" | python3 -c 'import sys,json;assert [d["rollup_state"] is not None for d in json.load(sys.stdin)["databases"] if d["name"]==sys.argv[1]]==[True]' "$PROBE_DB"
+    check "databases probes a new database's rollup" $?
+    # The probe's connection closes after the response, so give it a moment.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ "$(backends)" = "0" ] && break; sleep 0.3; done
+    [ "$(backends)" = "0" ]; check "the rollup probe leaves no backend on the database" $?
+    psql -U postgres -d "$PROBE_DB" -qc "ALTER TABLE public.events RENAME TO events_gone"
+    code=$(curl -s -o /dev/null -w '%{http_code}' -H "$A" "$BASE/v1/db/$PROBE_DB/events")
+    [ "$code" = "503" ]; check "a query PostgreSQL fails -> 503" $?
+    curl -fsS -X DELETE -H "$A" "$BASE/v1/databases/$PROBE_DB" >/dev/null
+else
+    echo "  [skip] PostgreSQL checks: set PGHOST and PGPASSWORD to reach it with psql"
+fi
 
 echo
 echo "$PASS passed, $FAIL failed"
