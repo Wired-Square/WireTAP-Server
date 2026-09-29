@@ -9,26 +9,11 @@
 
 use std::time::SystemTime;
 
-use wiretap_catalog::{LineSettings, ModbusRtuOptions, TappedMessage};
+use wiretap_catalog::{ModbusRtuOptions, TappedMessage};
 use wiretap_model::{ModbusSample, SourceId};
 
 use super::system_time_to_us;
-use crate::settings::{Parity, SerialSettings};
-
-impl From<&SerialSettings> for LineSettings {
-    fn from(s: &SerialSettings) -> Self {
-        Self {
-            baud: s.baud,
-            data_bits: s.data_bits,
-            parity: match s.parity {
-                Parity::None => wiretap_catalog::Parity::None,
-                Parity::Even => wiretap_catalog::Parity::Even,
-                Parity::Odd => wiretap_catalog::Parity::Odd,
-            },
-            stop_bits: s.stop_bits,
-        }
-    }
-}
+use crate::settings::SerialSettings;
 
 fn options(line: &SerialSettings) -> ModbusRtuOptions {
     match &line.catalogue {
@@ -46,7 +31,7 @@ pub struct RtuTap {
 impl RtuTap {
     pub fn new(bus: SourceId, line: &SerialSettings) -> Self {
         Self {
-            tap: wiretap_catalog::RtuTap::new(&options(line), line.into()),
+            tap: wiretap_catalog::RtuTap::new(&options(line), line.line),
             bus,
         }
     }
@@ -77,7 +62,7 @@ impl RtuTap {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use wiretap_catalog::Catalog;
+    use wiretap_catalog::{Catalog, LineSettings, Parity};
     use wiretap_checksum::algorithms::crc16_modbus_checksum;
 
     use super::*;
@@ -96,25 +81,27 @@ mod tests {
         UNIX_EPOCH + Duration::from_micros(us)
     }
 
-    fn line_9600(parity: Parity, stop_bits: u8) -> SerialSettings {
+    fn line_9600_8n1() -> SerialSettings {
         SerialSettings {
-            baud: 9600,
-            data_bits: 8,
-            parity,
-            stop_bits,
+            line: LineSettings {
+                baud: 9600,
+                data_bits: 8,
+                parity: Parity::None,
+                stop_bits: 1,
+            },
             framing: Framing::ModbusRtu,
             catalogue: None,
         }
     }
 
     fn tap_on_9600_8n1(bus: SourceId) -> RtuTap {
-        RtuTap::new(bus, &line_9600(Parity::None, 1))
+        RtuTap::new(bus, &line_9600_8n1())
     }
 
     fn sungrow_line() -> SerialSettings {
         SerialSettings {
             catalogue: Some(LineCatalogue::read(EXAMPLE_CATALOGUE).expect("the example loads")),
-            ..line_9600(Parity::None, 1)
+            ..line_9600_8n1()
         }
     }
 
@@ -123,14 +110,6 @@ mod tests {
             .iter()
             .map(|s| (s.unit, s.func, s.raw.len()))
             .collect()
-    }
-
-    #[test]
-    fn the_line_settings_carry_parity_and_stop_bits() {
-        let micros = |s: &SerialSettings| LineSettings::from(s).wire_time(1).as_micros();
-        assert_eq!(micros(&line_9600(Parity::None, 1)), 1_041, "10 bits");
-        assert_eq!(micros(&line_9600(Parity::Even, 2)), 1_250, "12 bits");
-        assert_eq!(micros(&line_9600(Parity::Odd, 1)), 1_145, "11 bits");
     }
 
     /// The Sungrow line's traffic: a vendor code the length table does not
@@ -175,7 +154,7 @@ mod tests {
                 name: String::new(),
                 rtu: empty.rtu_options(),
             }),
-            ..line_9600(Parity::None, 1)
+            ..line_9600_8n1()
         };
         assert_eq!(options(&line), ModbusRtuOptions::tapped());
     }
@@ -193,7 +172,7 @@ mod tests {
 
         let framed =
             |line: &SerialSettings| keys(&RtuTap::new(SourceId(0), line).push(&dispatch, at(0)));
-        assert_eq!(framed(&line_9600(Parity::None, 1)), [(0, 0x60, 18)]);
+        assert_eq!(framed(&line_9600_8n1()), [(0, 0x60, 18)]);
         assert_eq!(framed(&sungrow_line()), [(0, 0x60, 19)]);
     }
 
@@ -225,7 +204,7 @@ mod tests {
     /// The messages and the share of bytes framed, which must be the same
     /// whatever the read size.
     fn replay(line: &SerialSettings, bytes: &[u8]) -> (Vec<Vec<u8>>, f64) {
-        let wire = LineSettings::from(line);
+        let wire = line.line;
         let mut first: Option<(Vec<Vec<u8>>, f64)> = None;
         for chunk in [64usize, 4096] {
             let mut tap = RtuTap::new(SourceId(0), line);
@@ -278,7 +257,7 @@ mod tests {
     #[test]
     #[ignore = "needs a capture: WIRETAP_RS485_RAW=<path to rs485.raw>"]
     fn the_sungrow_capture_frames_at_the_measured_coverage() {
-        let (_, coverage) = replay(&line_9600(Parity::None, 1), &capture());
+        let (_, coverage) = replay(&line_9600_8n1(), &capture());
         assert!(coverage >= 0.995, "{coverage:.4}");
     }
 

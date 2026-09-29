@@ -20,7 +20,7 @@ pub fn open(path: &str, line: &SerialSettings) -> io::Result<SerialTask> {
         reopen: Some(Duration::from_secs(1)),
         ..SerialOptions::default()
     };
-    serial::open(path, line.into(), options).map_err(|e| match e {
+    serial::open(path, line.line, options).map_err(|e| match e {
         SerialError::Open { source, .. } => source,
         refused => io::Error::new(io::ErrorKind::InvalidInput, refused),
     })
@@ -68,16 +68,19 @@ mod tests {
 
     use tokio::sync::mpsc;
     use tokio::time::timeout;
+    use wiretap_catalog::{LineSettings, Parity};
     use wiretap_model::SourceId;
 
     use super::*;
-    use crate::settings::{Framing, Parity};
+    use crate::settings::Framing;
 
     const LINE: SerialSettings = SerialSettings {
-        baud: 9600,
-        data_bits: 8,
-        parity: Parity::None,
-        stop_bits: 1,
+        line: LineSettings {
+            baud: 9600,
+            data_bits: 8,
+            parity: Parity::None,
+            stop_bits: 1,
+        },
         framing: Framing::ModbusRtu,
         catalogue: None,
     };
@@ -165,7 +168,10 @@ mod tests {
     #[test]
     fn every_supported_baud_reaches_the_open() {
         for &baud in crate::settings::SUPPORTED_BAUDS {
-            let line = SerialSettings { baud, ..LINE };
+            let line = SerialSettings {
+                line: LineSettings { baud, ..LINE.line },
+                ..LINE
+            };
             let refused = open("/nonexistent/wiretap-tap", &line)
                 .err()
                 .expect("opened");

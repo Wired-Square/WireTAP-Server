@@ -14,7 +14,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use wiretap_catalog::{validate::validate, Catalog, ModbusRtuOptions};
+use wiretap_catalog::{validate::validate, Catalog, LineSettings, ModbusRtuOptions, Parity};
 use wiretap_model::config::{DeviceSection, FileConfig};
 use wiretap_model::{parse_ifaces, Direction, Secret, SourceId};
 use wiretap_protocol::ingest::valid_database_name;
@@ -119,10 +119,7 @@ pub enum DeviceKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SerialSettings {
-    pub baud: u32,
-    pub data_bits: u8,
-    pub parity: Parity,
-    pub stop_bits: u8,
+    pub line: LineSettings,
     pub framing: Framing,
     pub catalogue: Option<LineCatalogue>,
 }
@@ -202,32 +199,7 @@ impl fmt::Display for LineCatalogue {
 impl fmt::Display for SerialSettings {
     /// `9600 8N1 modbus-rtu`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {}{}{} {}",
-            self.baud,
-            self.data_bits,
-            self.parity.letter(),
-            self.stop_bits,
-            self.framing.as_str()
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Parity {
-    None,
-    Even,
-    Odd,
-}
-
-impl Parity {
-    fn letter(self) -> char {
-        match self {
-            Parity::None => 'N',
-            Parity::Even => 'E',
-            Parity::Odd => 'O',
-        }
+        write!(f, "{} {}", self.line, self.framing.as_str())
     }
 }
 
@@ -313,32 +285,25 @@ impl Device {
                 if !SUPPORTED_BAUDS.contains(&baud) {
                     return Err(format!("baud {baud} is not one of {SUPPORTED_BAUDS:?}"));
                 }
-                let data_bits = t.data_bits.unwrap_or(8);
-                if !(5..=8).contains(&data_bits) {
-                    return Err(format!("data_bits must be 5 to 8, got {data_bits}"));
-                }
-                let parity = match t.parity.as_deref().unwrap_or("none") {
-                    "none" => Parity::None,
-                    "even" => Parity::Even,
-                    "odd" => Parity::Odd,
-                    other => {
-                        return Err(format!("parity must be none, even or odd, got {other:?}"))
-                    }
+                let line = LineSettings {
+                    baud,
+                    data_bits: t.data_bits.unwrap_or(8),
+                    parity: t
+                        .parity
+                        .as_deref()
+                        .unwrap_or("none")
+                        .parse::<Parity>()
+                        .map_err(|e| e.to_string())?,
+                    stop_bits: t.stop_bits.unwrap_or(1),
                 };
-                let stop_bits = t.stop_bits.unwrap_or(1);
-                if !(1..=2).contains(&stop_bits) {
-                    return Err(format!("stop_bits must be 1 or 2, got {stop_bits}"));
-                }
+                line.validate().map_err(|e| e.to_string())?;
                 let framing = match need(&t.framing, "framing")?.as_str() {
                     "modbus-rtu" => Framing::ModbusRtu,
                     other => return Err(format!("framing must be \"modbus-rtu\", got {other:?}")),
                 };
                 (
                     DeviceKind::Serial(SerialSettings {
-                        baud,
-                        data_bits,
-                        parity,
-                        stop_bits,
+                        line,
                         framing,
                         catalogue: t.catalog.as_deref().map(LineCatalogue::load).transpose()?,
                     }),
@@ -1924,7 +1889,7 @@ mod tests {
         assert_eq!(ifaces(&r.settings), ["can0", "can1"]);
         let (serial, line) = r.settings.serial_devices().next().unwrap();
         assert_eq!(
-            (serial.interface.as_str(), line.baud),
+            (serial.interface.as_str(), line.line.baud),
             ("/dev/ttyUSB0", 9600)
         );
     }
@@ -1937,10 +1902,12 @@ mod tests {
         assert_eq!(
             d.kind,
             DeviceKind::Serial(SerialSettings {
-                baud: 9600,
-                data_bits: 8,
-                parity: Parity::None,
-                stop_bits: 1,
+                line: LineSettings {
+                    baud: 9600,
+                    data_bits: 8,
+                    parity: Parity::None,
+                    stop_bits: 1,
+                },
                 framing: Framing::ModbusRtu,
                 catalogue: None,
             }),
@@ -1959,10 +1926,22 @@ mod tests {
     }
 
     #[test]
+    fn a_serial_line_is_read_whole_and_its_parity_in_any_case() {
+        let table = format!("{SERIAL}data_bits = 7\nparity = \"Even\"\nstop_bits = 2\n");
+        let r = resolve(&[], Some(&table)).unwrap();
+        assert_eq!(
+            r.settings.devices[0].to_string(),
+            "/dev/ttyUSB0 [bus 0] serial, passive, 9600 7E2 modbus-rtu → (gateway default)"
+        );
+    }
+
+    #[test]
     fn a_broken_device_table_names_the_key() {
         for (broken, expect) in [
             ("[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nframing = \"modbus-rtu\"\n", "baud is required"),
             (&format!("{SERIAL}parity = \"mark\"\n"), "parity must be"),
+            (&format!("{SERIAL}data_bits = 9\n"), "data_bits must be 5 to 8, got 9"),
+            (&format!("{SERIAL}stop_bits = 3\n"), "stop_bits must be 1 or 2, got 3"),
             ("[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nbaud = 9600\n", "framing is required"),
             ("[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nbaud = 9601\nframing = \"modbus-rtu\"\n", "baud 9601 is not one of"),
             (&format!("{SERIAL}fd = true\n"), "fd applies to a CAN device"),

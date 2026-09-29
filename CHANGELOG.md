@@ -13,6 +13,8 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **A serial device's `parity` is read in any case**, so `"Even"` is taken
+  where only `"even"` was. Anything but none, even or odd is still refused.
 - **A query that fails in the database answers 503, not 400.** `time-bounds`,
   `inventory`, `frames`, `payloads`, `events`, the `query/*` endpoints and
   `activity` now return 503 when PostgreSQL fails, as they already did when no
