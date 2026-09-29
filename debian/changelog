@@ -1,3 +1,21 @@
+wiretap-server (0.1.5) UNRELEASED; urgency=medium
+
+  * A batch the gateway refuses for its contents is kept in
+    cache.dead-letter.db beside the disk cache, in the cache's own format,
+    instead of being resent for ever and holding up everything behind it.
+    Nothing is dropped: if that file cannot be written, the batch is cached
+    and retried as before.
+  * A batch sent in pieces that failed partway is no longer stored twice:
+    only the pieces the gateway did not take are cached and resent.
+  * An ACK for a batch other than the one sent is refused, and the batch is
+    cached and retried.
+  * A gateway whose database is not ready yet is logged as such (HELLO
+    status 4), not as a bad database name.
+  * A serial device's parity is read in any case ("Even" as well as "even").
+  * No configuration change is needed; install and restart.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Tue, 29 Sep 2026 14:53:24 +1000
+
 wiretap-server (0.1.4) bookworm; urgency=medium
 
   * CAN and serial lines are read through wiretap-lib-rs. An unplugged CAN

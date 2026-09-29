@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-09-29
+
+A batch the gateway refuses for its contents is set aside rather than resent
+for ever; a batch half-delivered is not stored twice; and the gateway tells
+"not yet" from "never" at HELLO, retries a database that failed its schema
+check, and gives up on a PostgreSQL that never answers. No schema change.
+
 ### Added
 
 - **The admin UI's Ingest tab shows each device's protocol version**, from
@@ -438,7 +445,8 @@ through its own Compose stack.
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
 
-[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.1...v0.1.2
