@@ -231,7 +231,7 @@ fn now_us() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive::{BatchSink, SinkResult};
+    use crate::archive::{BatchSink, SinkResult, WriteError};
     use crate::cache::{Cached, FrameCache};
     use crate::settings::Batching;
     use std::path::PathBuf;
@@ -258,7 +258,7 @@ mod tests {
         async fn connect(&mut self) -> SinkResult {
             Ok(())
         }
-        async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> SinkResult {
+        async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> Result<(), WriteError> {
             self.0.lock().unwrap().extend(batch.iter().cloned());
             Ok(())
         }

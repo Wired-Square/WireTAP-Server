@@ -71,6 +71,23 @@ impl std::fmt::Display for SinkError {
 
 pub type SinkResult = Result<(), SinkError>;
 
+/// A write that failed after the sink had stored the batch's first `delivered`
+/// frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteError {
+    pub delivered: usize,
+    pub cause: SinkError,
+}
+
+impl From<SinkError> for WriteError {
+    fn from(cause: SinkError) -> Self {
+        Self {
+            delivered: 0,
+            cause,
+        }
+    }
+}
+
 /// Somewhere batches of frames go to be stored.
 ///
 /// The Python spelled this as a subclass: `ForwardSink(PostgresWriter)`
@@ -89,11 +106,12 @@ pub trait BatchSink: Send {
 
     /// Store a batch, returning only once it is durable. The gateway ACKs
     /// after writing, so a slow archive back-pressures into the disk cache
-    /// rather than being acknowledged and lost.
+    /// rather than being acknowledged and lost. A failure says how much of the
+    /// batch was stored anyway, so only the rest is kept to send again.
     fn write_batch(
         &mut self,
         batch: &[Arc<Sample>],
-    ) -> impl std::future::Future<Output = SinkResult> + Send;
+    ) -> impl std::future::Future<Output = Result<(), WriteError>> + Send;
 
     /// Called when there is nothing to write, to keep an idle connection from
     /// being dropped by the far end.
@@ -502,7 +520,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                 }
             }
 
-            let batch = self.next_batch().await;
+            let mut batch = self.next_batch().await;
             if batch.is_empty() {
                 // Nothing queued, nothing cached, and nothing more coming.
                 if self.queue_finished() {
@@ -518,7 +536,8 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
             }
 
             if let Err(e) = self.sink.write_batch(&batch).await {
-                self.fail(e, batch).await;
+                add(&self.counters.written, e.delivered as u64);
+                self.fail(e.cause, batch.split_off(e.delivered)).await;
                 if !self.wait_to_retry(&mut backoff).await {
                     break;
                 }
@@ -684,15 +703,19 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         }
 
         let frames: Vec<Arc<Sample>> = cached.iter().map(|c| Arc::clone(&c.sample)).collect();
-        self.sink.write_batch(&frames).await?;
-        if let Err(e) = blocking(|| self.cache.remove(&cached)) {
+        let written = self.sink.write_batch(&frames).await;
+        let delivered = written
+            .as_ref()
+            .map_or_else(|e| e.delivered, |()| frames.len());
+        if let Err(e) = blocking(|| self.cache.remove(&cached[..delivered])) {
             // The frames are safe; the cache now holds duplicates of them.
             // Saying so is better than silently re-sending on the next pass.
             error!("disk cache delete error: {e}{}", self.tag);
         }
-        let n = frames.len() as u64;
+        let n = delivered as u64;
         add(&self.counters.written, n);
         add(&self.counters.cache_recovered, n);
+        written.map_err(|e| e.cause)?;
         debug!(
             "batch committed, cache_recovered={}{}",
             get(&self.counters.cache_recovered),
@@ -804,23 +827,25 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         let tag = Arc::clone(&self.tag);
         let remaining = self.take_queued();
         if !remaining.is_empty() {
-            let flushed = self.connected
-                && match self.sink.write_batch(&remaining).await {
-                    Ok(()) => true,
+            let flushed = if self.connected {
+                match self.sink.write_batch(&remaining).await {
+                    Ok(()) => remaining.len(),
                     Err(e) => {
-                        error!("shutdown flush to DB failed: {e}{tag}");
-                        false
+                        error!("shutdown flush to DB failed: {}{tag}", e.cause);
+                        e.delivered
                     }
-                };
-            if flushed {
-                add(&self.counters.written, remaining.len() as u64);
-                info!(
-                    "shutdown: flushed {} frames to database{tag}",
-                    remaining.len()
-                );
+                }
             } else {
+                0
+            };
+            if flushed > 0 {
+                add(&self.counters.written, flushed as u64);
+                info!("shutdown: flushed {flushed} frames to database{tag}");
+            }
+            let unflushed = &remaining[flushed..];
+            if !unflushed.is_empty() {
                 // Same rule as the drain above.
-                let cached = self.cache_batch(&remaining);
+                let cached = self.cache_batch(unflushed);
                 if cached > 0 {
                     info!("shutdown: flushed {cached} frames to disk cache{tag}");
                 }
@@ -930,7 +955,7 @@ mod tests {
             self.0.check()
         }
 
-        async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> SinkResult {
+        async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> Result<(), WriteError> {
             self.0.check()?;
             self.0
                 .frames

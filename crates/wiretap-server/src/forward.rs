@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use wiretap_model::{Sample, Secret};
 use wiretap_protocol::ingest as proto;
 
-use crate::archive::{BatchSink, SinkError, SinkResult};
+use crate::archive::{BatchSink, SinkError, SinkResult, WriteError};
 use crate::cache::{FrameCache, SqliteCache};
 use crate::settings::Forward;
 use crate::wire;
@@ -227,16 +227,18 @@ impl BatchSink for ForwardSink {
         Ok(())
     }
 
-    async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> SinkResult {
-        let mut rest = batch;
+    async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> Result<(), WriteError> {
+        let mut delivered = 0;
         // A disk cache drain reads `ORDER BY id` across a whole outage, so a
         // chunk on a quiet bus can outspan a `u32` of microseconds, and two bus
         // readers mean its head is not always its earliest frame.
-        while !rest.is_empty() {
+        while delivered < batch.len() {
+            let rest = &batch[delivered..];
             let fit = proto::fit_batch(rest.iter().map(|f| wire::fit_input(f)));
-            let (chunk, tail) = rest.split_at(fit.len);
-            self.send_chunk(chunk, fit.base_ts_us).await?;
-            rest = tail;
+            self.send_chunk(&rest[..fit.len], fit.base_ts_us)
+                .await
+                .map_err(|cause| WriteError { delivered, cause })?;
+            delivered += fit.len;
         }
         Ok(())
     }
@@ -283,6 +285,8 @@ mod tests {
     struct Script {
         hello_status: u8,
         ack_status: u8,
+        /// Batches before this one are ACKed OK, whatever `ack_status` says.
+        nack_from: usize,
         /// Hang up rather than answering the first batch.
         close_on_batch: bool,
     }
@@ -292,6 +296,7 @@ mod tests {
             Self {
                 hello_status: proto::HELLO_OK,
                 ack_status: proto::ACK_OK,
+                nack_from: 0,
                 close_on_batch: false,
             }
         }
@@ -339,7 +344,12 @@ mod tests {
                             .expect("well formed");
                         let seq = batch.seq;
                         seen.batches.push(batch);
-                        proto::encode_ack(seq, script.ack_status, 0)
+                        let status = if seen.batches.len() > script.nack_from {
+                            script.ack_status
+                        } else {
+                            proto::ACK_OK
+                        };
+                        proto::encode_ack(seq, status, 0)
                     }
                     proto::MSG_PING => {
                         seen.pings += 1;
@@ -678,7 +688,7 @@ mod tests {
         .await;
         let mut s = sink(port, "");
         s.connect().await.unwrap();
-        let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err();
+        let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err().cause;
         assert_eq!(err, SinkError("forward: gateway overloaded".into()));
         s.close().await;
         let _ = gateway.await;
@@ -693,7 +703,7 @@ mod tests {
         .await;
         let mut s = sink(port, "");
         s.connect().await.unwrap();
-        let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err();
+        let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err().cause;
         assert!(err.to_string().contains("seq=1"), "{err}");
         assert!(err.to_string().contains("status=1"), "{err}");
         s.close().await;
@@ -742,10 +752,75 @@ mod tests {
         .await;
         let mut s = sink_caching_at(port, not_a_directory.join("cache.db"));
         s.connect().await.unwrap();
-        let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err();
+        let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err().cause;
         assert!(err.to_string().contains("seq=1"), "{err}");
         s.close().await;
         let _ = gateway.await;
+    }
+
+    /// Two chunks: the span between the second and third frames forces a split.
+    fn two_chunks() -> Vec<Arc<Sample>> {
+        const HOUR_US: i64 = 3_600_000_000;
+        [0, HOUR_US, 2 * HOUR_US, 2 * HOUR_US + 1]
+            .iter()
+            .map(|t| sample(*t, 0x123))
+            .collect()
+    }
+
+    /// Run a batcher over `queued` until it has nothing left it can do.
+    async fn run_batcher(port: u16, cache_path: PathBuf, queued: &[Arc<Sample>]) {
+        let mut f = forward(port, "");
+        f.batching.cache_path = cache_path;
+        let cache = SqliteCache::open(&f.batching.cache_path, 1).unwrap();
+        let (archive, batcher, _stop) =
+            crate::archive::channel(ForwardSink::new(&f), cache, &f.batching, 0.0, None);
+        for s in queued {
+            archive.enqueue(Arc::clone(s));
+        }
+        drop(archive);
+        batcher.run().await;
+    }
+
+    fn cached(path: &std::path::Path) -> Vec<Arc<Sample>> {
+        let held = SqliteCache::open(path, 1).unwrap().oldest(100).unwrap();
+        held.into_iter().map(|c| c.sample).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_split_batch_failing_midway_caches_only_what_the_gateway_did_not_take() {
+        let dir = TempDir::new("split-queue");
+        let (port, gateway) = fake_gateway(Script {
+            ack_status: proto::ACK_OVERLOADED,
+            nack_from: 1,
+            ..Script::default()
+        })
+        .await;
+        let frames = two_chunks();
+        run_batcher(port, dir.0.join("cache.db"), &frames).await;
+
+        assert_eq!(gateway.await.unwrap().batches.len(), 2);
+        assert_eq!(cached(&dir.0.join("cache.db")), frames[2..]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cache_drain_failing_midway_keeps_only_what_the_gateway_did_not_take() {
+        let dir = TempDir::new("split-drain");
+        let cache_path = dir.0.join("cache.db");
+        let frames = two_chunks();
+        SqliteCache::open(&cache_path, 1)
+            .unwrap()
+            .append(&frames)
+            .unwrap();
+        let (port, gateway) = fake_gateway(Script {
+            ack_status: proto::ACK_OVERLOADED,
+            nack_from: 1,
+            ..Script::default()
+        })
+        .await;
+        run_batcher(port, cache_path.clone(), &[]).await;
+
+        assert_eq!(gateway.await.unwrap().batches.len(), 2);
+        assert_eq!(cached(&cache_path), frames[2..]);
     }
 
     #[tokio::test]
@@ -757,7 +832,7 @@ mod tests {
         .await;
         let mut s = sink(port, "");
         s.connect().await.unwrap();
-        let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err();
+        let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err().cause;
         assert_eq!(
             err,
             SinkError("forward: gateway closed connection".into()),

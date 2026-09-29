@@ -50,6 +50,11 @@ All notable changes to this project are documented here. Entries go under
   (`cache.dead-letter.db` by default), in the cache's own format, and carries
   on. If that file cannot be written, the batch is cached and retried as
   before.
+- **A forwarded batch the gateway took only part of is not stored twice.** A
+  batch sent in several pieces that failed partway, from the queue or from the
+  disk cache, was cached and resent whole, so the gateway stored the pieces it
+  had already acknowledged a second time. Only the pieces it did not take are
+  now kept to send again.
 
 ## [0.1.4] — 2026-09-29
 
