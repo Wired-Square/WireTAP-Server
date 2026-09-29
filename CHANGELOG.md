@@ -19,6 +19,8 @@ All notable changes to this project are documented here. Entries go under
   connection could be had. The message is unchanged. A value PostgreSQL
   cannot take, such as an unparseable `start`, is still 400, as are a
   cancelled query and a backend the key may not signal.
+- **Built on `wiretap-lib-rs` v0.19.7**, which adds two ingest helpers and
+  leaves the wire format alone. The ingest spec in the .deb names them.
 
 ### Fixed
 
