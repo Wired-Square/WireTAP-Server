@@ -40,9 +40,9 @@ use crate::console;
 #[cfg(target_os = "linux")]
 use crate::gvret;
 use crate::ingest;
-use crate::settings::Settings;
 #[cfg(target_os = "linux")]
-use crate::settings::{Device, Mode};
+use crate::settings::Device;
+use crate::settings::{Mode, Settings, TestPattern};
 #[cfg(target_os = "linux")]
 use crate::source::{bus_count, index_for_bus, modbus::RtuTap, serial_tap, socketcan, Transmit};
 #[cfg(target_os = "linux")]
@@ -347,38 +347,10 @@ async fn start_capture(
         ));
     }
     if let Some(tp) = &settings.test_pattern {
-        let armed = settings.armed_indices(tp);
-        // A name that matched nothing means an operator believes a bus is armed
-        // that is not, and finds out from a validation run that fails for no
-        // visible reason.
-        for name in &tp.ifaces {
-            match opened.iter().find(|o| &o.device.interface == name) {
-                None => warn!("Test Pattern: no interface named {name} is being captured"),
-                Some(o) if o.device.mode == Mode::Passive => {
-                    warn!("Test Pattern: {name} is passive, so it is not armed")
-                }
-                Some(_) => {}
-            }
+        for line in test_pattern_warnings(settings, tp) {
+            warn!("{line}");
         }
-        if armed.is_empty() {
-            // Saying ARMED here, with an empty list, would be the loudest line
-            // in the journal contradicting the one above it.
-            warn!("Test Pattern: enabled, but no configured interface matched; nothing is armed");
-        } else {
-            // WARN, not INFO: this is the one part of the server that puts
-            // frames on a bus nobody asked it to, and a capture host where it
-            // was armed by accident should say so in the journal's first screen.
-            warn!(
-                "Test Pattern responder ARMED on {} — this transmits on the bus",
-                join(armed.iter().map(|&i| &opened[i].device.interface))
-            );
-            if !any_fd {
-                warn!(
-                    "Test Pattern: no device has fd on, so only the classic sweep can be answered"
-                );
-            }
-        }
-        for &i in &armed {
+        for i in settings.armed_indices(tp) {
             let o = &opened[i];
             tokio::spawn(testpattern::responder_loop(
                 o.writer.clone(),
@@ -393,7 +365,46 @@ async fn start_capture(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+/// What `start_capture` logs about arming the Test Pattern, at WARN, in order.
+///
+/// WARN throughout: this is the one part of the server that puts frames on a
+/// bus nobody asked it to, and a box armed by accident, or one an operator
+/// believes armed and is not, should say so in the journal's first screen.
+pub fn test_pattern_warnings(settings: &Settings, tp: &TestPattern) -> Vec<String> {
+    let can = settings.can_devices();
+    let mut lines: Vec<String> = tp
+        .ifaces
+        .iter()
+        .filter_map(|name| match can.iter().find(|d| &d.interface == name) {
+            None => Some(format!(
+                "Test Pattern: no interface named {name} is being captured"
+            )),
+            Some(d) if d.mode == Mode::Passive => Some(format!(
+                "Test Pattern: {name} is passive, so it is not armed"
+            )),
+            Some(_) => None,
+        })
+        .collect();
+    let armed = settings.armed_indices(tp);
+    if armed.is_empty() {
+        lines.push(
+            "Test Pattern: enabled, but no configured interface matched; nothing is armed".into(),
+        );
+    } else {
+        lines.push(format!(
+            "Test Pattern responder ARMED on {} — this transmits on the bus",
+            join(armed.iter().map(|&i| &can[i].interface))
+        ));
+        if !settings.any_fd() {
+            lines.push(
+                "Test Pattern: no device has fd on, so only the classic sweep can be answered"
+                    .into(),
+            );
+        }
+    }
+    lines
+}
+
 fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {
     parts.map(|p| p.to_string()).collect::<Vec<_>>().join(",")
 }
@@ -550,6 +561,85 @@ async fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    fn test_pattern_log(args: &[&str], toml: Option<&str>) -> Vec<String> {
+        let cli = crate::cli::Cli::parse_from(["wiretap-server"].iter().chain(args));
+        let file = toml.map(|t| wiretap_model::config::FileConfig::parse(t).unwrap());
+        let settings = Settings::resolve(&cli, file.as_ref(), &Default::default())
+            .unwrap()
+            .settings;
+        test_pattern_warnings(&settings, settings.test_pattern.as_ref().unwrap())
+    }
+
+    #[test]
+    fn the_test_pattern_log_names_what_it_armed() {
+        assert_eq!(
+            test_pattern_log(
+                &["-i", "can0,can1", "--test-pattern-enable", "--can-fd"],
+                None
+            ),
+            ["Test Pattern responder ARMED on can0,can1 — this transmits on the bus"]
+        );
+        assert_eq!(
+            test_pattern_log(&["-i", "can0", "--test-pattern-enable"], None),
+            [
+                "Test Pattern responder ARMED on can0 — this transmits on the bus",
+                "Test Pattern: no device has fd on, so only the classic sweep can be answered",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_test_pattern_log_says_when_a_named_interface_is_not_armed() {
+        assert_eq!(
+            test_pattern_log(
+                &[
+                    "-i",
+                    "can0",
+                    "--can-fd",
+                    "--test-pattern-enable",
+                    "--test-pattern-ifaces",
+                    "can0,can9",
+                ],
+                None
+            ),
+            [
+                "Test Pattern: no interface named can9 is being captured",
+                "Test Pattern responder ARMED on can0 — this transmits on the bus",
+            ]
+        );
+        assert_eq!(
+            test_pattern_log(
+                &["--test-pattern-enable", "--test-pattern-ifaces", "can0"],
+                Some("[[device]]\nkind = \"can\"\ninterface = \"can0\"\nmode = \"passive\"\n")
+            ),
+            [
+                "Test Pattern: can0 is passive, so it is not armed",
+                "Test Pattern: enabled, but no configured interface matched; nothing is armed",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_test_pattern_log_says_when_nothing_is_armed() {
+        assert_eq!(
+            test_pattern_log(
+                &[
+                    "-i",
+                    "can0",
+                    "--test-pattern-enable",
+                    "--test-pattern-ifaces",
+                    "can9"
+                ],
+                None
+            ),
+            [
+                "Test Pattern: no interface named can9 is being captured",
+                "Test Pattern: enabled, but no configured interface matched; nothing is armed",
+            ]
+        );
+    }
 
     fn open_can(err: io::Error) -> String {
         RunError::OpenCan {
