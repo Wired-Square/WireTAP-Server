@@ -358,7 +358,7 @@ async fn list_databases(
         // Same filter the sweep uses: a name this gateway would never manage is
         // not a capture database, and listing it as "unknown" would report the
         // deployment as mixed forever.
-        if !db::valid_db_name(&name) {
+        if !db::valid_database_name(&name) {
             continue;
         }
         if key.database_pin.as_ref().is_some_and(|pin| *pin != name) {

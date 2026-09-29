@@ -66,7 +66,7 @@ impl DbSchemaState {
     }
 }
 
-pub use wiretap_model::valid_db_name;
+pub use wiretap_protocol::ingest::valid_database_name;
 
 #[derive(Clone)]
 pub struct Databases {
@@ -147,7 +147,7 @@ impl Databases {
         Ok(rows
             .iter()
             .map(|r| r.get::<_, String>(0))
-            .filter(|n| valid_db_name(n))
+            .filter(|n| valid_database_name(n))
             .collect())
     }
 
@@ -373,7 +373,7 @@ impl Databases {
     /// below the watermark come from the materialisation table alone — so this
     /// always refreshes the whole range, never a window.
     pub async fn refresh_rollup(&self, name: &str) -> Result<(), String> {
-        if !valid_db_name(name) {
+        if !valid_database_name(name) {
             return Err(format!("invalid database name '{name}'"));
         }
         let started = Instant::now();
@@ -449,7 +449,7 @@ impl Databases {
     /// Create a capture database (idempotent) and bring it to the current
     /// schema. Safe on a database that already exists and is behind.
     pub async fn create_database(&self, name: &str) -> Result<(), String> {
-        if !valid_db_name(name) {
+        if !valid_database_name(name) {
             return Err(format!("invalid database name '{name}'"));
         }
         {
@@ -474,7 +474,7 @@ impl Databases {
     /// to terminate any lingering query connections. Callers must ensure it is
     /// not actively being ingested.
     pub async fn delete_database(&self, name: &str) -> Result<(), String> {
-        if !valid_db_name(name) {
+        if !valid_database_name(name) {
             return Err(format!("invalid database name '{name}'"));
         }
         if name == self.config.default_database {
@@ -498,7 +498,7 @@ impl Databases {
     /// Pool for an existing capture database. Errors if it doesn't exist —
     /// callers wanting auto-create go through `ensure_database` first.
     pub async fn pool(&self, name: &str) -> Result<Pool, String> {
-        if !valid_db_name(name) {
+        if !valid_database_name(name) {
             return Err(format!("invalid database name '{name}'"));
         }
         {
@@ -552,7 +552,7 @@ impl Databases {
     /// Resolve a database for ingest/import: existing, or auto-created when
     /// the config allows. Returns the pool.
     pub async fn ensure_database(&self, name: &str, allow_create: bool) -> Result<Pool, String> {
-        if !valid_db_name(name) {
+        if !valid_database_name(name) {
             return Err(format!("invalid database name '{name}'"));
         }
         if !self.database_exists(name).await? {

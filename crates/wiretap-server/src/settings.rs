@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 
 use wiretap_catalog::{validate::validate, Catalog, ModbusRtuOptions};
 use wiretap_model::config::{DeviceSection, FileConfig};
-use wiretap_model::{parse_ifaces, valid_db_name, Direction, Secret, SourceId};
+use wiretap_model::{parse_ifaces, Direction, Secret, SourceId};
+use wiretap_protocol::ingest::valid_database_name;
 
 use crate::cli::Cli;
 use crate::source::bus_for_index;
@@ -395,7 +396,7 @@ fn database_label(database: &str) -> &str {
 /// The gateway's rule, checked here so a bad name fails `--check-config`
 /// rather than every HELLO. Empty is the gateway's default.
 fn valid_database(name: &str) -> bool {
-    name.is_empty() || valid_db_name(name)
+    name.is_empty() || valid_database_name(name)
 }
 
 /// How frames are grouped on the way to the gateway, and where they wait when
