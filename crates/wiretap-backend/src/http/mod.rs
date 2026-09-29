@@ -978,14 +978,14 @@ mod tests {
     #[test]
     fn the_consensus_never_leaks_a_database_name() {
         let s = states(&[(
-            "sungrow_ben_wired",
+            "site_a_can",
             db::DbSchemaState::Failed {
                 version: 0,
-                error: "connection to sungrow_ben_wired refused".into(),
+                error: "connection to site_a_can refused".into(),
                 since: Instant::now(),
             },
         )]);
-        assert!(!schema_consensus(&s).contains("sungrow"));
+        assert!(!schema_consensus(&s).contains("site_a_can"));
     }
 
     #[test]

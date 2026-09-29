@@ -228,7 +228,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(buf.clone());
         tracing::subscriber::with_default(subscriber, || {
             tracing::warn!(
-                database = "sungrow_ben_wired",
+                database = "site_a_can",
                 elapsed_ms = 1_373_175,
                 "schema migrated"
             );
@@ -236,7 +236,7 @@ mod tests {
         let recs = buf.snapshot(None, 10);
         assert_eq!(recs[0].message, "schema migrated");
         assert_eq!(
-            recs[0].fields, "database=sungrow_ben_wired elapsed_ms=1373175",
+            recs[0].fields, "database=site_a_can elapsed_ms=1373175",
             "unquoted, and the message field is not repeated here"
         );
     }
