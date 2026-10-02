@@ -532,7 +532,7 @@ async fn transmit_loop(opened: Vec<Opened>, bus_offset: u8, mut queue: mpsc::Rec
         // Classic: a GVRET `F1 00` carries no FD flag, so a client cannot ask
         // for one. The Test Pattern responder owns the FD path.
         let frame = CanFrame::data(0, t.arb_id, t.extended, false, false, t.data);
-        match o.writer.send(frame).await {
+        match async { o.writer.send_when_ready(frame).await?.await }.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => warn!("transmit on bus {} failed: {e}", t.bus.0),
             Err(refused) => warn!("transmit on bus {} refused: {refused}", t.bus.0),
