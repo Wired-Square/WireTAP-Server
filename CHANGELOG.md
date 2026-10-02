@@ -7,8 +7,10 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
-- **Built on `wiretap-lib-rs` v0.20.2.** A catalogue whose `meta.name` is not a
-  string is refused as such, rather than as an empty name.
+- **Built on `wiretap-lib-rs` v0.23.0.** A catalogue whose `meta.name` is not a
+  string is refused as such, rather than as an empty name. A CAN frame ready to
+  be read now goes ahead of the next send, so a run of transmits no longer holds
+  back capture. The wire format is unchanged.
 
 ## [0.1.6] — 2026-09-29
 
