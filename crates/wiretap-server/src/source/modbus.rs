@@ -167,6 +167,7 @@ mod tests {
             catalogue: Some(LineCatalogue {
                 path: String::new(),
                 name: String::new(),
+                sha: [0; 20],
                 rtu: empty.rtu_options(),
             }),
             ..line_9600_8n1()

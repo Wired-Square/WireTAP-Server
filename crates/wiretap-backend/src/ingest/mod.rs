@@ -99,6 +99,8 @@ pub struct IngestServer {
 struct Session {
     pool: Pool,
     id: u64,
+    daemon_id: String,
+    devices: Vec<Device>,
 }
 
 /// What the session loop asks of the gateway, so the loop runs without
@@ -108,6 +110,7 @@ trait Gateway {
     async fn hello(&mut self, hello: &Hello) -> (u8, Vec<Assignment>);
     async fn batch(&mut self, incoming: IncomingBatch) -> u8;
     async fn blob(&mut self, sha: &[u8; 20]) -> Result<&[u8], u8>;
+    async fn catalog_status(&mut self, status: CatalogStatus);
 }
 
 /// One client's connection to this gateway.
@@ -154,6 +157,20 @@ impl Gateway for Connection<'_> {
             };
         }
         Ok(self.served.as_ref().map_or(&[], |(_, c)| c.as_bytes()))
+    }
+
+    /// A meta database failure is logged, and the session goes on.
+    async fn catalog_status(&mut self, status: CatalogStatus) {
+        let Some(session) = self.authed.as_ref().filter(|s| !s.daemon_id.is_empty()) else {
+            return;
+        };
+        let catalogs = &self.server.catalogs;
+        if let Err(e) = catalogs
+            .record_status(&session.daemon_id, &session.devices, &status)
+            .await
+        {
+            tracing::warn!("ingest client {}: {e}", self.peer);
+        }
     }
 }
 
@@ -204,6 +221,10 @@ async fn serve(
                 Action::Nack { seq, status } => machine.ack(seq, status, 0),
                 Action::CatalogGet(get) => {
                     machine.answer_catalog(gateway.blob(&get.blob_sha).await)
+                }
+                Action::CatalogStatus(status) => {
+                    gateway.catalog_status(status).await;
+                    continue;
                 }
                 Action::Close(CloseReason::Refused(_)) => return Ok(()),
                 Action::Close(CloseReason::Reassigned) => {
@@ -342,6 +363,8 @@ impl IngestServer {
             Session {
                 pool,
                 id: session_id,
+                daemon_id: hello.daemon_id.clone(),
+                devices: hello.devices.clone(),
             },
             assignments,
         ))
@@ -498,6 +521,7 @@ mod tests {
         /// Fired while the batch is being written, as an assignment changing
         /// mid-write would.
         reassigned_mid_batch: Option<Arc<Notify>>,
+        statuses: Arc<std::sync::Mutex<Vec<CatalogStatus>>>,
     }
 
     impl Gateway for Fake {
@@ -518,6 +542,10 @@ mod tests {
                 .iter()
                 .find(|b| wiretap_model::blob_sha1(b) == *sha);
             found.map(Vec::as_slice).ok_or(CATALOG_UNKNOWN)
+        }
+
+        async fn catalog_status(&mut self, status: CatalogStatus) {
+            self.statuses.lock().unwrap().push(status);
         }
     }
 
@@ -607,6 +635,28 @@ mod tests {
         c.write_all(&encode_catalog_get(&unknown)).await.unwrap();
         let frame = reply(&mut c, &mut buf).await.unwrap();
         assert_eq!(parse_catalog(&frame.body).unwrap().status, CATALOG_UNKNOWN);
+    }
+
+    #[tokio::test]
+    async fn a_catalog_status_is_taken_without_a_reply() {
+        let fake = Fake::default();
+        let statuses = Arc::clone(&fake.statuses);
+        let (mut c, _) = serving(fake).await;
+        hello_ack(&mut c, &daemon_hello("bench", vec![device(0, "can0")])).await;
+        let status = CatalogStatus {
+            entries: vec![CatalogStatusEntry {
+                bus: 0,
+                active: ActiveCatalog::Assigned([7; 20]),
+                refused: None,
+            }],
+        };
+        c.write_all(&encode_catalog_status(&status).unwrap())
+            .await
+            .unwrap();
+        c.write_all(&encode_message(MSG_PING, b"")).await.unwrap();
+        let next = reply(&mut c, &mut Vec::new()).await.unwrap();
+        assert_eq!(next.mtype, MSG_PONG, "the PING's, not one for the status");
+        assert_eq!(*statuses.lock().unwrap(), [status]);
     }
 
     fn session_info() -> IngestSessionInfo {
@@ -708,7 +758,12 @@ mod tests {
         ))
         .build()
         .unwrap();
-        let session = Session { pool, id: 0 };
+        let session = Session {
+            pool,
+            id: 0,
+            daemon_id: String::new(),
+            devices: Vec::new(),
+        };
         let raw = incoming(RecordKind::RawSerial, raw_serial_id(1));
         assert_eq!(server.handle_batch(raw, &session).await, ACK_OVERLOADED);
     }

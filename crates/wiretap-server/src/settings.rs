@@ -158,6 +158,8 @@ pub struct SerialSettings {
 pub struct LineCatalogue {
     pub path: String,
     pub name: String,
+    /// The Git blob SHA-1 of the file's bytes.
+    pub sha: [u8; 20],
     /// Its function codes and their length rules, and nothing else set.
     pub rtu: ModbusRtuOptions,
 }
@@ -206,6 +208,7 @@ impl LineCatalogue {
             path: path.to_owned(),
             rtu: r.options,
             name: r.name,
+            sha: wiretap_model::blob_sha1(text.as_bytes()),
         })
     }
 }

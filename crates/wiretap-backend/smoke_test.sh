@@ -157,6 +157,100 @@ curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory" | python3 -c 'import sys,js
 curl -fsS -H "$A" "$BASE/v1/db/$DB/activity" | grep -q queries; check "activity" $?
 curl -fsS -H "$A" "$BASE/v1/admin/ingest-sessions" | grep -q sessions; check "ingest-sessions" $?
 
+# --- catalogue assignment, for a daemon id only this run uses ---
+CAT_DAEMON="smoke-$(date +%s)"
+CAT_IF="/dev/ttySMOKE"
+CAT_CRLF=$'[meta]\r\nname = "smoke"\r\n'
+cat_sha=$(printf '%s' "$CAT_CRLF" | python3 -c 'import sys,hashlib;c=sys.stdin.buffer.read();print(hashlib.sha1(b"blob %d\0"%len(c)+c).hexdigest())')
+assign() { # content, expected ("-" for none) -> body, then the status on its own line
+    python3 -c 'import json,sys;d,i,c,e=sys.argv[1:];b={"daemon_id":d,"interface":i,"content":c,"provenance":{"repo":"smoke"}};b.update({"expected":e} if e!="-" else {});print(json.dumps(b))' \
+        "$CAT_DAEMON" "$CAT_IF" "$1" "$2" \
+        | curl -s -w '\n%{http_code}' -X PUT -H "$A" -H "$J" --data-binary @- "$BASE/v1/admin/assignments"
+}
+cat_device() { # python over the device, as `d`
+    curl -fsS -H "$A" "$BASE/v1/admin/daemons" | python3 -c "import sys,json
+d=[d for x in json.load(sys.stdin)['daemons'] if x['daemon_id']=='$CAT_DAEMON' for d in x['devices'] if d['interface']=='$CAT_IF'][0]
+$1"
+}
+resp=$(assign "$CAT_CRLF" "")
+[ "${resp##*$'\n'}" = "200" ] && printf '%s' "${resp%$'\n'*}" | python3 -c 'import sys,json;a=json.load(sys.stdin)["assignment"];assert (a["blob_sha"],a["name"],a["provenance"])==(sys.argv[1],"smoke",{"repo":"smoke"}),a' "$cat_sha"
+check "assign a CRLF catalogue, only if unassigned -> 200" $?
+curl -fsS -H "$A" "$BASE/v1/admin/catalogs/$cat_sha" | python3 -c 'import sys,json;assert json.load(sys.stdin)["content"]==sys.argv[1]' "$CAT_CRLF"
+check "the stored catalogue comes back byte for byte" $?
+cat_device 'assert (d["bus"],d["database"],d["last_seen_us"],d["active"])==(None,None,None,None) and d["assignment"]["blob_sha"]=="'"$cat_sha"'",d'
+check "daemons lists it assigned but never seen" $?
+PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ADMIN_KEY" "$CAT_DAEMON" "$cat_sha" "$CAT_CRLF" <<'PYEOF'
+import struct, sys
+from test_ingest_client import ReferenceClient, frame_message
+host, port, token, daemon, sha, content = sys.argv[1:]
+c = ReferenceClient(host, int(port))
+name = b"/dev/ttySMOKE"
+hello = (b"WTAP" + bytes([3, 0, len(token)]) + token.encode() + b"\0"
+         + bytes([len(daemon)]) + daemon.encode() + bytes([1, 7, len(name)]) + name)
+c.send_raw(frame_message(0x01, hello))
+mtype, ack = c.recv_message()
+assert mtype == 0x81 and ack[:2] == bytes([0, 3]), ack.hex()
+assert ack[10:] == bytes([1, 7]) + bytes.fromhex(sha), ack.hex()
+got = b""
+while True:
+    c.send_raw(frame_message(0x04, bytes.fromhex(sha) + struct.pack("<I", len(got))))
+    mtype, cat = c.recv_message()
+    assert mtype == 0x84 and cat[0] == 0, cat[:1].hex()
+    got += cat[29:]
+    if len(got) >= struct.unpack_from("<I", cat, 21)[0]:
+        break
+assert got == content.encode(), got
+c.send_raw(frame_message(0x04, bytes(20) + struct.pack("<I", 0)))
+mtype, cat = c.recv_message()
+assert mtype == 0x84 and cat[0] == 1, cat[:1].hex()
+PYEOF
+check "a v3 HELLO gets its assignment, and CATALOG serves the blob byte for byte" $?
+PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ADMIN_KEY" "$CAT_DAEMON" "$cat_sha" "$BASE" <<'PYEOF'
+import json, sys, urllib.request
+from test_ingest_client import ReferenceClient, frame_message
+host, port, token, daemon, sha, base = sys.argv[1:]
+c = ReferenceClient(host, int(port))
+name = b"/dev/ttySMOKE"
+hello = (b"WTAP" + bytes([3, 0, len(token)]) + token.encode() + b"\0"
+         + bytes([len(daemon)]) + daemon.encode() + bytes([1, 7, len(name)]) + name)
+c.send_raw(frame_message(0x01, hello))
+assert c.recv_message()[0] == 0x81
+
+def report(refused=bytes(20), refusal=0):
+    entry = bytes([7, 2]) + bytes.fromhex(sha) + refused + bytes([refusal])
+    c.send_raw(frame_message(0x05, bytes([1]) + entry))
+    c.send_raw(frame_message(0x03))
+    assert c.recv_message()[0] == 0x83
+
+def device():
+    req = urllib.request.Request(f"{base}/v1/admin/daemons", headers={"Authorization": f"Bearer {token}"})
+    daemons = json.load(urllib.request.urlopen(req))["daemons"]
+    return [d for x in daemons if x["daemon_id"] == daemon for d in x["devices"]][0]
+
+report()
+first = device()
+assert first["bus"] == 7 and first["database"] and first["last_seen_us"], first
+active = first["active"]
+assert (active["source"], active["blob_sha"], active["name"], active["refused"]) == ("assigned", sha, "smoke", None), active
+report()
+assert device()["active"] == active, "an identical report moved since_us"
+report(bytes([0x22]) * 20, 2)
+again = device()["active"]
+assert again["refused"] == {"blob_sha": "22" * 20, "reason": "did_not_parse"}, again
+assert again["since_us"] == active["since_us"], "a refusal is not a change of catalogue"
+PYEOF
+check "a CATALOG_STATUS shows as active, its since unmoved by a repeat or a refusal" $?
+resp=$(assign $'[meta]\nname = "smoke 2"\n' "$(printf '%040d' 0)")
+[ "${resp##*$'\n'}" = "409" ] && printf '%s' "${resp%$'\n'*}" | python3 -c 'import sys,json;assert json.load(sys.stdin)["current"]==sys.argv[1]' "$cat_sha"
+check "assign with a stale expected -> 409 naming the current SHA" $?
+resp=$(assign $'[meta]\nversion = 0\n' "$cat_sha")
+[ "${resp##*$'\n'}" = "400" ] && printf '%s' "${resp%$'\n'*}" | python3 -c 'import sys,json;assert [f["field"] for f in json.load(sys.stdin)["findings"]]==["meta.name","meta.version"]'
+check "assign a catalogue that does not validate -> 400 with its findings" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$A" "$BASE/v1/admin/assignments?daemon_id=$CAT_DAEMON&interface=%2Fdev%2FttySMOKE&expected=$cat_sha")
+[ "$code" = "204" ]; check "clear the assignment -> 204" $?
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$A" "$BASE/v1/admin/assignments?daemon_id=$CAT_DAEMON&interface=%2Fdev%2FttySMOKE")
+[ "$code" = "404" ]; check "clear again -> 404" $?
+
 # --- logs ---
 curl -fsS -H "$A" "$BASE/v1/admin/logs" | grep -q records; check "logs" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/admin/logs")
@@ -191,45 +285,15 @@ if [ -n "${PGHOST:-}" ]; then
     [ "$code" = "503" ]; check "a query PostgreSQL fails -> 503" $?
     curl -fsS -X DELETE -H "$A" "$BASE/v1/databases/$PROBE_DB" >/dev/null
 
-    # Catalogue assignment, seeded in wiretap_meta by hand until the admin API
-    # assigns. A CRLF blob, which must come back byte for byte.
-    META_DB="${WIRETAP_DEFAULT_DB:-wiretap}"
-    CAT_DAEMON="smoke-$(date +%s)"
-    meta() { psql -U postgres -d "$META_DB" -tAc "$1"; }
-    read -r cat_sha cat_hex < <(python3 -c 'import hashlib;c=b"[meta]\r\nname = \"smoke\"\r\n";print(hashlib.sha1(b"blob %d\0"%len(c)+c).hexdigest(),c.hex())')
-    meta "INSERT INTO wiretap_meta.catalog_blobs (blob_sha, content) VALUES (decode('$cat_sha','hex'), convert_from(decode('$cat_hex','hex'),'UTF8')) ON CONFLICT DO NOTHING;
-          INSERT INTO wiretap_meta.catalog_assignments (daemon_id, interface, blob_sha) VALUES ('$CAT_DAEMON', '/dev/ttySMOKE', decode('$cat_sha','hex'))" >/dev/null
-    PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ADMIN_KEY" "$CAT_DAEMON" "$cat_sha" "$cat_hex" <<'PYEOF'
-import struct, sys
-from test_ingest_client import ReferenceClient, frame_message
-host, port, token, daemon, sha, content = sys.argv[1:]
-c = ReferenceClient(host, int(port))
-name = b"/dev/ttySMOKE"
-hello = (b"WTAP" + bytes([3, 0, len(token)]) + token.encode() + b"\0"
-         + bytes([len(daemon)]) + daemon.encode() + bytes([1, 7, len(name)]) + name)
-c.send_raw(frame_message(0x01, hello))
-mtype, ack = c.recv_message()
-assert mtype == 0x81 and ack[:2] == bytes([0, 3]), ack.hex()
-assert ack[10:] == bytes([1, 7]) + bytes.fromhex(sha), ack.hex()
-got = b""
-while True:
-    c.send_raw(frame_message(0x04, bytes.fromhex(sha) + struct.pack("<I", len(got))))
-    mtype, cat = c.recv_message()
-    assert mtype == 0x84 and cat[0] == 0, cat[:1].hex()
-    got += cat[29:]
-    if len(got) >= struct.unpack_from("<I", cat, 21)[0]:
-        break
-assert got == bytes.fromhex(content), got
-c.send_raw(frame_message(0x04, bytes(20) + struct.pack("<I", 0)))
-mtype, cat = c.recv_message()
-assert mtype == 0x84 and cat[0] == 1, cat[:1].hex()
-PYEOF
-    check "a v3 HELLO gets its assignment, and CATALOG serves the blob byte for byte" $?
-    [ "$(meta "SELECT bus || ' ' || database FROM wiretap_meta.daemon_devices WHERE daemon_id = '$CAT_DAEMON'")" = "7 $META_DB" ]
-    check "a v3 HELLO records the daemon's devices" $?
-    meta "DELETE FROM wiretap_meta.catalog_assignments WHERE daemon_id = '$CAT_DAEMON';
-          DELETE FROM wiretap_meta.daemon_devices WHERE daemon_id = '$CAT_DAEMON';
-          DELETE FROM wiretap_meta.catalog_blobs WHERE blob_sha = decode('$cat_sha','hex')" >/dev/null
+    if [ -n "${cat_sha:-}" ]; then
+        meta() { psql -U postgres -d "${WIRETAP_DEFAULT_DB:-wiretap}" -tAc "$1"; }
+        meta "DELETE FROM wiretap_meta.catalog_assignment_history WHERE daemon_id = '$CAT_DAEMON';
+              DELETE FROM wiretap_meta.daemon_devices WHERE daemon_id = '$CAT_DAEMON';
+              DELETE FROM wiretap_meta.daemon_active WHERE daemon_id = '$CAT_DAEMON';
+              DELETE FROM wiretap_meta.catalog_blobs b WHERE b.blob_sha = decode('$cat_sha','hex')
+                AND NOT EXISTS (SELECT 1 FROM wiretap_meta.catalog_assignments a WHERE a.blob_sha = b.blob_sha)" >/dev/null
+        check "the catalogue checks' rows are cleared" $?
+    fi
 else
     echo "  [skip] PostgreSQL checks: set PGHOST and PGPASSWORD to reach it with psql"
 fi

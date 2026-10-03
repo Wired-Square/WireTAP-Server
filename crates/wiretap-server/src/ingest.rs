@@ -181,6 +181,7 @@ impl Session {
                         machine.ack(seq, status, self.archive.occupancy_pct())
                     }
                     Action::CatalogGet(_) => machine.answer_catalog(Err(proto::CATALOG_UNKNOWN)),
+                    Action::CatalogStatus(_) => continue,
                     Action::Close(CloseReason::Framing) => {
                         warn!("Ingest client {} sent bogus length, dropping", self.peer);
                         return;

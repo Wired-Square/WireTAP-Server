@@ -5,9 +5,14 @@
 //! A blob is stored and served exactly as it was assigned, CRLF and BOM
 //! included: its name is the Git blob SHA-1 of those bytes.
 
-use serde_json::Value;
+use chrono::{DateTime, Utc};
+use tokio_postgres::Row;
+use wiretap_gateway::{
+    AssignCatalog, CatalogFinding, Daemon, DaemonDevice, DaemonList, Provenance, RefusedCatalog,
+    StoredCatalog, UnassignParams,
+};
 use wiretap_model::{blob_sha1, blob_sha1_hex};
-use wiretap_protocol::ingest::{valid_daemon_id, Assignment, Device};
+use wiretap_protocol::ingest::{self, valid_daemon_id, Assignment, CatalogStatus, Device, Refusal};
 
 use crate::db::Databases;
 use crate::ingest::Sessions;
@@ -43,21 +48,25 @@ CREATE TABLE IF NOT EXISTS wiretap_meta.daemon_devices (
   last_seen  timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (daemon_id, interface)
 );
+CREATE TABLE IF NOT EXISTS wiretap_meta.daemon_active (
+  daemon_id    text,
+  interface    text,
+  source       text        NOT NULL,
+  blob_sha     bytea,
+  refused_sha  bytea,
+  refusal      text,
+  since        timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (daemon_id, interface)
+);
 "#;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum AssignError {
     /// The request itself: no retry will take it.
-    Invalid(String),
+    Rejected(Vec<CatalogFinding>),
+    /// `expected` is not what is assigned now, which is this SHA.
+    Conflict(Option<String>),
     Database(String),
-}
-
-impl std::fmt::Display for AssignError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Invalid(why) | Self::Database(why) => f.write_str(why),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -127,6 +136,65 @@ impl Catalogs {
         Ok(through_device_map(&assigned, devices))
     }
 
+    /// Replace what `daemon_id` last reported for the interfaces its `HELLO`
+    /// named. `since` moves only when the catalogue itself changes.
+    pub async fn record_status(
+        &self,
+        daemon_id: &str,
+        devices: &[Device],
+        status: &CatalogStatus,
+    ) -> Result<(), String> {
+        let rows = active_rows(devices, status);
+        let interfaces: Vec<&str> = rows.iter().map(|r| r.interface).collect();
+        let sources: Vec<&str> = rows.iter().map(|r| r.source).collect();
+        let shas: Vec<Option<&[u8]>> = rows
+            .iter()
+            .map(|r| r.blob_sha.as_ref().map(|s| &s[..]))
+            .collect();
+        let refused: Vec<Option<&[u8]>> = rows
+            .iter()
+            .map(|r| r.refused.as_ref().map(|(s, _)| &s[..]))
+            .collect();
+        let refusals: Vec<Option<&str>> =
+            rows.iter().map(|r| r.refused.map(|(_, why)| why)).collect();
+        let named: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+        let db =
+            |e: tokio_postgres::Error| format!("recording {daemon_id}'s catalogues failed: {e}");
+        let mut client = self.client().await?;
+        let tx = client.transaction().await.map_err(db)?;
+        tx.execute(
+            "INSERT INTO wiretap_meta.daemon_active \
+             (daemon_id, interface, source, blob_sha, refused_sha, refusal) \
+             SELECT $1, i, s, b, r, why \
+             FROM UNNEST($2::text[], $3::text[], $4::bytea[], $5::bytea[], $6::text[]) \
+               AS a(i, s, b, r, why) \
+             ON CONFLICT (daemon_id, interface) DO UPDATE SET \
+               since = CASE WHEN (daemon_active.source, daemon_active.blob_sha) \
+                 IS NOT DISTINCT FROM (EXCLUDED.source, EXCLUDED.blob_sha) \
+                 THEN daemon_active.since ELSE now() END, \
+               source = EXCLUDED.source, blob_sha = EXCLUDED.blob_sha, \
+               refused_sha = EXCLUDED.refused_sha, refusal = EXCLUDED.refusal",
+            &[
+                &daemon_id,
+                &interfaces,
+                &sources,
+                &shas,
+                &refused,
+                &refusals,
+            ],
+        )
+        .await
+        .map_err(db)?;
+        tx.execute(
+            "DELETE FROM wiretap_meta.daemon_active \
+             WHERE daemon_id = $1 AND interface = ANY($2) AND NOT interface = ANY($3)",
+            &[&daemon_id, &named, &interfaces],
+        )
+        .await
+        .map_err(db)?;
+        tx.commit().await.map_err(db)
+    }
+
     pub async fn blob(&self, sha: &[u8; 20]) -> Result<Option<String>, String> {
         let row = self
             .client()
@@ -140,27 +208,33 @@ impl Catalogs {
         Ok(row.map(|r| r.get(0)))
     }
 
-    /// Assign `content` to a daemon's interface, and close that daemon's live
-    /// sessions that carry the interface so they reconnect to it. The blob's
-    /// SHA-1 comes back.
-    #[allow(dead_code, reason = "the admin API calls it")]
+    /// Assign a catalogue to a daemon's interface, and close that daemon's
+    /// live sessions that carry the interface so they reconnect to it.
     pub async fn assign(
         &self,
-        daemon_id: &str,
-        interface: &str,
-        content: &str,
-        provenance: &Value,
-        assigned_by: Option<&str>,
-    ) -> Result<[u8; 20], AssignError> {
+        request: &AssignCatalog,
+        assigned_by: &str,
+    ) -> Result<wiretap_gateway::Assignment, AssignError> {
+        let AssignCatalog {
+            daemon_id,
+            interface,
+            content,
+            ..
+        } = request;
         check_key(daemon_id, interface)?;
-        let sha = checked_blob(content, provenance)?;
+        let (sha, name) = checked_blob(content, &request.provenance)?;
+        let provenance = serde_json::to_string(&request.provenance).expect("plain JSON");
         let db = |e: tokio_postgres::Error| AssignError::Database(format!("assign failed: {e}"));
         let mut client = self.client().await.map_err(AssignError::Database)?;
         let tx = client.transaction().await.map_err(db)?;
+        let current = lock_assignment(&tx, daemon_id, interface)
+            .await
+            .map_err(db)?;
+        guard(request.expected.as_deref(), current.as_deref())?;
         tx.execute(
             "INSERT INTO wiretap_meta.catalog_blobs (blob_sha, content, provenance) \
              VALUES ($1, $2, $3::text::jsonb) ON CONFLICT (blob_sha) DO NOTHING",
-            &[&sha.as_slice(), &content, &provenance.to_string()],
+            &[&sha.as_slice(), content, &provenance],
         )
         .await
         .map_err(db)?;
@@ -172,7 +246,7 @@ impl Catalogs {
                  SET blob_sha = EXCLUDED.blob_sha, assigned_at = now(), \
                      assigned_by = EXCLUDED.assigned_by \
                  WHERE catalog_assignments.blob_sha <> EXCLUDED.blob_sha",
-                &[&daemon_id, &interface, &sha.as_slice(), &assigned_by],
+                &[daemon_id, interface, &sha.as_slice(), &assigned_by],
             )
             .await
             .map_err(db)?
@@ -182,29 +256,52 @@ impl Catalogs {
                 .await
                 .map_err(db)?;
         }
+        let row = tx
+            .query_one(
+                "SELECT a.assigned_at, a.assigned_by, b.provenance::text \
+                 FROM wiretap_meta.catalog_assignments a \
+                 JOIN wiretap_meta.catalog_blobs b USING (blob_sha) \
+                 WHERE a.daemon_id = $1 AND a.interface = $2",
+                &[daemon_id, interface],
+            )
+            .await
+            .map_err(db)?;
         tx.commit().await.map_err(db)?;
         if changed {
             self.sessions.reassign(daemon_id, interface).await;
         }
-        Ok(sha)
+        Ok(wiretap_gateway::Assignment {
+            blob_sha: blob_sha1_hex(&sha),
+            name: Some(name),
+            assigned_at_us: row.get::<_, DateTime<Utc>>(0).timestamp_micros(),
+            assigned_by: row.get(1),
+            provenance: provenance_of(row.get(2)),
+        })
     }
 
     /// Whether there was an assignment to clear.
-    #[allow(dead_code, reason = "the admin API calls it")]
     pub async fn clear(
         &self,
-        daemon_id: &str,
-        interface: &str,
-        cleared_by: Option<&str>,
-    ) -> Result<bool, String> {
-        let db = |e: tokio_postgres::Error| format!("clear failed: {e}");
-        let mut client = self.client().await?;
+        params: &UnassignParams,
+        cleared_by: &str,
+    ) -> Result<bool, AssignError> {
+        let UnassignParams {
+            daemon_id,
+            interface,
+            expected,
+        } = params;
+        let db = |e: tokio_postgres::Error| AssignError::Database(format!("clear failed: {e}"));
+        let mut client = self.client().await.map_err(AssignError::Database)?;
         let tx = client.transaction().await.map_err(db)?;
+        let current = lock_assignment(&tx, daemon_id, interface)
+            .await
+            .map_err(db)?;
+        guard(expected.as_deref(), current.as_deref())?;
         let cleared = tx
             .execute(
                 "DELETE FROM wiretap_meta.catalog_assignments \
                  WHERE daemon_id = $1 AND interface = $2",
-                &[&daemon_id, &interface],
+                &[daemon_id, interface],
             )
             .await
             .map_err(db)?
@@ -220,6 +317,143 @@ impl Catalogs {
         }
         Ok(cleared)
     }
+
+    /// Every daemon that has named a device or been assigned a catalogue.
+    pub async fn daemons(&self) -> Result<DaemonList, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "WITH named AS ( \
+                   SELECT daemon_id, interface FROM wiretap_meta.daemon_devices \
+                   UNION SELECT daemon_id, interface FROM wiretap_meta.catalog_assignments) \
+                 SELECT n.daemon_id, n.interface, d.bus, d.database, d.last_seen, \
+                   a.blob_sha, a.assigned_at, a.assigned_by, ab.content, ab.provenance::text, \
+                   x.source, x.blob_sha, x.since, xb.content, x.refused_sha, x.refusal \
+                 FROM named n \
+                 LEFT JOIN wiretap_meta.daemon_devices d USING (daemon_id, interface) \
+                 LEFT JOIN wiretap_meta.catalog_assignments a USING (daemon_id, interface) \
+                 LEFT JOIN wiretap_meta.catalog_blobs ab ON ab.blob_sha = a.blob_sha \
+                 LEFT JOIN wiretap_meta.daemon_active x USING (daemon_id, interface) \
+                 LEFT JOIN wiretap_meta.catalog_blobs xb ON xb.blob_sha = x.blob_sha \
+                 ORDER BY n.daemon_id, d.bus NULLS LAST, n.interface",
+                &[],
+            )
+            .await
+            .map_err(|e| format!("reading the daemons failed: {e}"))?;
+        let mut daemons: Vec<Daemon> = Vec::new();
+        for row in &rows {
+            let daemon_id: String = row.get(0);
+            let device = daemon_device(row);
+            match daemons.last_mut() {
+                Some(d) if d.daemon_id == daemon_id => d.devices.push(device),
+                _ => daemons.push(Daemon {
+                    daemon_id,
+                    devices: vec![device],
+                }),
+            }
+        }
+        Ok(DaemonList { daemons })
+    }
+
+    pub async fn stored(&self, sha: &[u8; 20]) -> Result<Option<StoredCatalog>, String> {
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "SELECT content, provenance::text, created_at \
+                 FROM wiretap_meta.catalog_blobs WHERE blob_sha = $1",
+                &[&sha.as_slice()],
+            )
+            .await
+            .map_err(|e| format!("reading catalogue {} failed: {e}", blob_sha1_hex(sha)))?;
+        Ok(row.map(|r| StoredCatalog {
+            blob_sha: blob_sha1_hex(sha),
+            content: r.get(0),
+            provenance: provenance_of(r.get(1)),
+            created_at_us: r.get::<_, DateTime<Utc>>(2).timestamp_micros(),
+        }))
+    }
+}
+
+/// One row of [`Catalogs::daemons`]' query.
+fn daemon_device(row: &Row) -> DaemonDevice {
+    let micros = |i: usize| {
+        row.get::<_, Option<DateTime<Utc>>>(i)
+            .map(|t| t.timestamp_micros())
+    };
+    let text = |i: usize| row.get::<_, Option<String>>(i);
+    let sha = |i: usize| row.get::<_, Option<Vec<u8>>>(i).map(hex::encode);
+    let assignment = sha(5).map(|blob_sha| wiretap_gateway::Assignment {
+        blob_sha,
+        name: text(8).as_deref().and_then(catalogue_name),
+        assigned_at_us: micros(6).unwrap_or_default(),
+        assigned_by: text(7),
+        provenance: text(9).map(provenance_of).unwrap_or_default(),
+    });
+    let refused = sha(14)
+        .zip(text(15))
+        .map(|(blob_sha, reason)| RefusedCatalog { blob_sha, reason });
+    let active = text(10).map(|source| wiretap_gateway::ActiveCatalog {
+        source,
+        blob_sha: sha(11),
+        name: text(13).as_deref().and_then(catalogue_name),
+        since_us: micros(12).unwrap_or_default(),
+        refused,
+    });
+    DaemonDevice {
+        interface: row.get(1),
+        bus: row
+            .get::<_, Option<i16>>(2)
+            .and_then(|b| u8::try_from(b).ok()),
+        database: text(3),
+        last_seen_us: micros(4),
+        assignment,
+        active,
+    }
+}
+
+fn catalogue_name(content: &str) -> Option<String> {
+    wiretap_catalog::rtu_rules(content).ok().map(|r| r.name)
+}
+
+/// The default for stored JSON whose fields do not fit `Provenance`.
+fn provenance_of(json: String) -> Provenance {
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+/// Hold `(daemon_id, interface)` for the rest of `tx`, and read the SHA
+/// assigned there. An advisory lock, as there is no row to lock until the
+/// first assignment.
+async fn lock_assignment(
+    tx: &tokio_postgres::Transaction<'_>,
+    daemon_id: &str,
+    interface: &str,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1 || '/' || $2, 0))",
+        &[&daemon_id, &interface],
+    )
+    .await?;
+    let row = tx
+        .query_opt(
+            "SELECT blob_sha FROM wiretap_meta.catalog_assignments \
+             WHERE daemon_id = $1 AND interface = $2",
+            &[&daemon_id, &interface],
+        )
+        .await?;
+    Ok(row.map(|r| hex::encode(r.get::<_, Vec<u8>>(0))))
+}
+
+/// `expected` against the SHA assigned now: `""` expects none, and absent
+/// expects nothing.
+fn guard(expected: Option<&str>, current: Option<&str>) -> Result<(), AssignError> {
+    match expected {
+        Some(e) if !e.eq_ignore_ascii_case(current.unwrap_or("")) => {
+            Err(AssignError::Conflict(current.map(str::to_owned)))
+        }
+        _ => Ok(()),
+    }
 }
 
 async fn record_history(
@@ -227,7 +461,7 @@ async fn record_history(
     daemon_id: &str,
     interface: &str,
     sha: Option<&[u8; 20]>,
-    assigned_by: Option<&str>,
+    assigned_by: &str,
 ) -> Result<u64, tokio_postgres::Error> {
     tx.execute(
         "INSERT INTO wiretap_meta.catalog_assignment_history \
@@ -257,56 +491,105 @@ fn through_device_map(assigned: &[(String, Vec<u8>)], devices: &[Device]) -> Vec
         .collect()
 }
 
+#[derive(Debug, PartialEq)]
+struct ActiveRow<'a> {
+    interface: &'a str,
+    source: &'static str,
+    blob_sha: Option<[u8; 20]>,
+    refused: Option<([u8; 20], &'static str)>,
+}
+
+/// A row for each reported bus the `HELLO` named, under the interface it
+/// named on that bus.
+fn active_rows<'a>(devices: &'a [Device], status: &CatalogStatus) -> Vec<ActiveRow<'a>> {
+    status
+        .entries
+        .iter()
+        .filter_map(|e| {
+            let device = devices.iter().find(|d| d.bus == e.bus)?;
+            let (source, blob_sha) = match e.active {
+                ingest::ActiveCatalog::None => ("none", None),
+                ingest::ActiveCatalog::Local(sha) => ("local", Some(sha)),
+                ingest::ActiveCatalog::Assigned(sha) => ("assigned", Some(sha)),
+            };
+            let refused = e.refused.map(|(sha, why)| {
+                let why = match why {
+                    Refusal::HashMismatch => "hash_mismatch",
+                    Refusal::DidNotParse => "did_not_parse",
+                    Refusal::FetchFailed => "fetch_failed",
+                    Refusal::Other(_) => "other",
+                };
+                (sha, why)
+            });
+            Some(ActiveRow {
+                interface: &device.name,
+                source,
+                blob_sha,
+                refused,
+            })
+        })
+        .collect()
+}
+
+fn rejected(field: &str, message: String) -> AssignError {
+    AssignError::Rejected(vec![CatalogFinding {
+        field: field.into(),
+        message,
+    }])
+}
+
 fn check_key(daemon_id: &str, interface: &str) -> Result<(), AssignError> {
     if !valid_daemon_id(daemon_id) {
-        return Err(AssignError::Invalid(format!(
-            "{daemon_id:?} is not a daemon id"
-        )));
+        let why = format!("{daemon_id:?} is not a daemon id");
+        return Err(rejected("daemon_id", why));
     }
     if interface.is_empty() || interface.len() > 255 {
-        return Err(AssignError::Invalid(format!(
-            "an interface is 1 to 255 bytes, not {}",
-            interface.len()
-        )));
+        let why = format!("an interface is 1 to 255 bytes, not {}", interface.len());
+        return Err(rejected("interface", why));
     }
     Ok(())
 }
 
-/// The blob's SHA-1, once `provenance.blob_sha` (when given) agrees with it
-/// and the daemon's own reader would take the catalogue: `rtu_rules`, and a
-/// name. That is the check the daemon applies to a catalogue in `/etc`, so a
-/// catalogue the gateway takes is one every daemon frames with.
-fn checked_blob(content: &str, provenance: &Value) -> Result<[u8; 20], AssignError> {
+/// The blob's SHA-1 and name, once `provenance.blob_sha` (when given) agrees
+/// with it, the catalogue validates, and the daemon's own reader would take
+/// it: `rtu_rules`, and a name. That is the check the daemon applies to a
+/// catalogue in `/etc`, so a catalogue the gateway takes is one every daemon
+/// frames with.
+fn checked_blob(content: &str, provenance: &Provenance) -> Result<([u8; 20], String), AssignError> {
     let sha = blob_sha1(content.as_bytes());
-    match provenance.get("blob_sha") {
-        None => {}
-        Some(Value::String(claimed)) if claimed.eq_ignore_ascii_case(&blob_sha1_hex(&sha)) => {}
-        Some(Value::String(claimed)) => {
-            return Err(AssignError::Invalid(format!(
-                "provenance.blob_sha is {claimed}, but the content hashes to {}",
-                blob_sha1_hex(&sha)
-            )))
-        }
-        Some(_) => {
-            return Err(AssignError::Invalid(
-                "provenance.blob_sha must be a hex string".into(),
-            ))
+    if let Some(claimed) = &provenance.blob_sha {
+        let hex = blob_sha1_hex(&sha);
+        if !claimed.eq_ignore_ascii_case(&hex) {
+            let why = format!("{claimed}, but the content hashes to {hex}");
+            return Err(rejected("provenance.blob_sha", why));
         }
     }
-    let rules = wiretap_catalog::rtu_rules(content)
-        .map_err(|e| AssignError::Invalid(format!("catalogue: {e}")))?;
+    let findings = wiretap_catalog::validate::validate(content);
+    if !findings.is_empty() {
+        let findings = findings.into_iter().map(|f| CatalogFinding {
+            field: f.field,
+            message: f.message,
+        });
+        return Err(AssignError::Rejected(findings.collect()));
+    }
+    let rules = wiretap_catalog::rtu_rules(content).map_err(|e| {
+        rejected(
+            "catalogue",
+            format!("the capture daemon would refuse it: {e}"),
+        )
+    })?;
     if rules.name.is_empty() {
-        return Err(AssignError::Invalid(
-            "catalogue: meta.name: Catalog name must not be empty".into(),
+        return Err(rejected(
+            "meta.name",
+            "Catalog name must not be empty".into(),
         ));
     }
-    Ok(sha)
+    Ok((sha, rules.name))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     const CATALOGUE: &str = "[meta]\nname = \"bench\"\n";
 
@@ -336,52 +619,133 @@ mod tests {
     }
 
     #[test]
+    fn a_catalogue_status_is_stored_under_the_interfaces_its_hello_named() {
+        let (assigned, refused, local) = (blob_sha1(b"a"), blob_sha1(b"r"), blob_sha1(b"l"));
+        let entry = |bus, active, refused| ingest::CatalogStatusEntry {
+            bus,
+            active,
+            refused,
+        };
+        let status = CatalogStatus {
+            entries: vec![
+                entry(
+                    4,
+                    ingest::ActiveCatalog::Assigned(assigned),
+                    Some((refused, Refusal::DidNotParse)),
+                ),
+                entry(0, ingest::ActiveCatalog::None, None),
+                entry(5, ingest::ActiveCatalog::Local(local), None),
+                entry(9, ingest::ActiveCatalog::None, None),
+            ],
+        };
+        let devices = [
+            device(0, "can0"),
+            device(4, "/dev/ttyUSB0"),
+            device(5, "/dev/ttyUSB1"),
+        ];
+        let row = |interface, source, blob_sha, refused| ActiveRow {
+            interface,
+            source,
+            blob_sha,
+            refused,
+        };
+        assert_eq!(
+            active_rows(&devices, &status),
+            [
+                row(
+                    "/dev/ttyUSB0",
+                    "assigned",
+                    Some(assigned),
+                    Some((refused, "did_not_parse"))
+                ),
+                row("can0", "none", None, None),
+                row("/dev/ttyUSB1", "local", Some(local), None),
+            ],
+            "bus 9 was not in the HELLO"
+        );
+    }
+
+    fn findings(content: &str) -> Vec<(String, String)> {
+        let Err(AssignError::Rejected(found)) = checked_blob(content, &Provenance::default())
+        else {
+            panic!("{content:?} was taken");
+        };
+        found.into_iter().map(|f| (f.field, f.message)).collect()
+    }
+
+    #[test]
     fn a_blob_is_named_by_its_git_sha() {
-        let sha = checked_blob(CATALOGUE, &json!({})).unwrap();
-        assert_eq!(sha, blob_sha1(CATALOGUE.as_bytes()));
-        let claimed = json!({ "blob_sha": blob_sha1_hex(&sha).to_uppercase() });
-        assert_eq!(checked_blob(CATALOGUE, &claimed), Ok(sha));
+        let (sha, name) = checked_blob(CATALOGUE, &Provenance::default()).unwrap();
+        assert_eq!(
+            (sha, name.as_str()),
+            (blob_sha1(CATALOGUE.as_bytes()), "bench")
+        );
+        let claimed = Provenance {
+            blob_sha: Some(blob_sha1_hex(&sha).to_uppercase()),
+            ..Provenance::default()
+        };
+        assert_eq!(checked_blob(CATALOGUE, &claimed).unwrap().0, sha);
     }
 
     #[test]
     fn a_claimed_sha_the_content_does_not_hash_to_is_refused() {
-        let wrong = json!({ "blob_sha": blob_sha1_hex(&blob_sha1(b"other")) });
-        let Err(AssignError::Invalid(why)) = checked_blob(CATALOGUE, &wrong) else {
+        let wrong = Provenance {
+            blob_sha: Some(blob_sha1_hex(&blob_sha1(b"other"))),
+            ..Provenance::default()
+        };
+        let Err(AssignError::Rejected(found)) = checked_blob(CATALOGUE, &wrong) else {
             panic!("taken");
         };
-        assert!(why.contains("hashes to"), "{why}");
-        assert!(matches!(
-            checked_blob(CATALOGUE, &json!({ "blob_sha": 5 })),
-            Err(AssignError::Invalid(_))
-        ));
+        assert_eq!(found[0].field, "provenance.blob_sha");
+        assert!(found[0].message.contains("hashes to"), "{found:?}");
     }
 
     #[test]
     fn a_crlf_catalogue_is_hashed_as_it_came() {
         let crlf = CATALOGUE.replace('\n', "\r\n");
-        assert_eq!(
-            checked_blob(&crlf, &json!({})),
-            Ok(blob_sha1(crlf.as_bytes()))
-        );
-        assert_ne!(blob_sha1(crlf.as_bytes()), blob_sha1(CATALOGUE.as_bytes()));
+        let (sha, _) = checked_blob(&crlf, &Provenance::default()).unwrap();
+        assert_eq!(sha, blob_sha1(crlf.as_bytes()));
+        assert_ne!(sha, blob_sha1(CATALOGUE.as_bytes()));
     }
 
     #[test]
-    fn a_catalogue_the_daemon_would_refuse_is_refused() {
-        for (text, why) in [
-            ("[meta\n", "not valid TOML"),
-            ("[meta]\nname = \"\"\n", "must not be empty"),
-            (
-                "[meta]\nname = \"x\"\n[meta.modbus.function_code.0x60]\n\
-                 lengths = [{ when = { offset = 4, value = 3 } }]\n",
-                "function_code.0x60.lengths[0]",
-            ),
-        ] {
-            let Err(AssignError::Invalid(got)) = checked_blob(text, &json!({})) else {
-                panic!("{text:?} was taken");
-            };
-            assert!(got.contains(why), "{text:?}: {got}");
-        }
+    fn a_catalogue_that_does_not_validate_is_refused_with_its_findings() {
+        let unreadable_rule = "[meta]\nname = \"x\"\n[meta.modbus.function_code.0x60]\n\
+                               lengths = [{ when = { offset = 4, value = 3 } }]\n";
+        assert_eq!(
+            findings(unreadable_rule),
+            [(
+                "meta.modbus.function_code.0x60.lengths[0]".to_string(),
+                "A length rule needs a len of { fixed } or { count_at, overhead }, \
+                 and optionally a when of { offset, value }"
+                    .to_string()
+            )]
+        );
+        assert_eq!(findings("[meta\n")[0].0, "toml");
+    }
+
+    #[test]
+    fn a_catalogue_that_validates_but_the_daemon_would_refuse_names_why() {
+        assert_eq!(
+            findings("[meta]\nname = \"\"\n"),
+            [(
+                "meta.name".to_string(),
+                "Catalog name must not be empty".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn expected_guards_against_a_concurrent_change() {
+        let now = blob_sha1_hex(&blob_sha1(b"now"));
+        assert_eq!(guard(None, Some(&now)), Ok(()));
+        assert_eq!(guard(Some(&now.to_uppercase()), Some(&now)), Ok(()));
+        assert_eq!(guard(Some(""), None), Ok(()), "only if unassigned");
+        assert_eq!(
+            guard(Some(""), Some(&now)),
+            Err(AssignError::Conflict(Some(now.clone())))
+        );
+        assert_eq!(guard(Some(&now), None), Err(AssignError::Conflict(None)));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! HTTP API: query surface (ports of the desktop dbquery commands), admin
-//! (keys, databases, ingest sessions, activity), capture import, health.
+//! (keys, databases, ingest sessions, activity, daemons and their catalogues),
+//! capture import, health.
 //! Auth is `Authorization: Bearer <api-key>`; roles read|ingest|admin.
 
 use std::sync::Arc;
@@ -10,14 +11,19 @@ use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post, MethodRouter};
+use axum::routing::{delete, get, patch, post, put, MethodRouter};
 use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use wiretap_gateway::{
+    AssignCatalog, AssignedCatalog, AssignmentConflict, CatalogRejected, DaemonList, StoredCatalog,
+    UnassignParams,
+};
 use wiretap_protocol::import::parse_record;
 use wiretap_protocol::ingest::RecordKind;
 
+use crate::catalogs::AssignError;
 use crate::db;
 use crate::events;
 use crate::ingest::writer::FrameRow;
@@ -65,6 +71,10 @@ fn not_found(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::NOT_FOUND, msg.into())
 }
 
+fn unavailable(msg: String) -> ApiError {
+    ApiError(StatusCode::SERVICE_UNAVAILABLE, msg)
+}
+
 pub fn router(state: St) -> Router {
     let authed = Router::new()
         // databases
@@ -110,6 +120,12 @@ pub fn router(state: St) -> Router {
         .route("/v1/admin/keys/{id}/revoke", post(keys_revoke))
         .route("/v1/admin/keys/{id}/restore", post(keys_restore))
         .route("/v1/admin/ingest-sessions", polled(get(ingest_sessions)))
+        .route("/v1/admin/daemons", polled(get(daemons)))
+        .route(
+            "/v1/admin/assignments",
+            put(assignments_put).delete(assignments_delete),
+        )
+        .route("/v1/admin/catalogs/{sha}", get(catalog_get))
         .route("/v1/admin/logs", polled(get(logs)))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw));
 
@@ -870,6 +886,95 @@ async fn ingest_sessions(
     Ok(Json(json!({ "sessions": state.sessions.list().await })))
 }
 
+// ---------------------------------------------------------------------------
+// Admin: daemons and their catalogues
+// ---------------------------------------------------------------------------
+
+impl IntoResponse for AssignError {
+    fn into_response(self) -> Response {
+        match self {
+            AssignError::Rejected(findings) => {
+                let error = findings
+                    .iter()
+                    .map(|f| format!("{}: {}", f.field, f.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let body = CatalogRejected { error, findings };
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            AssignError::Conflict(current) => {
+                let error = "the assignment changed since it was read".into();
+                let body = AssignmentConflict { error, current };
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            AssignError::Database(e) => unavailable(e).into_response(),
+        }
+    }
+}
+
+async fn daemons(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+) -> Result<Json<DaemonList>, ApiError> {
+    check_admin(&key)?;
+    Ok(Json(state.catalogs.daemons().await.map_err(unavailable)?))
+}
+
+async fn assignments_put(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Json(body): Json<AssignCatalog>,
+) -> Response {
+    if let Err(e) = check_admin(&key) {
+        return e.into_response();
+    }
+    match state.catalogs.assign(&body, &key.name).await {
+        Ok(assignment) => Json(AssignedCatalog {
+            daemon_id: body.daemon_id,
+            interface: body.interface,
+            assignment,
+            warnings: Vec::new(),
+        })
+        .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn assignments_delete(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Query(params): Query<UnassignParams>,
+) -> Response {
+    if let Err(e) = check_admin(&key) {
+        return e.into_response();
+    }
+    match state.catalogs.clear(&params, &key.name).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => not_found("nothing is assigned there").into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn catalog_get(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(sha): Path<String>,
+) -> Result<Json<StoredCatalog>, ApiError> {
+    check_admin(&key)?;
+    let blob_sha = hex::decode(&sha)
+        .ok()
+        .and_then(|b| <[u8; 20]>::try_from(b).ok())
+        .ok_or_else(|| ApiError::from(format!("{sha:?} is not a SHA-1")))?;
+    let stored = state
+        .catalogs
+        .stored(&blob_sha)
+        .await
+        .map_err(unavailable)?;
+    stored
+        .map(Json)
+        .ok_or_else(|| not_found(format!("no catalogue {sha}")))
+}
+
 #[derive(Deserialize)]
 struct LogsQuery {
     level: Option<String>,
@@ -1004,5 +1109,147 @@ mod tests {
     #[test]
     fn an_empty_cluster_is_unknown_not_a_version() {
         assert_eq!(schema_consensus(&HashMap::new()), "unknown");
+    }
+
+    /// The router over a PostgreSQL that is not there, taking the key
+    /// `bootstrap` as admin.
+    async fn gateway() -> std::net::SocketAddr {
+        let dbs = db::tests::unreachable_databases(true);
+        let sessions = crate::ingest::Sessions::default();
+        let state = Arc::new(AppState {
+            keys: crate::keys::KeyStore::new(dbs.clone(), Some("bootstrap")),
+            catalogs: crate::catalogs::Catalogs::new(dbs.clone(), sessions.clone()),
+            dbs,
+            sessions,
+            logs: crate::logbuf::LogBuffer::new(16),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        addr
+    }
+
+    /// The status, and the body as JSON (`null` when it is not).
+    async fn request(
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (u16, serde_json::Value) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(gateway().await)
+            .await
+            .unwrap();
+        let body = body.map(|b| b.to_string()).unwrap_or_default();
+        let auth = key.map_or(String::new(), |k| format!("Authorization: Bearer {k}\r\n"));
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n{auth}\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all((head + &body).as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+        (status, serde_json::from_str(body).unwrap_or_default())
+    }
+
+    fn assign(content: &str, provenance: serde_json::Value) -> serde_json::Value {
+        json!({
+            "daemon_id": "bench",
+            "interface": "/dev/ttyUSB0",
+            "content": content,
+            "provenance": provenance,
+        })
+    }
+
+    #[tokio::test]
+    async fn the_admin_catalogue_routes_need_a_key() {
+        for (method, path) in [
+            ("GET", "/v1/admin/daemons"),
+            ("PUT", "/v1/admin/assignments"),
+            (
+                "DELETE",
+                "/v1/admin/assignments?daemon_id=bench&interface=can0",
+            ),
+            ("GET", "/v1/admin/catalogs/00"),
+        ] {
+            assert_eq!(request(method, path, None, None).await.0, 401, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_catalogue_that_does_not_validate_is_a_400_with_its_findings() {
+        let body = assign("[meta]\nversion = 0\n", json!({}));
+        let (status, rejected) = request(
+            "PUT",
+            "/v1/admin/assignments",
+            Some("bootstrap"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, 400);
+        let rejected: CatalogRejected = serde_json::from_value(rejected).unwrap();
+        let fields: Vec<&str> = rejected.findings.iter().map(|f| f.field.as_str()).collect();
+        assert_eq!(fields, ["meta.name", "meta.version"]);
+        assert!(
+            rejected.error.starts_with("meta.name: "),
+            "{}",
+            rejected.error
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provenance_sha_the_content_does_not_hash_to_is_a_400() {
+        let wrong = json!({ "blob_sha": "00".repeat(20) });
+        let body = assign("[meta]\nname = \"bench\"\n", wrong);
+        let (status, rejected) = request(
+            "PUT",
+            "/v1/admin/assignments",
+            Some("bootstrap"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(rejected["findings"][0]["field"], "provenance.blob_sha");
+    }
+
+    #[tokio::test]
+    async fn a_catalogue_that_passes_is_taken_to_the_database() {
+        let body = assign("[meta]\nname = \"bench\"\n", json!({}));
+        let (status, _) = request(
+            "PUT",
+            "/v1/admin/assignments",
+            Some("bootstrap"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, 503, "PostgreSQL is not there");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_admin_request_is_a_client_error() {
+        let key = Some("bootstrap");
+        let (status, _) = request("GET", "/v1/admin/catalogs/xyz", key, None).await;
+        assert_eq!(status, 400, "not a SHA");
+        let no_interface = "/v1/admin/assignments?daemon_id=bench";
+        assert_eq!(request("DELETE", no_interface, key, None).await.0, 400);
+        let no_content = json!({ "daemon_id": "bench", "interface": "can0", "provenance": {} });
+        let (status, _) = request("PUT", "/v1/admin/assignments", key, Some(no_content)).await;
+        assert_eq!(status, 422);
+    }
+
+    #[tokio::test]
+    async fn a_conflict_is_a_409_naming_what_is_assigned_now() {
+        let now = "ab".repeat(20);
+        let response = AssignError::Conflict(Some(now.clone())).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let conflict: AssignmentConflict = serde_json::from_slice(&body).unwrap();
+        assert_eq!(conflict.current, Some(now));
     }
 }

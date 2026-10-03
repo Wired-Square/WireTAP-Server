@@ -1,5 +1,6 @@
 //! Shared application state for the HTTP layer and ingest listener.
 
+use crate::catalogs::Catalogs;
 use crate::db::Databases;
 use crate::ingest::Sessions;
 use crate::keys::KeyStore;
@@ -10,4 +11,5 @@ pub struct AppState {
     pub keys: KeyStore,
     pub sessions: Sessions,
     pub logs: LogBuffer,
+    pub catalogs: Catalogs,
 }

@@ -24,8 +24,8 @@ All notable changes to this project are documented here. Entries go under
   SHA-1. A failure of the meta database at `HELLO` costs the daemon its
   assignments, not its session. An assignment is checked as the daemon checks
   a catalogue in `/etc`. Changing one closes that daemon's sessions whose
-  `HELLO` named the interface, so they reconnect to it. The admin API that
-  assigns comes later.
+  `HELLO` named the interface, so they reconnect to it. The admin API below
+  assigns them.
 
 - **The daemon frames with the gateway's catalogue.** Before a forward's first
   batch, it fetches each catalogue assigned to the serial lines that database
@@ -37,6 +37,29 @@ All notable changes to this project are documented here. Entries go under
   frames from what was kept. A catalogue that cannot be fetched, checked or
   parsed is logged and the line keeps what it had. `--check-config` shows each
   line's catalogue and where it came from.
+
+- **The daemon reports what each device frames with.** After its pulls, and
+  again ahead of the next batch or `PING` whenever a line's catalogue or
+  refusal changes, a v3 forward sends a `CATALOG_STATUS`: every bus its
+  `HELLO` named, as the gateway's catalogue, the `/etc` one or none, by Git
+  blob SHA-1, with the assigned blob it last refused for that line and why.
+  The gateway keeps the latest per daemon and interface in
+  `wiretap_meta.daemon_active`, whose `since` moves only when the catalogue
+  does. A v2 session sends none.
+
+- **The admin API assigns catalogues.** `GET /v1/admin/daemons` lists each
+  daemon's devices, with what is assigned and what the daemon reports it
+  frames with, including interfaces assigned but never seen.
+  `PUT /v1/admin/assignments` stores a catalogue byte for byte and answers 400
+  with the findings of `wiretap_catalog::validate` or of the daemon's own
+  check; `DELETE` clears one, 404 when there is nothing to clear. Both take
+  `expected`, and answer 409 naming what is assigned now when it does not
+  match. `GET /v1/admin/catalogs/{sha}` serves a stored catalogue. Admin role.
+
+### Changed
+
+- **Built on `wiretap-lib-rs` v0.25.0**, which adds `CATALOG_STATUS` to the
+  ingest protocol and the admin API's types to `wiretap-gateway`.
 
 ## [0.1.8] — 2026-10-03
 

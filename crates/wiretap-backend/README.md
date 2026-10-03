@@ -21,7 +21,8 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
     events (a user's annotations on the archive), capture import, database
     management and health.
   - **Admin UI** at `/admin` — API keys, databases, live ingest sessions,
-    activity, the recent server log, health.
+    capture daemons and their catalogues, activity, the recent server log,
+    health.
 - **pgBackRest** (optional) — scheduled physical backups with PITR.
 
 ```
@@ -112,6 +113,40 @@ An admin can **delete** a capture database (UI Delete button or
 `DELETE /v1/databases/{db}`), after confirmation. It's refused while a device is
 actively ingesting into it (409) and for the default/meta database
 (`WIRETAP_DEFAULT_DB`, which holds the API-key store).
+
+## Capture daemons and their catalogues
+
+A capture daemon names itself and its devices in a v3 `HELLO`, and the gateway
+can assign each serial line a catalogue to frame with (see
+[docs/ingest-protocol.md](../../docs/ingest-protocol.md)). The admin role
+manages it over HTTP, with `wiretap-gateway`'s types; a SHA is the
+catalogue's Git blob SHA-1 as 40 hex characters, and times are epoch µs.
+
+| endpoint | body | answers |
+|----------|------|---------|
+| `GET /v1/admin/daemons` | | 200 `DaemonList` |
+| `PUT /v1/admin/assignments` | `AssignCatalog` | 200 `AssignedCatalog`, 400 `CatalogRejected`, 409 `AssignmentConflict` |
+| `DELETE /v1/admin/assignments?daemon_id&interface&expected` | | 204, 404, 409 `AssignmentConflict` |
+| `GET /v1/admin/catalogs/{sha}` | | 200 `StoredCatalog`, 404 |
+
+`daemons` lists every daemon that has named a device or been assigned a
+catalogue. An interface assigned but never named has a null `bus`, `database`
+and `last_seen_us`. Each device's `active` is the daemon's latest
+`CATALOG_STATUS` for it, null before one.
+
+A `PUT` stores `content` exactly as sent, CRLF and BOM included, and answers
+400 with `findings` when `wiretap_catalog::validate` finds anything, when the
+daemon's own reader would refuse the catalogue (`rtu_rules`, or an empty
+`meta.name`), when the daemon id or interface could not be carried in a
+`HELLO`, or when `provenance.blob_sha` is not the content's SHA. `warnings` is
+always empty. `assigned_by` is the name of the key that made the change.
+
+**`expected` guards a `PUT` or `DELETE`**: a SHA must be the one assigned now,
+`""` means "only if unassigned", and absent means no guard. A mismatch is 409,
+naming the SHA assigned now in `current`. The check and the write share one
+transaction. A `DELETE` that passes its guard with nothing to clear is 404.
+A change closes the daemon's sessions whose `HELLO` named the interface, so
+they reconnect to it.
 
 ## Configuration (environment)
 
@@ -330,8 +365,9 @@ python3 ../../tools/test_ingest_client.py --host localhost --port 9323 \
 ./smoke_test.sh http://localhost:8423 "$WIRETAP_ADMIN_KEY" vehicle_test localhost:9323
 ```
 
-Expect **53 passed, 0 failed**. All four arguments are required, and the script refuses to
+Expect **62 passed, 0 failed**. All four arguments are required, and the script refuses to
 start without them. The third is the seeded database; the fourth is the ingest listener,
 which the Modbus checks write through — it is the only path that carries a Modbus row. With
 `PGHOST` and `PGPASSWORD` set (publish the port first, as the compose file's comment
-shows), three more reach PostgreSQL with `psql`: 56.
+shows), four more reach PostgreSQL with `psql`, the last clearing the catalogue checks'
+rows: 66.

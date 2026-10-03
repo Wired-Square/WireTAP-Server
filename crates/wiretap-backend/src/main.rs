@@ -108,7 +108,7 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
         dbs: dbs.clone(),
         keys: keys.clone(),
         sessions: sessions.clone(),
-        catalogs,
+        catalogs: catalogs.clone(),
     });
     tokio::spawn(async move {
         if let Err(e) = ingest.run().await {
@@ -122,6 +122,7 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
         keys,
         sessions,
         logs,
+        catalogs,
     });
     let listener = tokio::net::TcpListener::bind(&config.http_listen)
         .await

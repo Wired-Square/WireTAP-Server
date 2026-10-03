@@ -5,7 +5,8 @@
 //! pulls a blob it lacks into `<state dir>/catalogs/<sha>.toml`, and records
 //! the assignment in `<state dir>/assignments.json`, so a restart with the
 //! gateway down frames as before. A line's taps follow its [`Rules`] on a
-//! watch channel.
+//! watch channel, and each session reports its devices' catalogues to the
+//! gateway in a `CATALOG_STATUS` whenever one changes.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tracing::warn;
 use wiretap_model::{blob_sha1, blob_sha1_hex};
+use wiretap_protocol::ingest::{ActiveCatalog, CatalogStatus, CatalogStatusEntry, Device, Refusal};
 
 use crate::settings::{Forward, LineCatalogue, Settings};
 
@@ -47,6 +49,14 @@ impl Rules {
             Self::None => "none".into(),
         }
     }
+
+    fn active(&self) -> ActiveCatalog {
+        match self {
+            Self::Gateway { catalogue, .. } => ActiveCatalog::Assigned(catalogue.sha),
+            Self::Etc(c) => ActiveCatalog::Local(c.sha),
+            Self::None => ActiveCatalog::None,
+        }
+    }
 }
 
 impl fmt::Display for Rules {
@@ -66,7 +76,15 @@ pub enum Update {
         catalogue: LineCatalogue,
     },
     Cleared,
+    /// The line keeps what it had.
+    Refused {
+        sha: [u8; 20],
+        refusal: Refusal,
+    },
 }
+
+/// Why an assigned blob was not framed with.
+pub type Refused = (Refusal, String);
 
 struct Line {
     /// Where its framed stream lands: the session forwarding there owns it.
@@ -86,6 +104,10 @@ pub struct Catalogues {
     lines: BTreeMap<String, Line>,
     /// Interface → hex SHA-1, as `assignments.json` holds it.
     assigned: Mutex<BTreeMap<String, String>>,
+    /// Interface → the assigned blob it last turned down, until one is taken.
+    refused: Mutex<BTreeMap<String, ([u8; 20], Refusal)>>,
+    /// Ticks when any line's rules or refusal change.
+    changes: watch::Sender<()>,
 }
 
 impl Catalogues {
@@ -149,6 +171,26 @@ impl Catalogues {
         self.lines.get(interface).map(|l| l.rules.subscribe())
     }
 
+    pub fn subscribe_changes(&self) -> watch::Receiver<()> {
+        self.changes.subscribe()
+    }
+
+    /// Every bus in `devices`, as a `CATALOG_STATUS` reports it: a CAN device
+    /// or a raw-only line frames with none.
+    pub fn status(&self, devices: &[Device]) -> CatalogStatus {
+        let refused = self.refused.lock().expect("unpoisoned");
+        let entries = devices.iter().map(|d| CatalogStatusEntry {
+            bus: d.bus,
+            active: self
+                .effective(&d.name)
+                .map_or(ActiveCatalog::None, |r| r.active()),
+            refused: refused.get(&d.name).copied(),
+        });
+        CatalogStatus {
+            entries: entries.collect(),
+        }
+    }
+
     /// What `interface` frames with now.
     pub fn effective(&self, interface: &str) -> Option<Rules> {
         self.lines.get(interface).map(|l| l.rules.borrow().clone())
@@ -171,41 +213,57 @@ impl Catalogues {
     pub fn cached(&self, sha: &str) -> Result<LineCatalogue, String> {
         let path = self.blob_path(sha).ok_or("no state directory")?;
         let blob = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        checked(sha, &blob, &path)
+        checked(sha, &blob, &path).map_err(|(_, why)| why)
     }
 
-    /// Check `blob` against `sha`, parse it, and cache it.
-    pub fn store(&self, sha: &str, blob: &[u8]) -> Result<LineCatalogue, String> {
-        let path = self.blob_path(sha).ok_or("no state directory")?;
+    /// Check `blob` against `sha`, parse it, and cache it. One that cannot be
+    /// cached is refused as not fetched: it would not survive a restart.
+    pub fn store(&self, sha: &str, blob: &[u8]) -> Result<LineCatalogue, Refused> {
+        let not_kept = |why: String| (Refusal::FetchFailed, why);
+        let path = self
+            .blob_path(sha)
+            .ok_or_else(|| not_kept("no state directory".into()))?;
         let catalogue = checked(sha, blob, &path)?;
-        write_atomically(&path, blob)?;
+        write_atomically(&path, blob).map_err(not_kept)?;
         Ok(catalogue)
     }
 
     /// Take one session's assignments, remember them, and hand any change
-    /// to the lines' taps.
+    /// to the lines' taps and to every session's status.
     pub fn apply(&self, updates: Vec<(String, Update)>) {
         let mut assigned = self.assigned.lock().expect("unpoisoned");
+        let mut refused = self.refused.lock().expect("unpoisoned");
         let before = assigned.clone();
+        let mut changed = false;
         for (interface, update) in updates {
             let Some(line) = self.lines.get(&interface) else {
                 continue;
             };
             let rules = match update {
                 Update::Assigned { sha, catalogue } => {
+                    changed |= refused.remove(&interface).is_some();
                     assigned.insert(interface, sha.clone());
                     Rules::Gateway { sha, catalogue }
                 }
                 Update::Cleared => {
+                    changed |= refused.remove(&interface).is_some();
                     assigned.remove(&interface);
                     fallback(&line.etc)
                 }
+                Update::Refused { sha, refusal } => {
+                    let now = (sha, refusal);
+                    changed |= refused.insert(interface, now) != Some(now);
+                    continue;
+                }
             };
-            line.rules.send_if_modified(|current| {
+            changed |= line.rules.send_if_modified(|current| {
                 let changed = *current != rules;
                 *current = rules;
                 changed
             });
+        }
+        if changed {
+            self.changes.send_replace(());
         }
         if *assigned == before {
             return;
@@ -231,13 +289,15 @@ fn remembered(dir: &Path) -> BTreeMap<String, String> {
 
 /// The blob's own bytes, as the `/etc` path reads a file: no line ending or
 /// encoding is touched, since the SHA-1 is over exactly these.
-fn checked(sha: &str, blob: &[u8], path: &Path) -> Result<LineCatalogue, String> {
+fn checked(sha: &str, blob: &[u8], path: &Path) -> Result<LineCatalogue, Refused> {
     let actual = blob_sha1_hex(&blob_sha1(blob));
     if actual != sha {
-        return Err(format!("its content hashes to {actual}"));
+        let why = format!("its content hashes to {actual}");
+        return Err((Refusal::HashMismatch, why));
     }
-    let text = std::str::from_utf8(blob).map_err(|e| format!("not UTF-8: {e}"))?;
-    LineCatalogue::parse(&path.display().to_string(), text)
+    let unparsed = |why: String| (Refusal::DidNotParse, why);
+    let text = std::str::from_utf8(blob).map_err(|e| unparsed(format!("not UTF-8: {e}")))?;
+    LineCatalogue::parse(&path.display().to_string(), text).map_err(unparsed)
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -319,6 +379,65 @@ pub(crate) mod tests {
 
         let bare = line(&TempDir::new("precedence-bare"), None);
         assert_eq!(bare.effective("/dev/ttyUSB0"), Some(Rules::None));
+    }
+
+    #[test]
+    fn the_status_reports_each_device_and_a_refusal_until_a_catalogue_is_taken() {
+        let dir = TempDir::new("status");
+        let catalogues = Catalogues::new(
+            Some(dir.0.clone()),
+            [
+                ("/dev/ttyUSB0".into(), "site".into(), None),
+                ("/dev/ttyUSB1".into(), "site".into(), Some(etc())),
+            ],
+        );
+        let devices = [
+            Device {
+                bus: 0,
+                name: "can0".into(),
+            },
+            Device {
+                bus: 1,
+                name: "/dev/ttyUSB0".into(),
+            },
+            Device {
+                bus: 2,
+                name: "/dev/ttyUSB1".into(),
+            },
+        ];
+        let entries = |c: &Catalogues| {
+            let status = c.status(&devices);
+            status
+                .entries
+                .iter()
+                .map(|e| (e.bus, e.active, e.refused))
+                .collect::<Vec<_>>()
+        };
+        let local = ActiveCatalog::Local(blob_sha1(b"[meta]\nname = \"etc\"\n"));
+        let refused = (blob_sha1(b"broken"), Refusal::DidNotParse);
+        let (sha, refusal) = refused;
+        catalogues.apply(vec![(
+            "/dev/ttyUSB0".into(),
+            Update::Refused { sha, refusal },
+        )]);
+        assert_eq!(
+            entries(&catalogues),
+            [
+                (0, ActiveCatalog::None, None),
+                (1, ActiveCatalog::None, Some(refused)),
+                (2, local, None),
+            ]
+        );
+
+        let changes = catalogues.subscribe_changes();
+        assign(&catalogues, CATALOGUE);
+        assert!(changes.has_changed().unwrap());
+        let assigned = ActiveCatalog::Assigned(blob_sha1(CATALOGUE.as_bytes()));
+        assert_eq!(
+            entries(&catalogues)[1],
+            (1, assigned, None),
+            "taken, so cleared"
+        );
     }
 
     #[test]

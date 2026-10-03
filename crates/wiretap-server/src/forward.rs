@@ -11,7 +11,9 @@
 //!
 //! Each connection starts with a v3 `HELLO` naming this daemon and the devices
 //! the database carries, and pulls any catalogue the gateway assigned before
-//! the first batch.
+//! the first batch. It then reports what each of those devices frames with in a
+//! `CATALOG_STATUS`, and again ahead of the next batch or `PING` after any
+//! line's catalogue or refusal changes.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,13 +21,14 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use tracing::{info, warn};
 use wiretap_model::{blob_sha1_hex, Sample, Secret};
 use wiretap_protocol::ingest as proto;
 
 use crate::archive::{BatchSink, SinkError, SinkResult, WriteError};
 use crate::cache::{FrameCache, SqliteCache};
-use crate::catalogues::{Catalogues, Update};
+use crate::catalogues::{Catalogues, Refused, Update};
 use crate::settings::{Forward, LineCatalogue};
 use crate::wire;
 
@@ -50,6 +53,7 @@ pub struct ForwardSink {
     version: u8,
     raw_serial: bool,
     catalogues: Arc<Catalogues>,
+    catalogue_changes: watch::Receiver<()>,
     conn: Option<Connection>,
     /// Wraps with the protocol's `u32`, as the Python's `& 0xFFFFFFFF` did. It
     /// identifies an ACK against its batch, so it only has to be unique among
@@ -78,6 +82,7 @@ impl ForwardSink {
             devices: forward.devices.clone(),
             version: proto::PROTO_VERSION,
             raw_serial: forward.raw_serial,
+            catalogue_changes: catalogues.subscribe_changes(),
             catalogues,
             conn: None,
             seq: 0,
@@ -221,13 +226,16 @@ impl ForwardSink {
                         sha: blob_sha1_hex(&a.blob_sha),
                         catalogue,
                     },
-                    Err(why) => {
+                    Err((refusal, why)) => {
                         warn!(
                             "{interface}: cannot take the gateway's catalogue {}: {why}; \
                              keeping what it frames with",
                             blob_sha1_hex(&a.blob_sha)
                         );
-                        continue;
+                        Update::Refused {
+                            sha: a.blob_sha,
+                            refusal,
+                        }
                     }
                 },
             };
@@ -240,13 +248,35 @@ impl ForwardSink {
         &self,
         conn: &mut Connection,
         sha: &[u8; 20],
-    ) -> Result<LineCatalogue, String> {
+    ) -> Result<LineCatalogue, Refused> {
         let hex = blob_sha1_hex(sha);
         if let Ok(cached) = self.catalogues.cached(&hex) {
             return Ok(cached);
         }
-        let blob = conn.fetch(sha).await?;
+        let blob = conn
+            .fetch(sha)
+            .await
+            .map_err(|why| (proto::Refusal::FetchFailed, why))?;
         self.catalogues.store(&hex, &blob)
+    }
+
+    /// The `CATALOG_STATUS` of every device in this session's `HELLO`.
+    fn status_message(&mut self) -> Option<Vec<u8>> {
+        self.catalogue_changes.mark_unchanged();
+        let status = self.catalogues.status(&self.devices);
+        proto::encode_catalog_status(&status)
+            .inspect_err(|e| warn!("forward: cannot report the catalogues: {e}"))
+            .ok()
+    }
+
+    async fn send_status_if_changed(&mut self) -> SinkResult {
+        if self.version == 2 || !self.catalogue_changes.has_changed().unwrap_or(false) {
+            return Ok(());
+        }
+        match self.status_message() {
+            Some(message) => self.connection()?.send(&message).await,
+            None => Ok(()),
+        }
     }
 }
 
@@ -376,6 +406,9 @@ impl BatchSink for ForwardSink {
         }
         if self.version == 3 {
             self.pull(&mut conn, &ack.assignments).await;
+            if let Some(status) = self.status_message() {
+                conn.send(&status).await?;
+            }
         }
         self.conn = Some(conn);
 
@@ -390,6 +423,9 @@ impl BatchSink for ForwardSink {
 
     async fn write_batch(&mut self, batch: &[Arc<Sample>]) -> Result<(), WriteError> {
         let mut delivered = 0;
+        self.send_status_if_changed()
+            .await
+            .map_err(|cause| WriteError { delivered, cause })?;
         // A disk cache drain reads `ORDER BY id` across a whole outage, so a
         // chunk on a quiet bus can outspan a `u32` of microseconds, and two bus
         // readers mean its head is not always its earliest frame.
@@ -407,6 +443,7 @@ impl BatchSink for ForwardSink {
     /// An idle `PING`, so the gateway's keepalive timer does not drop a server
     /// that is simply on a quiet bus.
     async fn keep_alive(&mut self) -> SinkResult {
+        self.send_status_if_changed().await?;
         let ping = proto::encode_message(proto::MSG_PING, b"");
         let conn = self.connection()?;
         conn.send(&ping).await?;
@@ -442,6 +479,9 @@ mod tests {
         catalog_gets: usize,
         batches: Vec<proto::Batch>,
         pings: usize,
+        statuses: Vec<proto::CatalogStatus>,
+        /// Every message type, in the order they came.
+        order: Vec<u8>,
     }
 
     impl Seen {
@@ -530,6 +570,12 @@ mod tests {
             };
             let Some(frame) = frame else { return };
             assert!(frame.crc_ok, "the client sent a bad CRC");
+            seen.order.push(frame.mtype);
+            if frame.mtype == proto::MSG_CATALOG_STATUS {
+                let status = proto::parse_catalog_status(&frame.body);
+                seen.statuses.push(status.expect("a valid CATALOG_STATUS"));
+                continue;
+            }
 
             let reply = match frame.mtype {
                 proto::MSG_HELLO => {
@@ -796,7 +842,9 @@ mod tests {
             .exists());
         s.write_batch(&[sample(1, 1)]).await.expect("acknowledged");
         s.close().await;
-        let _ = gateway.await;
+        let status = &gateway.await.unwrap().statuses[0];
+        let refused = Some((claimed, proto::Refusal::HashMismatch));
+        assert_eq!(status.entries[0].refused, refused);
     }
 
     #[tokio::test]
@@ -878,6 +926,94 @@ mod tests {
             .unwrap();
         let _ = cleared.await;
         assert_eq!(remembered(&dir), serde_json::json!({ "/dev/ttyUSB1": sha }));
+    }
+
+    /// A sink whose HELLO names `LINE` on bus 1 and `can0` on bus 0.
+    fn line_and_can_sink(port: u16, catalogues: &Arc<Catalogues>) -> ForwardSink {
+        let mut s = line_sink(port, "", catalogues);
+        s.devices.push(proto::Device {
+            bus: 0,
+            name: "can0".into(),
+        });
+        s
+    }
+
+    #[tokio::test]
+    async fn the_catalogues_are_reported_after_the_pulls_and_before_any_batch() {
+        let dir = TempDir::new("status");
+        let catalogues = line_catalogues(&dir);
+        let (port, gateway) = fake_gateway(Script::assigning(1, CATALOGUE.as_bytes())).await;
+        let mut s = line_and_can_sink(port, &catalogues);
+        s.connect().await.expect("connected");
+        s.write_batch(&[sample(1, 1)]).await.expect("acknowledged");
+        s.write_batch(&[sample(2, 1)]).await.expect("acknowledged");
+        s.close().await;
+
+        let seen = gateway.await.unwrap();
+        let (hello, get, status, batch) = (
+            proto::MSG_HELLO,
+            proto::MSG_CATALOG_GET,
+            proto::MSG_CATALOG_STATUS,
+            proto::MSG_BATCH,
+        );
+        assert_eq!(seen.order, [hello, get, status, batch, batch], "once only");
+        let entries = &seen.statuses[0].entries;
+        let assigned = proto::ActiveCatalog::Assigned(blob_sha1(CATALOGUE.as_bytes()));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.bus, e.active))
+                .collect::<Vec<_>>(),
+            [(1, assigned), (0, proto::ActiveCatalog::None)],
+            "every device in the HELLO, a CAN device framing with none"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_whose_catalogue_changes_is_reported_before_the_next_batch_or_ping() {
+        let dir = TempDir::new("status-change");
+        let catalogues = line_catalogues(&dir);
+        let (port, gateway) = fake_gateway(Script::assigning(1, CATALOGUE.as_bytes())).await;
+        let mut s = line_and_can_sink(port, &catalogues);
+        s.connect().await.expect("connected");
+        catalogues.apply(vec![(LINE.into(), Update::Cleared)]);
+        s.write_batch(&[sample(1, 1)]).await.expect("acknowledged");
+        let refused = (blob_sha1(b"bad"), proto::Refusal::DidNotParse);
+        let (sha, refusal) = refused;
+        catalogues.apply(vec![(LINE.into(), Update::Refused { sha, refusal })]);
+        s.keep_alive().await.expect("ponged");
+        s.close().await;
+
+        let seen = gateway.await.unwrap();
+        let (status, batch, ping) = (proto::MSG_CATALOG_STATUS, proto::MSG_BATCH, proto::MSG_PING);
+        assert_eq!(seen.order[2..], [status, status, batch, status, ping]);
+        let line = |n: usize| seen.statuses[n].entries[0];
+        assert_eq!(line(1).active, proto::ActiveCatalog::None);
+        assert_eq!(line(2).refused, Some(refused));
+    }
+
+    #[tokio::test]
+    async fn a_v2_session_reports_no_catalogues() {
+        let dir = TempDir::new("status-v2");
+        let catalogues = line_catalogues(&dir);
+        let (port, gateway) = fake_gateway(Script {
+            versions: 2..=2,
+            connections: 2,
+            ..Script::default()
+        })
+        .await;
+        let mut s = line_and_can_sink(port, &catalogues);
+        s.connect().await.expect("taken with v2");
+        catalogues.apply(vec![(LINE.into(), Update::Cleared)]);
+        let (sha, refusal) = (blob_sha1(b"bad"), proto::Refusal::FetchFailed);
+        catalogues.apply(vec![(LINE.into(), Update::Refused { sha, refusal })]);
+        s.write_batch(&[sample(1, 1)]).await.expect("acknowledged");
+        s.keep_alive().await.expect("ponged");
+        s.close().await;
+
+        let seen = gateway.await.unwrap();
+        assert_eq!(seen.versions(), [3, 2]);
+        assert!(seen.statuses.is_empty(), "{:?}", seen.statuses);
     }
 
     #[tokio::test]
