@@ -131,6 +131,13 @@ clearing the assignment falls back the same way. The gateway's assignment is
 remembered, so a restart with the gateway down frames as before.
 `--check-config` shows each line's catalogue and where it came from.
 
+Assign one from the gateway's admin UI: the **Daemons** tab lists each daemon
+the gateway knows, with its devices. **Assign…** uploads a `.toml` file
+exactly as it is on disk, once the gateway has validated it; **View** shows
+what is assigned and **Clear** removes it. The **Active** column shows what the
+daemon reports it frames with: `applied`, `pending` until it reconnects and
+takes the new one, `refused` with the reason, or its `local` catalogue.
+
 Port 23 is the GVRET default and needs `CAP_NET_BIND_SERVICE`; the packaged unit
 grants it.
 

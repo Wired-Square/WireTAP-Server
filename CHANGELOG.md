@@ -56,6 +56,11 @@ All notable changes to this project are documented here. Entries go under
   `expected`, and answer 409 naming what is assigned now when it does not
   match. `GET /v1/admin/catalogs/{sha}` serves a stored catalogue. Admin role.
 
+- **The admin UI has a Daemons tab.** Each daemon's devices, with their bus,
+  database and when last seen, the catalogue assigned and whether it is
+  applied, pending or refused. A `.toml` file is uploaded as it is on disk;
+  a refusal shows its findings, and a concurrent change shows what won.
+
 ### Changed
 
 - **Built on `wiretap-lib-rs` v0.25.0**, which adds `CATALOG_STATUS` to the

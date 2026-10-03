@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { api, clearKey, getKey, setKey } from "./api";
 import Activity from "./pages/Activity";
+import Daemons from "./pages/Daemons";
 import Databases from "./pages/Databases";
 import Health from "./pages/Health";
 import Ingest from "./pages/Ingest";
 import Keys from "./pages/Keys";
 import Logging from "./pages/Logging";
 
-const TABS = ["Keys", "Databases", "Ingest", "Activity", "Logging", "Health"] as const;
+const TABS = ["Keys", "Databases", "Ingest", "Daemons", "Activity", "Logging", "Health"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function App() {
@@ -45,6 +46,7 @@ export default function App() {
       {tab === "Keys" && <Keys />}
       {tab === "Databases" && <Databases />}
       {tab === "Ingest" && <Ingest />}
+      {tab === "Daemons" && <Daemons />}
       {tab === "Activity" && <Activity />}
       {tab === "Logging" && <Logging />}
       {tab === "Health" && <Health />}

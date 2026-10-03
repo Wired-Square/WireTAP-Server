@@ -30,14 +30,28 @@ export async function api<T>(
   });
   if (!resp.ok) {
     let message = `${resp.status}`;
+    let body: unknown = null;
     try {
-      message = (await resp.json()).error ?? message;
+      body = await resp.json();
+      message = (body as { error?: string }).error ?? message;
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(message);
+    throw new ApiError(resp.status, message, body);
   }
+  if (resp.status === 204) return undefined as T;
   return resp.json() as Promise<T>;
+}
+
+/** A refusal, with its status and JSON body for the callers that read them. */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly body: unknown,
+  ) {
+    super(message);
+  }
 }
 
 export interface KeySummary {
@@ -133,6 +147,52 @@ export interface IngestSession {
   frames: number;
   batches: number;
   connected_at: string;
+}
+
+export interface DaemonList {
+  daemons: Daemon[];
+}
+
+export interface Daemon {
+  daemon_id: string;
+  devices: DaemonDevice[];
+}
+
+export interface DaemonDevice {
+  interface: string;
+  /** null for an interface assigned but never named in a HELLO. */
+  bus: number | null;
+  database: string | null;
+  last_seen_us: number | null;
+  assignment: Assignment | null;
+  /** null until the daemon sends a CATALOG_STATUS. */
+  active: ActiveCatalog | null;
+}
+
+export interface Assignment {
+  blob_sha: string;
+  name: string | null;
+  assigned_at_us: number;
+  assigned_by: string | null;
+}
+
+export interface ActiveCatalog {
+  source: "assigned" | "local" | "none";
+  blob_sha: string | null;
+  name: string | null;
+  since_us: number;
+  refused: { blob_sha: string; reason: string } | null;
+}
+
+export interface CatalogFinding {
+  field: string;
+  message: string;
+}
+
+export interface StoredCatalog {
+  blob_sha: string;
+  content: string;
+  created_at_us: number;
 }
 
 export interface LogRecord {

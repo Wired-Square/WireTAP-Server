@@ -126,6 +126,18 @@ input:focus, select:focus { outline: 1px solid var(--accent); }
 .clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .error { color: var(--danger); margin: 0.5rem 0; }
+.findings { margin: 0; padding-left: 1.2rem; }
+
+pre.catalogue {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin: 0;
+  max-height: 50vh;
+  overflow: auto;
+  font-size: 0.85rem;
+}
 
 .login {
   max-width: 420px;
