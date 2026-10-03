@@ -24,6 +24,12 @@ All notable changes to this project are documented here. Entries go under
   packages as `wiretap-appliance_*_arm64.deb`, and its scaffold builds the
   card image. The root workspace, its release and a fork build without the
   chassis.
+- **The card image installs `wiretap-server`** and `can-utils`, through the
+  image's own `10-wiretap` substage. `appliance/scripts/stage-wiretap-server.sh`
+  copies the arm64 package in before a build. The image's build now fails if
+  the daemon is not installed and enabled, is marked for autoremoval, ships
+  with a CAN interface configured or a CAN HAT overlay in `config.txt`, or a
+  radio's driver is blacklisted.
 
 ### Changed
 

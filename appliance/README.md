@@ -19,13 +19,15 @@ fetching it, and the rest of CI is unaffected.
 | `frontend` | its browser half: the chassis's shell and Settings screens |
 | `appliance.toml` | the system identity the scaffold is rendered from |
 | `scaffold/` | the package and image scripts, mostly chassis-owned |
+| `scripts/stage-wiretap-server.sh` | puts `wiretap-server`'s package into the image |
 
 ## Changing the scaffold
 
 The chassis owns most of `scaffold/` and rewrites it on every
 `appliance-xtask packaging render`; this product's own files there are
-`debian/copyright` and the unit drop-ins in
-`systemd/wiretap-appliance.service.d/`. Change `appliance.toml` and render
+`debian/copyright`, the unit drop-ins in
+`systemd/wiretap-appliance.service.d/`, and the image's substages and checks
+numbered 10 to 89. Change `appliance.toml` and render
 again; CI fails on a hand-edit to a chassis-owned file. Install the tool at
 the lockfile's chassis:
 
@@ -68,8 +70,13 @@ which is git-ignored, and set your SSH public key and `BUILD_HOST` there. Then,
 with the package built:
 
 ```sh
-scaffold/image/build-remote.sh    # builds there, fetches the .img.xz back
+(cd .. && packaging/make-deb.sh --arch arm64)   # wiretap-server, into ../target/deb/
+scripts/stage-wiretap-server.sh                 # copies it into the image's 10-wiretap substage
+scaffold/image/build-remote.sh                  # builds there, fetches the .img.xz back
 ```
+
+The staging script refuses to pick between two `wiretap-server` packages in
+`../target/deb/`; delete the one the image should not carry.
 
 `scaffold/image/tests/run-verify-tests.sh` proves the image's build-time checks
 in seconds, with no build.
