@@ -1,3 +1,17 @@
+wiretap-server (0.1.9) UNRELEASED; urgency=medium
+
+  * The daemon names itself to the gateway: [forward] daemon_id, the host's
+    short name when absent. An id the gateway would refuse stops startup.
+  * A serial line frames with the catalogue the gateway assigns it, pulled,
+    checked against its SHA-1 and kept under the state directory, else the
+    catalog file in /etc, else none. A new assignment takes effect without
+    a restart, and the daemon reports to the gateway what each line uses.
+  * Against a gateway older than 0.1.7 the daemon falls back to protocol v2
+    and receives no assignments, unless the database takes raw serial.
+  * No configuration change is needed; install and restart.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Sat, 03 Oct 2026 15:37:51 +1000
+
 wiretap-server (0.1.8) bookworm; urgency=medium
 
   * A serial device can capture raw, framed or both: capture = "raw" or

@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-10-03
+
+A catalogue can be assigned to a capture daemon's serial line at the gateway,
+from the admin UI's Daemons tab or its admin API. The daemon pulls it, checks
+it, caches it and frames with it live, and reports back what each line is
+framing with, so nothing needs copying onto the appliance. **Upgrade the
+gateway first**: its first start adds tables to `wiretap_meta` in the default
+database. No capture schema change.
+
 ### Added
 
 - **The daemon names itself to the gateway.** `[forward] daemon_id`, the
@@ -596,7 +605,8 @@ through its own Compose stack.
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
 
-[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.5...v0.1.6
