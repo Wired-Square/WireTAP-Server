@@ -127,10 +127,12 @@ class ReferenceClient:
         flags = FLAG_TIME_RELATIVE if self.time_relative else 0
         body = (b"WTAP" + bytes([self.version, flags, len(self.token)]) + self.token
                 + bytes([len(self.database)]) + self.database)
+        if self.version >= 3:
+            body += bytes([0, 0])  # anonymous: no daemon id, no devices
         self.send_raw(frame_message(MSG_HELLO, body))
         mtype, ack = self.recv_message()
         assert mtype == MSG_HELLO_ACK, f"expected HELLO_ACK, got {mtype:#x}"
-        return struct.unpack("<BBQ", ack)
+        return struct.unpack_from("<BBQ", ack)
 
     def send_batch(self, seq: int, records: list, base_ts_us: int = 0,
                    corrupt_crc: bool = False):

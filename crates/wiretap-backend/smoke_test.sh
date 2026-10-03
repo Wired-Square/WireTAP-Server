@@ -136,13 +136,13 @@ PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ingest_key" "$IMP
 import json, sys, urllib.request
 from test_ingest_client import ReferenceClient
 host, port, token, db, base, admin = sys.argv[1:]
-clients = [ReferenceClient(host, int(port), token=token, database=db, version=v) for v in (1, 2)]
+clients = [ReferenceClient(host, int(port), token=token, database=db, version=v) for v in (2, 3)]
 assert all(c.hello()[0] == 0 for c in clients)
 req = urllib.request.Request(f"{base}/v1/admin/ingest-sessions", headers={"Authorization": f"Bearer {admin}"})
 sessions = json.load(urllib.request.urlopen(req))["sessions"]
-assert {s["protocol_version"] for s in sessions if s["key_name"] == "smoke-ingest" and s["database"] == db} == {1, 2}
+assert {s["protocol_version"] for s in sessions if s["key_name"] == "smoke-ingest" and s["database"] == db} == {2, 3}
 PYEOF
-check "ingest-sessions names the version each HELLO spoke (v1 and v2)" $?
+check "ingest-sessions names the version each HELLO spoke (v2 and v3)" $?
 curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory?protocol=modbus" | grep -q '"frame_id":259'; check "inventory lists modbus rows when asked (unit 1, FC03 = 0x0103)" $?
 ! curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory" | grep -q '"frame_id":259'; check "inventory hides modbus rows by default" $?
 curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/time-bounds?protocol=modbus" | grep -q '"min_ts_us":[0-9]'; check "time-bounds by protocol" $?
