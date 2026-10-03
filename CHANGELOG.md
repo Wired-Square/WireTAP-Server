@@ -5,12 +5,15 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-10-03
+
+The gateway and the capture daemon's listener speak ingest protocol v3, the
+groundwork for assigning catalogues to devices and for raw serial capture, and
+the gateway no longer takes v1. A GVRET transmit waits for room on the bus
+rather than being refused. No schema change; upgrade the gateway first.
+
 ### Changed
 
-- **Built on `wiretap-lib-rs` v0.23.0.** A catalogue whose `meta.name` is not a
-  string is refused as such, rather than as an empty name. A CAN frame ready to
-  be read now goes ahead of the next send, so a run of transmits no longer holds
-  back capture. The wire format is unchanged.
 - **Ingest protocol v3 is accepted, and v1 is refused.** Built on
   `wiretap-lib-rs` v0.24.0. The gateway and the daemon's listener take versions
   2 and 3. The gateway's one-release tolerance of v1 is over, so a v1 client is
@@ -19,6 +22,14 @@ All notable changes to this project are documented here. Entries go under
   refused as malformed, until catalogue assignment and raw capture are built.
   The daemon still forwards with v2, so it keeps working against a gateway that
   has not been upgraded.
+- **A catalogue whose `meta.name` is not a string is refused as such**, rather
+  than as an empty name.
+
+### Fixed
+
+- **A GVRET transmit waits for room in the interface's send queue** instead of
+  being refused while it is full, and a CAN frame ready to be read now goes
+  ahead of the next send, so a run of transmits no longer holds back capture.
 - **A forwarding key too long for a `HELLO` fails to connect**, naming the
   length, rather than being sent with its length byte wrapped.
 
@@ -487,7 +498,8 @@ through its own Compose stack.
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
 
-[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.3...v0.1.4

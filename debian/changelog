@@ -1,3 +1,16 @@
+wiretap-server (0.1.7) UNRELEASED; urgency=medium
+
+  * The ingest listener takes protocol versions 2 and 3. A v3 client gets
+    no catalogue assignments yet, and a batch holding a raw serial record
+    is refused as malformed. The forwarder still sends v2, so this package
+    works against a 0.1.6 or older gateway.
+  * A GVRET transmit waits for room in the interface's send queue instead
+    of being refused while it is full.
+  * A forwarding key over 255 bytes now fails to connect, naming its length.
+  * No configuration change is needed; install and restart.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Sat, 03 Oct 2026 11:55:32 +1000
+
 wiretap-server (0.1.6) bookworm; urgency=medium
 
   * A modbus-rtu line's catalogue is read for its RTU rules and name only,
