@@ -80,3 +80,34 @@ The staging script refuses to pick between two `wiretap-server` packages in
 
 `scaffold/image/tests/run-verify-tests.sh` proves the image's build-time checks
 in seconds, with no build.
+
+## Enabling the local gateway
+
+The image carries a WireTAP gateway, `wiretap-backend` and TimescaleDB in
+Docker, installed and off: `wiretap-gateway.service` runs
+`/usr/share/wiretap-appliance/gateway/compose.yaml`. Its images are pulled on
+its first start, so that start needs the internet and takes a while.
+
+The database must not live on the SD card. The unit refuses to start, and says
+so, until storage is mounted at `/srv/wiretap-gateway`. On the card:
+
+1. Mount a USB or NVMe drive there for good: an `/etc/fstab` line such as
+   `UUID=<the drive's> /srv/wiretap-gateway ext4 defaults,nofail 0 2`, then
+   `mount /srv/wiretap-gateway`.
+2. Copy `/usr/share/wiretap-appliance/gateway/gateway.env.example` to
+   `/etc/wiretap-gateway/gateway.env`, mode 0600, and set `POSTGRES_PASSWORD`
+   and `WIRETAP_ADMIN_KEY` (`openssl rand -hex 32` for each).
+3. `systemctl enable --now wiretap-gateway`.
+
+The admin UI is then at `http://<card>:8423/admin`, signed in with the admin
+key. Make an `ingest` key there and point `wiretap-server`'s `[forward]` at
+`127.0.0.1:9323` with it.
+
+dockerd is not started at boot. The gateway's unit starts it through its
+socket, so a card with the gateway off does not run it.
+
+**What the SD card is written with.** `wiretap-server`'s disk cache fills only
+while its gateway is unreachable, and drains when it comes back. The gateway's
+database is on the external drive. The SD card takes the container images once
+per upgrade, under `/var/lib/docker`, and the containers' logs through the
+journal, within journald's own limits.

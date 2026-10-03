@@ -1,0 +1,40 @@
+# The local gateway: wiretap-backend and TimescaleDB, started by
+# wiretap-gateway.service. Every image is pinned, so an upgrade is an edit.
+# The schema needs TimescaleDB 2.28.1 or later.
+name: wiretap-gateway
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.29.2-pg16
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in /etc/wiretap-gateway/gateway.env}
+    command: postgres -c shared_preload_libraries=timescaledb
+    volumes:
+      - /srv/wiretap-gateway/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    logging:
+      driver: journald
+    restart: unless-stopped
+
+  backend:
+    image: ghcr.io/wired-square/wiretap-backend:0.1.9
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in /etc/wiretap-gateway/gateway.env}
+      WIRETAP_ADMIN_KEY: ${WIRETAP_ADMIN_KEY:?set WIRETAP_ADMIN_KEY in /etc/wiretap-gateway/gateway.env}
+      WIRETAP_PG_HOST: timescaledb
+      WIRETAP_DEFAULT_DB: ${WIRETAP_DEFAULT_DB:-wiretap}
+      WIRETAP_AUTO_CREATE: ${WIRETAP_AUTO_CREATE:-true}
+      RUST_LOG: ${RUST_LOG:-wiretap_backend=info}
+    ports:
+      - "8423:8423"   # HTTP API and /admin
+      - "9323:9323"   # binary ingest
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    logging:
+      driver: journald
+    restart: unless-stopped

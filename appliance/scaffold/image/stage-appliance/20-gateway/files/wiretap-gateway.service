@@ -1,0 +1,24 @@
+[Unit]
+Description=WireTAP gateway: wiretap-backend and TimescaleDB, in Docker
+# dockerd is socket-activated by the first docker command below, so it is
+# never in the boot path of a card whose gateway is off.
+Requires=docker.socket
+After=docker.socket docker.service network-online.target
+Wants=network-online.target
+# The database lives on USB or NVMe storage mounted here, never on the SD card.
+RequiresMountsFor=/srv/wiretap-gateway
+AssertPathIsMountPoint=/srv/wiretap-gateway
+AssertFileNotEmpty=/etc/wiretap-gateway/gateway.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The first start pulls the images.
+TimeoutStartSec=30min
+Environment=COMPOSE=/usr/share/wiretap-appliance/gateway/compose.yaml
+Environment=ENV_FILE=/etc/wiretap-gateway/gateway.env
+ExecStart=/usr/bin/docker compose --file ${COMPOSE} --env-file ${ENV_FILE} up --detach --wait --remove-orphans
+ExecStop=/usr/bin/docker compose --file ${COMPOSE} --env-file ${ENV_FILE} down
+
+[Install]
+WantedBy=multi-user.target

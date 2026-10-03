@@ -7,6 +7,11 @@ All notable changes to this project are documented here. Entries go under
 
 ### Added
 
+- **The card image carries a local gateway, switched off.** Docker, and
+  `wiretap-gateway.service` running `wiretap-backend` and TimescaleDB from a
+  compose file with pinned images, pulled on first start. It refuses to start
+  until storage is mounted at `/srv/wiretap-gateway`, and dockerd stays out of
+  the boot until it is used. `appliance/README.md` has the steps to enable it.
 - **The package brings CAN interfaces up.** `wiretap-can@<interface>.service`
   configures one from `/etc/wiretap-server/can.d/<interface>.conf`: bitrate,
   CAN FD's data bitrate, a 65536-frame transmit queue and bus-off recovery,
