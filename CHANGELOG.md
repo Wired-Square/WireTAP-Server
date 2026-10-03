@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-10-03
+
+A serial line can be captured raw, framed, or both, and the raw stream can land
+in a database of its own. Framed stays the default, so nothing changes until a
+device opts in. No schema change. **Upgrade the gateway first**: a `0.1.7`
+gateway takes the v3 session but refuses its raw chunks.
+
 ### Added
 
 - **A serial line can be captured raw.** A serial `[[device]]` takes
@@ -528,7 +535,8 @@ through its own Compose stack.
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
 
-[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.4...v0.1.5

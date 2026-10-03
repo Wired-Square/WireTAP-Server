@@ -1,3 +1,17 @@
+wiretap-server (0.1.8) UNRELEASED; urgency=medium
+
+  * A serial device can capture raw, framed or both: capture = "raw" or
+    "both" in its [[device]] table, and raw_database to send the raw chunks
+    to a database of their own. Absent, capture is "framed", as before.
+  * Raw chunks are forwarded over ingest protocol v3, so a device with raw
+    capture needs a 0.1.8 or later gateway; a 0.1.7 gateway refuses the
+    chunks. Every other database stays on v2.
+  * The ingest listener relays raw serial from a pusher only when a device
+    here sends raw chunks to the default database.
+  * No configuration change is needed; install and restart.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Sat, 03 Oct 2026 13:44:23 +1000
+
 wiretap-server (0.1.7) bookworm; urgency=medium
 
   * The ingest listener takes protocol versions 2 and 3. A v3 client gets
