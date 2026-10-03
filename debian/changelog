@@ -1,4 +1,4 @@
-wiretap-server (0.1.8) UNRELEASED; urgency=medium
+wiretap-server (0.1.8) bookworm; urgency=medium
 
   * A serial device can capture raw, framed or both: capture = "raw" or
     "both" in its [[device]] table, and raw_database to send the raw chunks
