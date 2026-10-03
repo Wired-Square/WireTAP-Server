@@ -67,6 +67,8 @@ mod tests {
 
     use super::*;
     use crate::settings::{Framing, LineCatalogue};
+    use crate::source::raw::RawTap;
+    use wiretap_protocol::ingest::RecordKind;
 
     const EXAMPLE_CATALOGUE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -288,5 +290,59 @@ mod tests {
             short.first()
         );
         assert!(coverage >= 0.999_949, "{coverage:.6}");
+    }
+
+    /// The capture read live, both ways at once; then its raw chunks, in stamp
+    /// order and each pushed at its own stamp, framed again.
+    #[test]
+    #[ignore = "needs a capture: WIRETAP_RS485_RAW=<path to rs485.raw>"]
+    fn the_raw_chunks_frame_again_to_the_live_messages() {
+        let line = line_9600_8n1();
+        let bytes = capture();
+        for chunk in [64usize, 4096] {
+            let mut live = RtuTap::new(SourceId(0), &line);
+            let mut raw = RawTap::new(SourceId(0), line.line);
+            let (mut framed, mut chunks) = (Vec::new(), Vec::new());
+            for (i, c) in bytes.chunks(chunk).enumerate() {
+                let read_at = UNIX_EPOCH + line.line.wire_time(((i + 1) * chunk) as u64);
+                chunks.extend(raw.push(c, read_at));
+                framed.extend(live.push(c, read_at));
+            }
+            chunks.sort_by_key(|c| c.ts_us);
+
+            let mut again = RtuTap::new(SourceId(0), &line);
+            let reframed: Vec<ModbusSample> = chunks
+                .iter()
+                .flat_map(|c| again.push(&c.data, at(c.ts_us as u64)))
+                .collect();
+            assert_eq!(reframed.len(), framed.len(), "{chunk}-byte reads");
+            assert!(
+                reframed.iter().zip(&framed).all(|(r, f)| r.raw == f.raw),
+                "{chunk}-byte reads framed differently"
+            );
+            let late: Vec<i64> = reframed
+                .iter()
+                .zip(&framed)
+                .map(|(r, f)| r.ts_us - f.ts_us)
+                .collect();
+            let mut by_lateness = std::collections::BTreeMap::<i64, usize>::new();
+            for d in &late {
+                *by_lateness.entry(*d).or_default() += 1;
+            }
+            eprintln!(
+                "{chunk}-byte reads: {} chunks, {} messages, stamp differences {by_lateness:?}",
+                chunks.len(),
+                framed.len()
+            );
+            // Wire time is truncated to whole microseconds once per stamp: a
+            // message B bytes before the end of a chunk that is A bytes before
+            // the end of its read comes back wt(A) + wt(B) before the read,
+            // which is wt(A + B) or 1 µs less. A read of one chunk has A = 0.
+            let most = i64::from(chunk > RecordKind::RawSerial.max_payload());
+            assert!(
+                late.iter().all(|d| (0..=most).contains(d)),
+                "{chunk}-byte reads"
+            );
+        }
     }
 }
