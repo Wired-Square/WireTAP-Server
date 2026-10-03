@@ -80,10 +80,7 @@ impl Server {
             config: Arc::new(Config {
                 token: ingest.token.clone(),
                 session: ServerConfig {
-                    // Strict, unlike the gateway's one-release tolerance of v1:
-                    // nothing deployed pushes to this listener but this
-                    // repository's own daemon.
-                    accept_v1: false,
+                    versions: 2..=3,
                     max_records: ingest.max_batch_frames,
                     // Too short to even carry a sequence number, so there is
                     // nothing to address a refusal to.
@@ -160,9 +157,13 @@ impl Session {
                     Action::Reply(bytes) => bytes,
                     Action::Hello(hello) => {
                         let status = self.hello(&hello);
-                        machine.answer_hello(status, now_us())
+                        machine
+                            .answer_hello(status, now_us(), &[])
+                            .expect("no assignments to overflow")
                     }
-                    Action::HelloRefused(status) => machine.answer_hello(status, now_us()),
+                    Action::HelloRefused(status) => machine
+                        .answer_hello(status, now_us(), &[])
+                        .expect("no assignments to overflow"),
                     Action::Batch(incoming) => {
                         let seq = incoming.batch.seq;
                         let status = self.batch(incoming);
@@ -171,6 +172,7 @@ impl Session {
                     Action::Nack { seq, status } => {
                         machine.ack(seq, status, self.archive.occupancy_pct())
                     }
+                    Action::CatalogGet(_) => machine.answer_catalog(Err(proto::CATALOG_UNKNOWN)),
                     Action::Close(CloseReason::Framing) => {
                         warn!("Ingest client {} sent bogus length, dropping", self.peer);
                         return;
@@ -210,15 +212,28 @@ impl Session {
     }
 
     fn batch(&self, incoming: IncomingBatch) -> u8 {
+        let seq = incoming.batch.seq;
+        let Some(samples) = incoming
+            .batch
+            .stamped(incoming.time_relative, now_us())
+            .map(|(ts_us, record)| wire::decode(ts_us as i64, record))
+            .collect::<Option<Vec<_>>>()
+        else {
+            warn!(
+                "Ingest client {} sent batch seq={seq} with a record this server cannot relay",
+                self.peer
+            );
+            return proto::ACK_MALFORMED;
+        };
+
         // Refused before anything is enqueued: accepting a batch this server
         // will only drop would tell the device its frames are safe.
         if self.archive.is_closed() || self.archive.occupancy_pct() >= REFUSE_ABOVE_PCT {
             return proto::ACK_OVERLOADED;
         }
 
-        for (ts_us, record) in incoming.batch.stamped(incoming.time_relative, now_us()) {
-            self.archive
-                .enqueue(Arc::new(wire::decode(ts_us as i64, record)));
+        for sample in samples {
+            self.archive.enqueue(Arc::new(sample));
         }
         proto::ACK_OK
     }
@@ -383,6 +398,18 @@ mod tests {
         }
     }
 
+    fn hello(token: &[u8], time_relative: bool) -> Vec<u8> {
+        hello_v(proto::PROTO_VERSION, token, time_relative)
+    }
+
+    fn hello_v(version: u8, token: &[u8], time_relative: bool) -> Vec<u8> {
+        proto::encode_hello(&proto::Hello {
+            version,
+            ..proto::Hello::v2(token, "", time_relative)
+        })
+        .unwrap()
+    }
+
     fn one_record(delta_us: u32, arb_id: u32) -> Vec<u8> {
         let mut records = Vec::new();
         proto::encode_record_into(
@@ -403,9 +430,7 @@ mod tests {
         let (addr, seen, _stop) = listener("sekrit", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
 
-        c.write_all(&proto::encode_hello(b"sekrit", "", false))
-            .await
-            .unwrap();
+        c.write_all(&hello(b"sekrit", false)).await.unwrap();
         let ack = proto::parse_hello_ack(&reply(&mut c).await.body).unwrap();
         assert_eq!(ack.status, proto::HELLO_OK);
         assert_eq!(ack.accepted_version, proto::PROTO_VERSION);
@@ -433,9 +458,7 @@ mod tests {
     async fn a_modbus_record_is_relayed_intact() {
         let (addr, seen, _stop) = listener("", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
-        c.write_all(&proto::encode_hello(b"", "", false))
-            .await
-            .unwrap();
+        c.write_all(&hello(b"", false)).await.unwrap();
         reply(&mut c).await;
 
         let raw = [0x02, 0x65, 0x00, 0x02, 0xD2, 0x38];
@@ -472,9 +495,7 @@ mod tests {
         let (addr, _, _stop) = listener("sekrit", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
 
-        c.write_all(&proto::encode_hello(b"wrong", "", false))
-            .await
-            .unwrap();
+        c.write_all(&hello(b"wrong", false)).await.unwrap();
         let ack = proto::parse_hello_ack(&reply(&mut c).await.body).unwrap();
         assert_eq!(ack.status, proto::HELLO_BAD_AUTH);
 
@@ -488,7 +509,7 @@ mod tests {
     async fn an_empty_token_disables_authentication() {
         let (addr, _, _stop) = listener("", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
-        c.write_all(&proto::encode_hello(b"anything at all", "", false))
+        c.write_all(&hello(b"anything at all", false))
             .await
             .unwrap();
         let ack = proto::parse_hello_ack(&reply(&mut c).await.body).unwrap();
@@ -515,9 +536,7 @@ mod tests {
     async fn a_corrupt_batch_is_nacked_then_resent() {
         let (addr, seen, _stop) = listener("sekrit", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
-        c.write_all(&proto::encode_hello(b"sekrit", "", false))
-            .await
-            .unwrap();
+        c.write_all(&hello(b"sekrit", false)).await.unwrap();
         reply(&mut c).await;
 
         let good = proto::encode_batch(9, 0, 1, &one_record(0, 0x321));
@@ -547,9 +566,7 @@ mod tests {
         let addr = server.local_addr().expect("bound");
         tokio::spawn(server.run());
         let mut c = TcpStream::connect(addr).await.unwrap();
-        c.write_all(&proto::encode_hello(b"", "", false))
-            .await
-            .unwrap();
+        c.write_all(&hello(b"", false)).await.unwrap();
         reply(&mut c).await;
 
         let _ = stop.send(true);
@@ -581,9 +598,7 @@ mod tests {
         let addr = server.local_addr().unwrap();
         tokio::spawn(server.run());
         let mut c = TcpStream::connect(addr).await.unwrap();
-        c.write_all(&proto::encode_hello(b"", "", false))
-            .await
-            .unwrap();
+        c.write_all(&hello(b"", false)).await.unwrap();
         reply(&mut c).await;
 
         let records = [one_record(0, 1), one_record(1, 2), one_record(2, 3)].concat();
@@ -610,9 +625,7 @@ mod tests {
     async fn a_batch_claiming_more_than_the_limit_is_nacked() {
         let (addr, _, _stop) = listener("sekrit", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
-        c.write_all(&proto::encode_hello(b"sekrit", "", false))
-            .await
-            .unwrap();
+        c.write_all(&hello(b"sekrit", false)).await.unwrap();
         reply(&mut c).await;
 
         // One record, but a count claiming five thousand.
@@ -651,6 +664,105 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_v1_hello_is_refused_and_a_v2_one_is_taken_as_v2() {
+        let (addr, _, _stop) = listener("", 100).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&hello_v(1, b"", false)).await.unwrap();
+        let ack = proto::parse_hello_ack(&reply(&mut c).await.body).unwrap();
+        assert_eq!(
+            (ack.status, ack.accepted_version),
+            (proto::HELLO_BAD_VERSION, 3)
+        );
+
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&hello_v(2, b"", false)).await.unwrap();
+        let ack = proto::parse_hello_ack(&reply(&mut c).await.body).unwrap();
+        assert_eq!((ack.status, ack.accepted_version), (proto::HELLO_OK, 2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_v3_hello_is_answered_with_no_catalogue_assignments() {
+        let (addr, _, _stop) = listener("", 100).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        let hello = proto::Hello {
+            version: 3,
+            time_relative: false,
+            token: Vec::new(),
+            database: String::new(),
+            daemon_id: "bench".into(),
+            devices: vec![proto::Device {
+                bus: 0,
+                name: "can0".into(),
+            }],
+        };
+        c.write_all(&proto::encode_hello(&hello).unwrap())
+            .await
+            .unwrap();
+        let ack = proto::parse_hello_ack(&reply(&mut c).await.body).unwrap();
+        assert_eq!(
+            (ack.status, ack.accepted_version, ack.assignments),
+            (proto::HELLO_OK, 3, Vec::new())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_catalogue_request_is_answered_unknown() {
+        let (addr, _, _stop) = listener("", 100).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&hello(b"", false)).await.unwrap();
+        reply(&mut c).await;
+
+        let get = proto::CatalogGet {
+            blob_sha: [0x11; 20],
+            offset: 0,
+        };
+        c.write_all(&proto::encode_catalog_get(&get)).await.unwrap();
+        let frame = reply(&mut c).await;
+        assert_eq!(frame.mtype, proto::MSG_CATALOG);
+        let catalog = proto::parse_catalog(&frame.body).unwrap();
+        assert_eq!(
+            (catalog.status, catalog.blob_sha, catalog.data.len()),
+            (proto::CATALOG_UNKNOWN, get.blob_sha, 0)
+        );
+    }
+
+    /// No sample carries raw serial, so a batch holding any is refused whole
+    /// rather than relayed in part.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_raw_serial_batch_is_nacked_as_malformed() {
+        let (addr, seen, _stop) = listener("", 100).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&hello(b"", false)).await.unwrap();
+        reply(&mut c).await;
+
+        let mut records = one_record(0, 0x1);
+        proto::encode_record_into(
+            &mut records,
+            0,
+            0,
+            proto::RecordKind::RawSerial,
+            0,
+            0,
+            proto::raw_serial_id(1),
+            b"x",
+        );
+        c.write_all(&proto::encode_batch(5, 0, 2, &records))
+            .await
+            .unwrap();
+        let ack = proto::parse_ack(&reply(&mut c).await.body).unwrap();
+        assert_eq!((ack.seq, ack.status), (5, proto::ACK_MALFORMED));
+
+        c.write_all(&proto::encode_batch(6, 0, 1, &one_record(0, 0x2)))
+            .await
+            .unwrap();
+        let ack = proto::parse_ack(&reply(&mut c).await.body).unwrap();
+        assert_eq!((ack.seq, ack.status), (6, proto::ACK_OK));
+        let frames = wait_for(&seen, 1).await;
+        assert_eq!(frames.len(), 1, "nothing of the refused batch was archived");
+        assert_eq!(can(&frames[0]).arb_id, 0x2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_quiet_device_holds_the_connection_with_pings() {
         let (addr, _, _stop) = listener("", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
@@ -666,9 +778,7 @@ mod tests {
     async fn relative_timestamps_are_back_dated_from_arrival() {
         let (addr, seen, _stop) = listener("", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
-        c.write_all(&proto::encode_hello(b"", "", true))
-            .await
-            .unwrap();
+        c.write_all(&hello(b"", true)).await.unwrap();
         reply(&mut c).await;
 
         let mut records = Vec::new();

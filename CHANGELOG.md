@@ -11,6 +11,16 @@ All notable changes to this project are documented here. Entries go under
   string is refused as such, rather than as an empty name. A CAN frame ready to
   be read now goes ahead of the next send, so a run of transmits no longer holds
   back capture. The wire format is unchanged.
+- **Ingest protocol v3 is accepted, and v1 is refused.** Built on
+  `wiretap-lib-rs` v0.24.0. The gateway and the daemon's listener take versions
+  2 and 3. The gateway's one-release tolerance of v1 is over, so a v1 client is
+  refused, naming v3. A v3 `HELLO` gets no catalogue assignments, a
+  `CATALOG_GET` is answered unknown, and a batch holding a raw serial record is
+  refused as malformed, until catalogue assignment and raw capture are built.
+  The daemon still forwards with v2, so it keeps working against a gateway that
+  has not been upgraded.
+- **A forwarding key too long for a `HELLO` fails to connect**, naming the
+  length, rather than being sent with its length byte wrapped.
 
 ## [0.1.6] — 2026-09-29
 

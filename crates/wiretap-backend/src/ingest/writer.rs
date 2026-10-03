@@ -38,7 +38,8 @@ pub struct FrameRow {
 
 impl FrameRow {
     /// A wire record's row. A Modbus row's `dlc` is the message length, CRC
-    /// included, not a CAN length code.
+    /// included, not a CAN length code. Raw serial has no row yet, and is
+    /// refused as a data exception, as a row PostgreSQL refused would be.
     pub fn new(
         ts_us: i64,
         kind: RecordKind,
@@ -46,8 +47,8 @@ impl FrameRow {
         flags: u8,
         bus: u8,
         data: Vec<u8>,
-    ) -> Self {
-        match RecordFields::from_wire(kind, id_flags, flags) {
+    ) -> Result<Self, CopyError> {
+        Ok(match RecordFields::from_wire(kind, id_flags, flags) {
             RecordFields::Can {
                 arb_id,
                 extended,
@@ -86,7 +87,13 @@ impl FrameRow {
                 func: Some(i16::from(func)),
                 crc_valid: Some(crc_valid),
             },
-        }
+            RecordFields::RawSerial { .. } => {
+                return Err(CopyError {
+                    code: Some(SqlState::DATA_EXCEPTION),
+                    message: "raw serial records are not stored".into(),
+                })
+            }
+        })
     }
 }
 
@@ -227,7 +234,8 @@ mod tests {
             FLAG_CRC_VALID,
             2,
             raw.clone(),
-        );
+        )
+        .unwrap();
         assert_eq!((m.protocol, m.id, m.dlc), (Protocol::Modbus, 0x0120, 11));
         assert_eq!(
             (m.unit, m.func, m.crc_valid),
@@ -236,7 +244,8 @@ mod tests {
         assert_eq!((m.extended, m.is_fd, m.dir_tx), (None, None, false));
         assert_eq!(m.data, raw);
 
-        let c = FrameRow::new(5, RecordKind::Can, 0x7E0 | ID_FD | ID_TX, 0, 0, vec![0; 12]);
+        let c =
+            FrameRow::new(5, RecordKind::Can, 0x7E0 | ID_FD | ID_TX, 0, 0, vec![0; 12]).unwrap();
         assert_eq!((c.protocol, c.id, c.dlc), (Protocol::Can, 0x7E0, 9));
         assert_eq!(
             (c.extended, c.is_fd, c.dir_tx),
@@ -247,7 +256,7 @@ mod tests {
 
     #[test]
     fn a_timestamp_out_of_range_is_a_datetime_field_overflow() {
-        let row = FrameRow::new(i64::MAX, RecordKind::Can, 0x123, 0, 0, vec![1]);
+        let row = FrameRow::new(i64::MAX, RecordKind::Can, 0x123, 0, 0, vec![1]).unwrap();
         let err = copy_text(&[row]).unwrap_err();
         assert_eq!(err.code, Some(SqlState::DATETIME_FIELD_OVERFLOW));
         assert!(err.to_string().contains("timestamp out of range"), "{err}");

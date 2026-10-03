@@ -199,7 +199,13 @@ impl BatchSink for ForwardSink {
             rx: Vec::new(),
         };
 
-        let hello = proto::encode_hello(self.api_key.expose().as_bytes(), &self.database, false);
+        // v2, so a deployed v2 gateway still takes this server.
+        let hello = proto::encode_hello(&proto::Hello::v2(
+            self.api_key.expose().as_bytes(),
+            &self.database,
+            false,
+        ))
+        .map_err(|e| SinkError(format!("forward: cannot send HELLO: {e}")))?;
         conn.send(&hello).await?;
         let frame = conn.recv().await?;
         if frame.mtype != proto::MSG_HELLO_ACK {
@@ -212,8 +218,7 @@ impl BatchSink for ForwardSink {
             // meets mid-upgrade, and "status=2" does not say which end.
             let why = match ack.status {
                 proto::HELLO_BAD_VERSION => format!(
-                    ": this server speaks protocol v{}, the gateway v{}; upgrade the gateway first",
-                    proto::PROTO_VERSION,
+                    ": this server speaks protocol v2, the gateway v{}; upgrade the gateway first",
                     ack.accepted_version
                 ),
                 proto::HELLO_UNAVAILABLE => ": the gateway's database is not available yet".into(),
@@ -282,6 +287,7 @@ mod tests {
     /// What one connection to the fake gateway saw.
     #[derive(Debug, Default)]
     struct Seen {
+        version: u8,
         token: Vec<u8>,
         database: String,
         batches: Vec<proto::Batch>,
@@ -339,9 +345,11 @@ mod tests {
                 let reply = match frame.mtype {
                     proto::MSG_HELLO => {
                         let hello = proto::parse_hello(&frame.body).expect("a valid HELLO");
+                        seen.version = hello.version;
                         seen.token = hello.token;
                         seen.database = hello.database;
-                        proto::encode_hello_ack(script.hello_status, 1_234)
+                        proto::encode_hello_ack(script.hello_status, hello.version, 1_234, &[])
+                            .unwrap()
                     }
                     proto::MSG_BATCH => {
                         if script.close_on_batch {
@@ -458,6 +466,31 @@ mod tests {
         let seen = gateway.await.unwrap();
         assert_eq!(seen.token, b"sekrit");
         assert_eq!(seen.database, "vehicle_1");
+    }
+
+    #[tokio::test]
+    async fn a_hello_is_version_2() {
+        let (port, gateway) = fake_gateway(Script::default()).await;
+        let mut s = sink(port, "");
+        s.connect().await.expect("the gateway accepted it");
+        s.close().await;
+        assert_eq!(gateway.await.unwrap().version, 2);
+    }
+
+    #[tokio::test]
+    async fn a_key_too_long_for_a_hello_fails_to_connect() {
+        let (port, _gateway) = fake_gateway(Script::default()).await;
+        let mut f = forward(port, "");
+        f.api_key = Secret::new("k".repeat(256));
+        let err = ForwardSink::new(&f)
+            .connect()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("cannot send HELLO: token of 256 bytes"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

@@ -111,7 +111,7 @@ impl IngestServer {
         authed: &mut Option<Session>,
     ) -> Result<(), String> {
         let mut machine = ServerSession::new(ServerConfig {
-            accept_v1: true,
+            versions: 2..=3,
             max_records: self.config.ingest_max_batch_frames,
             short_batch: ShortBatch::NackSeqZero,
             idle_limit: Some(Duration::from_secs_f64(
@@ -144,9 +144,13 @@ impl IngestServer {
                             }
                             Err(status) => status,
                         };
-                        machine.answer_hello(status, now_us())
+                        machine
+                            .answer_hello(status, now_us(), &[])
+                            .expect("no assignments to overflow")
                     }
-                    Action::HelloRefused(status) => machine.answer_hello(status, now_us()),
+                    Action::HelloRefused(status) => machine
+                        .answer_hello(status, now_us(), &[])
+                        .expect("no assignments to overflow"),
                     Action::Batch(incoming) => {
                         let session = authed.as_ref().expect("a batch follows an accepted HELLO");
                         let seq = incoming.batch.seq;
@@ -154,6 +158,7 @@ impl IngestServer {
                         machine.ack(seq, status, 0)
                     }
                     Action::Nack { seq, status } => machine.ack(seq, status, 0),
+                    Action::CatalogGet(_) => machine.answer_catalog(Err(CATALOG_UNKNOWN)),
                     Action::Close(CloseReason::Refused(_)) => return Ok(()),
                     Action::Close(reason) => return Err(format!("closed: {reason:?}")),
                 };
@@ -232,16 +237,16 @@ impl IngestServer {
     /// unless no retry could store it (see [`writer::refused_the_rows`]).
     async fn handle_batch(&self, incoming: IncomingBatch, session: &Session) -> u8 {
         let seq = incoming.batch.seq;
-        let rows: Vec<FrameRow> = incoming
+        let count = incoming.batch.records.len() as u64;
+        let rows: Result<Vec<FrameRow>, _> = incoming
             .batch
             .stamped(incoming.time_relative, now_us())
             .map(|(ts_us, r)| {
                 FrameRow::new(ts_us as i64, r.kind, r.id_flags, r.flags, r.bus, r.payload)
             })
             .collect();
-        let count = rows.len() as u64;
 
-        match copy_rows(&session.pool, &rows).await {
+        match async { copy_rows(&session.pool, &rows?).await }.await {
             Ok(()) => {
                 if let Some(s) = self.sessions.inner.lock().await.get_mut(&session.id) {
                     s.frames += count;
@@ -274,23 +279,105 @@ mod tests {
     use super::*;
     use crate::db::tests::{config_at, unreachable_databases};
 
-    async fn hello_status(dbs: Databases, database: &str) -> u8 {
-        let server = IngestServer {
+    fn server(dbs: Databases) -> IngestServer {
+        IngestServer {
             config: Arc::new(config_at(0, true)),
             keys: KeyStore::new(dbs.clone(), Some("bootstrap")),
             dbs,
             sessions: Sessions::default(),
-        };
-        let hello = Hello {
-            version: PROTO_VERSION,
-            time_relative: false,
-            token: b"bootstrap".to_vec(),
-            database: database.into(),
-        };
-        match server.handle_hello(&hello, "192.0.2.10:40000").await {
+        }
+    }
+
+    fn hello(version: u8, database: &str) -> Hello {
+        Hello {
+            version,
+            ..Hello::v2(b"bootstrap", database, false)
+        }
+    }
+
+    async fn hello_status(dbs: Databases, database: &str) -> u8 {
+        let hello = hello(PROTO_VERSION, database);
+        match server(dbs).handle_hello(&hello, "192.0.2.10:40000").await {
             Ok(_) => HELLO_OK,
             Err(status) => status,
         }
+    }
+
+    async fn connected(server: IngestServer) -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            let _ = server.handle_client(stream, &peer.to_string()).await;
+        });
+        TcpStream::connect(addr).await.unwrap()
+    }
+
+    async fn hello_ack(c: &mut TcpStream, hello: &Hello) -> HelloAck {
+        c.write_all(&encode_hello(hello).unwrap()).await.unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let frame = loop {
+            if let Some(frame) = take_frame(&mut buf).unwrap() {
+                break frame;
+            }
+            let n = c.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "closed without a HELLO_ACK");
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        assert_eq!(frame.mtype, MSG_HELLO_ACK);
+        parse_hello_ack(&frame.body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_v3_hello_passes_the_version_check() {
+        let mut c = connected(server(unreachable_databases(true))).await;
+        let mut hello = hello(3, "archive");
+        hello.daemon_id = "bench".into();
+        hello.devices = vec![Device {
+            bus: 0,
+            name: "can0".into(),
+        }];
+        let ack = hello_ack(&mut c, &hello).await;
+        assert_eq!((ack.status, ack.accepted_version), (HELLO_UNAVAILABLE, 3));
+    }
+
+    #[tokio::test]
+    async fn a_v1_hello_is_refused_naming_v3() {
+        let mut c = connected(server(unreachable_databases(true))).await;
+        let ack = hello_ack(&mut c, &hello(1, "")).await;
+        assert_eq!((ack.status, ack.accepted_version), (HELLO_BAD_VERSION, 3));
+    }
+
+    fn incoming(kind: RecordKind, id_flags: u32) -> IncomingBatch {
+        let mut records = Vec::new();
+        encode_record_into(&mut records, 0, 0, kind, 0, 0, id_flags, &[1]);
+        let mut msg = encode_batch(9, 1_700_000_000_000_000, 1, &records);
+        let frame = take_frame(&mut msg).unwrap().unwrap();
+        IncomingBatch {
+            batch: parse_batch(&frame.body, MAX_BATCH_RECORDS)
+                .unwrap()
+                .unwrap(),
+            time_relative: false,
+            version: 3,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_raw_serial_batch_is_refused_as_malformed_without_reaching_the_database() {
+        let server = server(unreachable_databases(true));
+        let pool = Pool::builder(deadpool_postgres::Manager::new(
+            server.config.pg_dsn("wiretap").parse().unwrap(),
+            tokio_postgres::NoTls,
+        ))
+        .build()
+        .unwrap();
+        let session = Session { pool, id: 0 };
+
+        let raw = incoming(RecordKind::RawSerial, raw_serial_id(1));
+        assert_eq!(server.handle_batch(raw, &session).await, ACK_MALFORMED);
+        let can = incoming(RecordKind::Can, 0x123);
+        assert_eq!(server.handle_batch(can, &session).await, ACK_OVERLOADED);
     }
 
     #[tokio::test]

@@ -752,14 +752,10 @@ async fn import_capture(
             let mut read = 0;
             while let Some((r, consumed)) = parse_record(&pending[read..])? {
                 read += consumed;
-                rows.push(FrameRow::new(
-                    r.ts_us,
-                    RecordKind::Can,
-                    r.id_flags,
-                    0,
-                    r.bus,
-                    r.payload,
-                ));
+                rows.push(
+                    FrameRow::new(r.ts_us, RecordKind::Can, r.id_flags, 0, r.bus, r.payload)
+                        .map_err(sql::QueryError::from)?,
+                );
             }
             pending.drain(..read);
         }

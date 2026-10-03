@@ -60,8 +60,9 @@ pub fn encode_into(out: &mut Vec<u8>, base_ts_us: u64, s: &Sample) {
     );
 }
 
-/// The sample a record describes, stamped at `ts_us`.
-pub fn decode(ts_us: i64, r: proto::Record) -> Sample {
+/// The sample a record describes, stamped at `ts_us`, or `None` for raw serial,
+/// which no [`Sample`] carries.
+pub fn decode(ts_us: i64, r: proto::Record) -> Option<Sample> {
     let bus = SourceId(r.bus);
     match proto::RecordFields::from_wire(r.kind, r.id_flags, r.flags) {
         proto::RecordFields::Can {
@@ -69,7 +70,7 @@ pub fn decode(ts_us: i64, r: proto::Record) -> Sample {
             extended,
             fd,
             transmitted,
-        } => Sample::Can(CanSample {
+        } => Some(Sample::Can(CanSample {
             ts_us,
             arb_id,
             extended,
@@ -81,20 +82,21 @@ pub fn decode(ts_us: i64, r: proto::Record) -> Sample {
             } else {
                 Direction::Rx
             },
-        }),
+        })),
         proto::RecordFields::Modbus {
             unit,
             func,
             crc_valid,
             ..
-        } => Sample::Modbus(ModbusSample {
+        } => Some(Sample::Modbus(ModbusSample {
             ts_us,
             bus,
             unit,
             func,
             crc_valid,
             raw: r.payload,
-        }),
+        })),
+        proto::RecordFields::RawSerial { .. } => None,
     }
 }
 
@@ -150,7 +152,7 @@ mod tests {
         let decoded: Vec<Sample> = batch
             .records
             .into_iter()
-            .map(|r| decode(BASE + i64::from(r.delta_us), r))
+            .map(|r| decode(BASE + i64::from(r.delta_us), r).unwrap())
             .collect();
         assert_eq!(decoded, samples);
     }

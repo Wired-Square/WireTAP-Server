@@ -20,6 +20,12 @@ Requires `[forward]`; `[server].iface = ""` for ingest-only. The token is sent
 in clear text — deploy on a trusted network or wrap the connection in a VPN /
 stunnel if it crosses untrusted segments.
 
+The gateway and the capture daemon's listener both take versions 2 and 3; the
+daemon's `[forward]` sink sends version 2. Catalogue assignment is not built
+yet, so a v3 `HELLO_ACK` carries no assignments and every `CATALOG_GET` is
+answered `status = 1` (unknown). A batch holding a raw serial record is ACKed
+`status = 2` (malformed): neither end stores raw serial yet.
+
 The gateway refuses a HELLO `status = 4` (unavailable) when it cannot serve
 the database yet: PostgreSQL is down, or the database's schema is being
 checked or migrated. `status = 3` (bad database) is only for an invalid name,
