@@ -1,4 +1,4 @@
-wiretap-server (0.1.9) UNRELEASED; urgency=medium
+wiretap-server (0.1.9) bookworm; urgency=medium
 
   * The daemon names itself to the gateway: [forward] daemon_id, the host's
     short name when absent. An id the gateway would refuse stops startup.
