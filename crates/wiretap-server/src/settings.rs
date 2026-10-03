@@ -38,6 +38,9 @@ pub struct Forward {
     /// Empty means the gateway's default capture database.
     pub database: String,
     pub batching: Batching,
+    /// Whether raw serial can reach this database, which needs protocol v3.
+    /// Otherwise v2, so a gateway older than v3 still takes this server.
+    pub raw_serial: bool,
 }
 
 impl Forward {
@@ -122,11 +125,16 @@ pub enum DeviceKind {
     Serial(SerialSettings),
 }
 
+/// A serial line, and what is captured off it: framed messages into the
+/// device's `database`, raw chunks into `raw_database`, or both.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SerialSettings {
     pub line: LineSettings,
-    pub framing: Framing,
+    /// `None` when only raw chunks are captured.
+    pub framing: Option<Framing>,
     pub catalogue: Option<LineCatalogue>,
+    /// `None` when only framed messages are captured.
+    pub raw_database: Option<String>,
 }
 
 /// A `modbus-rtu` line's catalogue, read once at startup.
@@ -199,10 +207,22 @@ impl fmt::Display for LineCatalogue {
     }
 }
 
+impl SerialSettings {
+    /// Each stream captured, framed before raw, and the database it lands in:
+    /// `database` for the framed one.
+    fn streams<'a>(&'a self, database: &'a str) -> impl Iterator<Item = (&'static str, &'a str)> {
+        self.framing
+            .map(|framing| (framing.as_str(), database))
+            .into_iter()
+            .chain(self.raw_database.as_deref().map(|db| ("raw", db)))
+    }
+}
+
 impl fmt::Display for SerialSettings {
-    /// `9600 8N1 modbus-rtu`.
+    /// `9600 8N1 modbus-rtu`, `9600 8N1 raw`, or `9600 8N1 modbus-rtu, raw`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.line, self.framing.as_str())
+        let names: Vec<&str> = self.streams("").map(|(name, _)| name).collect();
+        write!(f, "{} {}", self.line, names.join(", "))
     }
 }
 
@@ -269,6 +289,8 @@ impl Device {
                 only_for(t.stop_bits.is_some(), "stop_bits", "serial")?;
                 only_for(t.framing.is_some(), "framing", "serial")?;
                 only_for(t.catalog.is_some(), "catalog", "modbus-rtu")?;
+                only_for(t.capture.is_some(), "capture", "serial")?;
+                only_for(t.raw_database.is_some(), "raw_database", "serial")?;
                 (
                     DeviceKind::Can {
                         fd: t.fd.unwrap_or(can_fd),
@@ -300,15 +322,39 @@ impl Device {
                     stop_bits: t.stop_bits.unwrap_or(1),
                 };
                 line.validate().map_err(|e| e.to_string())?;
-                let framing = match need(&t.framing, "framing")?.as_str() {
-                    "modbus-rtu" => Framing::ModbusRtu,
-                    other => return Err(format!("framing must be \"modbus-rtu\", got {other:?}")),
+                let (framed, raw) = match t.capture.as_deref() {
+                    None | Some("framed") => (true, false),
+                    Some("raw") => (false, true),
+                    Some("both") => (true, true),
+                    Some(other) => {
+                        return Err(format!(
+                            "capture must be \"framed\", \"raw\" or \"both\", got {other:?}"
+                        ))
+                    }
+                };
+                if !raw && t.raw_database.is_some() {
+                    return Err("raw_database applies to capture = \"raw\" or \"both\"".into());
+                }
+                if !framed && t.catalog.is_some() {
+                    return Err("catalog applies to framed capture, not capture = \"raw\"".into());
+                }
+                let framing = if framed {
+                    match need(&t.framing, "framing")?.as_str() {
+                        "modbus-rtu" => Some(Framing::ModbusRtu),
+                        other => {
+                            return Err(format!("framing must be \"modbus-rtu\", got {other:?}"))
+                        }
+                    }
+                } else {
+                    None
                 };
                 (
                     DeviceKind::Serial(SerialSettings {
                         line,
                         framing,
                         catalogue: t.catalog.as_deref().map(LineCatalogue::load).transpose()?,
+                        raw_database: raw
+                            .then(|| t.raw_database.clone().unwrap_or_else(|| database.clone())),
                     }),
                     Mode::Passive,
                 )
@@ -332,23 +378,45 @@ impl Device {
     pub fn fd(&self) -> bool {
         matches!(self.kind, DeviceKind::Can { fd: true })
     }
+
+    /// The databases this device's streams land in.
+    pub fn databases(&self) -> Vec<&str> {
+        match &self.kind {
+            DeviceKind::Can { .. } => vec![&self.database],
+            DeviceKind::Serial(s) => s.streams(&self.database).map(|(_, db)| db).collect(),
+        }
+    }
 }
 
 impl fmt::Display for Device {
-    /// `can0 [bus 0] can, active, fd off → sungrow`, as `--check-config`
-    /// shows it.
+    /// `can0 [bus 0] can, active, fd off → sungrow`, or for a serial line each
+    /// stream and its database, `… 9600 8N1 modbus-rtu → a, raw → b`, as
+    /// `--check-config` shows it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} [bus {}] ", self.interface, self.bus.0)?;
-        match &self.kind {
-            DeviceKind::Can { fd } => write!(
-                f,
-                "can, {}, fd {}",
-                self.mode.as_str(),
-                if *fd { "on" } else { "off" }
-            )?,
-            DeviceKind::Serial(s) => write!(f, "serial, {}, {s}", self.mode.as_str())?,
-        }
-        write!(f, " → {}", database_label(&self.database))
+        let s = match &self.kind {
+            DeviceKind::Can { fd } => {
+                return write!(
+                    f,
+                    "can, {}, fd {} → {}",
+                    self.mode.as_str(),
+                    if *fd { "on" } else { "off" },
+                    database_label(&self.database)
+                )
+            }
+            DeviceKind::Serial(s) => s,
+        };
+        let streams: Vec<String> = s
+            .streams(&self.database)
+            .map(|(name, db)| format!("{name} → {}", database_label(db)))
+            .collect();
+        write!(
+            f,
+            "serial, {}, {} {}",
+            self.mode.as_str(),
+            s.line,
+            streams.join(", ")
+        )
     }
 }
 
@@ -558,6 +626,7 @@ impl Forward {
             api_key: Secret::new(cli.forward_api_key.clone().unwrap_or_default()),
             database: cli.forward_database.clone(),
             batching: Batching::from_cli(cli, env),
+            raw_serial: false,
         }
     }
 }
@@ -969,8 +1038,11 @@ impl Settings {
             let index = sugar.len() + i;
             let d = Device::from_table(t, self.can_fd, database)
                 .map_err(|what| SettingsError::Device { index, what })?;
-            if !valid_database(&d.database) {
-                return Err(SettingsError::BadDatabase(d.database));
+            if let Some(bad) = std::iter::once(d.database.as_str())
+                .chain(d.databases())
+                .find(|db| !valid_database(db))
+            {
+                return Err(SettingsError::BadDatabase(bad.to_owned()));
             }
             devices.push(d);
         }
@@ -1031,16 +1103,40 @@ impl Settings {
     /// the rest in device order. A database nothing feeds gets no pipeline.
     pub fn databases(&self) -> Vec<String> {
         let default = self.default_database();
+        let fed = || self.devices.iter().flat_map(Device::databases);
         let mut out: Vec<String> = Vec::new();
-        if self.ingest.is_some() || self.devices.iter().any(|d| d.database == default) {
+        if self.ingest.is_some() || fed().any(|db| db == default) {
             out.push(default.to_owned());
         }
-        for d in &self.devices {
-            if !out.contains(&d.database) {
-                out.push(d.database.clone());
+        for db in fed() {
+            if !out.iter().any(|o| o == db) {
+                out.push(db.to_owned());
             }
         }
         out
+    }
+
+    /// One forwarding configuration per [`Self::databases`] entry, empty with no
+    /// `[forward]`.
+    pub fn forwards(&self) -> Vec<Forward> {
+        let Some(forward) = &self.forward else {
+            return Vec::new();
+        };
+        self.databases()
+            .iter()
+            .map(|db| Forward {
+                raw_serial: self.carries_raw_serial(db),
+                ..forward.for_database(db)
+            })
+            .collect()
+    }
+
+    /// Whether a device's raw stream lands in `database`. Only then is it
+    /// forwarded with v3: turning the ingest listener on must not change the
+    /// protocol a gateway is spoken to with.
+    pub fn carries_raw_serial(&self, database: &str) -> bool {
+        self.serial_devices()
+            .any(|(_, s)| s.raw_database.as_deref() == Some(database))
     }
 
     /// Which CAN devices the responder answers on, as indices into
@@ -1917,8 +2013,9 @@ mod tests {
                     parity: Parity::None,
                     stop_bits: 1,
                 },
-                framing: Framing::ModbusRtu,
+                framing: Some(Framing::ModbusRtu),
                 catalogue: None,
+                raw_database: None,
             }),
             "8N1 unless told otherwise"
         );
@@ -1964,6 +2061,13 @@ mod tests {
             (&format!("{SERIAL}catalog = \"/etc/../home/pi/sungrow.catalog.toml\"\n"), "must not contain . or .. components"),
             (&format!("{SERIAL}catalog = \"/etc/wiretap-server/./sungrow.catalog.toml\"\n"), "must not contain . or .. components"),
             ("[[device]]\nkind = \"can\"\ninterface = \"can0\"\ncatalog = \"/etc/x.toml\"\n", "catalog applies to a modbus-rtu device"),
+            ("[[device]]\nkind = \"can\"\ninterface = \"can0\"\ncapture = \"raw\"\n", "capture applies to a serial device"),
+            ("[[device]]\nkind = \"can\"\ninterface = \"can0\"\nraw_database = \"x\"\n", "raw_database applies to a serial device"),
+            (&format!("{SERIAL}capture = \"bytes\"\n"), "capture must be \"framed\", \"raw\" or \"both\", got \"bytes\""),
+            (&format!("{SERIAL}raw_database = \"x\"\n"), "raw_database applies to capture = \"raw\" or \"both\""),
+            (&format!("{SERIAL}capture = \"framed\"\nraw_database = \"x\"\n"), "raw_database applies to capture"),
+            (&format!("{SERIAL}capture = \"raw\"\ncatalog = \"/etc/x.toml\"\n"), "catalog applies to framed capture"),
+            ("[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nbaud = 9600\ncapture = \"both\"\n", "framing is required"),
         ] {
             let err = resolve(&[], Some(broken)).unwrap_err().to_string();
             assert!(err.starts_with("device[0]: ") && err.contains(expect), "{broken:?} -> {err}");
@@ -2149,6 +2253,134 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.settings.databases(), ["", "rs485"]);
+    }
+
+    const RAW: &str = "[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\n\
+                       baud = 9600\ncapture = \"raw\"\n";
+
+    fn serial_line(s: &Settings) -> &SerialSettings {
+        s.serial_devices().next().expect("a serial device").1
+    }
+
+    #[test]
+    fn a_serial_line_captures_framed_raw_or_both() {
+        let forward = "[forward]\nenable = true\ndatabase = \"site\"\n";
+
+        let framed = resolve(
+            &[],
+            Some(&format!("{forward}{SERIAL}capture = \"framed\"\n")),
+        )
+        .unwrap();
+        let line = serial_line(&framed.settings);
+        assert_eq!(
+            (line.framing, &line.raw_database),
+            (Some(Framing::ModbusRtu), &None)
+        );
+        assert_eq!(framed.settings.databases(), ["site"]);
+
+        let raw = resolve(&[], Some(&format!("{forward}{RAW}"))).unwrap();
+        let line = serial_line(&raw.settings);
+        assert_eq!(
+            (line.framing, line.raw_database.as_deref()),
+            (None, Some("site"))
+        );
+        assert_eq!(
+            raw.settings.devices[0].to_string(),
+            "/dev/ttyUSB0 [bus 0] serial, passive, 9600 8N1 raw → site"
+        );
+        assert_eq!(
+            raw.settings.databases(),
+            ["site"],
+            "raw defaults to database"
+        );
+
+        let both = resolve(
+            &[],
+            Some(&format!(
+                "{forward}{SERIAL}capture = \"both\"\ndatabase = \"rs485\"\n\
+                 raw_database = \"rs485_raw\"\n"
+            )),
+        )
+        .unwrap();
+        let line = serial_line(&both.settings);
+        assert_eq!(
+            (line.framing, line.raw_database.as_deref()),
+            (Some(Framing::ModbusRtu), Some("rs485_raw"))
+        );
+        assert_eq!(line.to_string(), "9600 8N1 modbus-rtu, raw");
+        assert_eq!(
+            both.settings.devices[0].to_string(),
+            "/dev/ttyUSB0 [bus 0] serial, passive, 9600 8N1 modbus-rtu → rs485, raw → rs485_raw"
+        );
+        assert_eq!(
+            both.settings.databases(),
+            ["rs485", "rs485_raw"],
+            "nothing feeds the default; each stream's database gets a pipeline"
+        );
+    }
+
+    /// A raw-only line feeds its raw database alone, so its `database` gets no
+    /// pipeline of its own.
+    #[test]
+    fn a_raw_line_feeds_only_its_raw_database() {
+        let r = resolve(
+            &[],
+            Some(&format!(
+                "[server]\niface = \"can0\"\n[forward]\nenable = true\ndatabase = \"site\"\n\
+                 {RAW}database = \"unused\"\nraw_database = \"rs485_raw\"\n"
+            )),
+        )
+        .unwrap();
+        assert_eq!(r.settings.databases(), ["site", "rs485_raw"]);
+    }
+
+    #[test]
+    fn a_raw_database_name_the_gateway_would_refuse_is_refused_here() {
+        let err = resolve(&[], Some(&format!("{RAW}raw_database = \"Raw\"\n"))).unwrap_err();
+        assert_eq!(err, SettingsError::BadDatabase("Raw".into()));
+    }
+
+    #[test]
+    fn only_a_database_raw_serial_can_reach_is_forwarded_with_v3() {
+        let forwards = |args: &[&str], toml: &str| -> Vec<(String, bool)> {
+            resolve(args, Some(toml))
+                .unwrap()
+                .settings
+                .forwards()
+                .into_iter()
+                .map(|f| (f.database, f.raw_serial))
+                .collect()
+        };
+        let both = "[server]\niface = \"can0\"\n[forward]\nenable = true\ndatabase = \"site\"\n\
+                    [[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nbaud = 9600\n\
+                    framing = \"modbus-rtu\"\ncapture = \"both\"\nraw_database = \"rs485_raw\"\n";
+        assert_eq!(
+            forwards(&[], both),
+            [("site".into(), false), ("rs485_raw".into(), true)]
+        );
+        assert_eq!(
+            forwards(&["--ingest-enable"], both),
+            [("site".into(), false), ("rs485_raw".into(), true)],
+            "the listener alone does not change the protocol"
+        );
+        assert_eq!(
+            forwards(
+                &["--ingest-enable"],
+                "[forward]\nenable = true\ndatabase = \"site\"\n"
+            ),
+            [("site".into(), false)],
+            "ingest on with no raw device stays on v2"
+        );
+        assert_eq!(
+            forwards(&[], &format!("[forward]\nenable = true\n{RAW}")),
+            [(String::new(), true)],
+            "raw with no raw_database lands in database"
+        );
+        assert_eq!(
+            forwards(&[], &format!("[forward]\nenable = true\n{SERIAL}")),
+            [(String::new(), false)]
+        );
+        assert!(forwards(&[], SERIAL).is_empty(), "no [forward]");
     }
 
     /// The gateway's rule, applied where `--check-config` can report it.

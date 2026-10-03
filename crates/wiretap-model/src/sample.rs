@@ -139,11 +139,25 @@ pub struct ModbusSample {
     pub raw: Vec<u8>,
 }
 
+/// Bytes off a serial line as one read returned them, unframed: a chunk of at
+/// most 256 bytes, stamped when its last byte arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerialSample {
+    /// Capture time in microseconds since the Unix epoch.
+    pub ts_us: i64,
+    pub bus: SourceId,
+    /// The read this chunk came from, counted from the line's open and
+    /// wrapping at 2^31. Every chunk of one read shares it.
+    pub seq: u32,
+    pub data: Vec<u8>,
+}
+
 /// What any capture source produces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sample {
     Can(CanSample),
     Modbus(ModbusSample),
+    Serial(SerialSample),
 }
 
 impl Sample {
@@ -151,6 +165,7 @@ impl Sample {
         match self {
             Sample::Can(c) => c.ts_us,
             Sample::Modbus(m) => m.ts_us,
+            Sample::Serial(r) => r.ts_us,
         }
     }
 
@@ -158,6 +173,7 @@ impl Sample {
         match self {
             Sample::Can(c) => c.bus,
             Sample::Modbus(m) => m.bus,
+            Sample::Serial(r) => r.bus,
         }
     }
 
@@ -165,6 +181,7 @@ impl Sample {
         match self {
             Sample::Can(_) => Protocol::Can,
             Sample::Modbus(_) => Protocol::Modbus,
+            Sample::Serial(_) => Protocol::Serial,
         }
     }
 }
@@ -236,6 +253,16 @@ mod tests {
         assert_eq!(
             (modbus.ts_us(), modbus.bus(), modbus.protocol()),
             (2, SourceId(1), Protocol::Modbus)
+        );
+        let serial = Sample::Serial(SerialSample {
+            ts_us: 3,
+            bus: SourceId(2),
+            seq: 7,
+            data: vec![0x55],
+        });
+        assert_eq!(
+            (serial.ts_us(), serial.bus(), serial.protocol()),
+            (3, SourceId(2), Protocol::Serial)
         );
     }
 }

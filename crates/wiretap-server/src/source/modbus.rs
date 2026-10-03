@@ -89,8 +89,9 @@ mod tests {
                 parity: Parity::None,
                 stop_bits: 1,
             },
-            framing: Framing::ModbusRtu,
+            framing: Some(Framing::ModbusRtu),
             catalogue: None,
+            raw_database: None,
         }
     }
 

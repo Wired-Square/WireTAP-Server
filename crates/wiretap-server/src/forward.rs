@@ -38,6 +38,7 @@ pub struct ForwardSink {
     port: u16,
     api_key: Secret,
     database: String,
+    version: u8,
     conn: Option<Connection>,
     /// Wraps with the protocol's `u32`, as the Python's `& 0xFFFFFFFF` did. It
     /// identifies an ACK against its batch, so it only has to be unique among
@@ -62,6 +63,7 @@ impl ForwardSink {
             port: forward.port,
             api_key: forward.api_key.clone(),
             database: forward.database.clone(),
+            version: if forward.raw_serial { 3 } else { 2 },
             conn: None,
             seq: 0,
             records: Vec::new(),
@@ -199,12 +201,10 @@ impl BatchSink for ForwardSink {
             rx: Vec::new(),
         };
 
-        // v2, so a deployed v2 gateway still takes this server.
-        let hello = proto::encode_hello(&proto::Hello::v2(
-            self.api_key.expose().as_bytes(),
-            &self.database,
-            false,
-        ))
+        let hello = proto::encode_hello(&proto::Hello {
+            version: self.version,
+            ..proto::Hello::v2(self.api_key.expose().as_bytes(), &self.database, false)
+        })
         .map_err(|e| SinkError(format!("forward: cannot send HELLO: {e}")))?;
         conn.send(&hello).await?;
         let frame = conn.recv().await?;
@@ -218,8 +218,8 @@ impl BatchSink for ForwardSink {
             // meets mid-upgrade, and "status=2" does not say which end.
             let why = match ack.status {
                 proto::HELLO_BAD_VERSION => format!(
-                    ": this server speaks protocol v2, the gateway v{}; upgrade the gateway first",
-                    ack.accepted_version
+                    ": this server speaks protocol v{}, the gateway v{}; upgrade the gateway first",
+                    self.version, ack.accepted_version
                 ),
                 proto::HELLO_UNAVAILABLE => ": the gateway's database is not available yet".into(),
                 _ => String::new(),
@@ -401,6 +401,7 @@ mod tests {
                 cache_origin: None,
                 legacy_cache_path: None,
             },
+            raw_serial: false,
         }
     }
 
@@ -469,12 +470,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_hello_is_version_2() {
-        let (port, gateway) = fake_gateway(Script::default()).await;
-        let mut s = sink(port, "");
-        s.connect().await.expect("the gateway accepted it");
-        s.close().await;
-        assert_eq!(gateway.await.unwrap().version, 2);
+    async fn a_hello_is_version_2_unless_raw_serial_can_reach_the_database() {
+        for (raw_serial, version) in [(false, 2), (true, 3)] {
+            let (port, gateway) = fake_gateway(Script::default()).await;
+            let mut f = forward(port, "");
+            f.raw_serial = raw_serial;
+            let mut s = ForwardSink::new(&f);
+            s.connect().await.expect("the gateway accepted it");
+            s.close().await;
+            assert_eq!(gateway.await.unwrap().version, version);
+        }
     }
 
     #[tokio::test]

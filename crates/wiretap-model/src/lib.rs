@@ -16,5 +16,5 @@ pub mod secret;
 
 #[cfg(feature = "config")]
 pub use config::{parse_ifaces, FileConfig};
-pub use sample::{CanSample, Direction, ModbusSample, Protocol, Sample, SourceId};
+pub use sample::{CanSample, Direction, ModbusSample, Protocol, Sample, SerialSample, SourceId};
 pub use secret::Secret;

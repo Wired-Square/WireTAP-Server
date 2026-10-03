@@ -172,17 +172,24 @@ enable = false
 # /tmp. /usr/share/doc/wiretap-server/examples/sungrow-rs485.catalog.toml is
 # one to copy.
 #
+# `capture` chooses what is stored: framed messages, the raw bytes each read
+# returned in chunks of up to 256, or both. Raw chunks go to `raw_database`.
+# `framing` is not needed for raw alone, and a catalog there is refused. Raw
+# capture forwards over ingest protocol v3: upgrade the gateway first.
+#
 # [[device]]
 # kind = "serial"
 # interface = "/dev/ttyUSB0"
 # baud = 9600            # required: 1200 to 921600, the standard rates
-# framing = "modbus-rtu" # required; the only framing today
+# framing = "modbus-rtu" # required unless capture = "raw"; the only framing today
 # data_bits = 8          # 5 to 8
 # parity = "none"        # none | even | odd
 # stop_bits = 1          # 1 or 2
 # mode = "passive"       # the only mode for serial: opened read-only
 # database = "rs485"     # its own gateway database; absent means [forward]'s
 # catalog = "/etc/wiretap-server/sungrow-rs485.catalog.toml"
+# capture = "framed"     # framed | raw | both
+# raw_database = "rs485_raw" # raw and both only; absent means database
 
 # A CAN bus with a promise attached. `mode = "passive"` refuses GVRET
 # transmits on this bus and never arms the Test Pattern responder on it;

@@ -387,23 +387,17 @@ impl Archives {
     /// One [`start`] per database, tagged when there is more than one. An
     /// error names the cache that could not be opened.
     pub fn start_all(
-        forward: &Forward,
-        databases: &[String],
+        forwards: &[Forward],
         stats_interval: f64,
     ) -> Result<Self, (PathBuf, CacheError)> {
-        let tagged = databases.len() > 1;
-        let mut running = Vec::with_capacity(databases.len());
-        for db in databases {
-            let fwd = forward.for_database(db);
-            let r = start(&fwd, stats_interval, tagged)
+        let tagged = forwards.len() > 1;
+        let mut running = Vec::with_capacity(forwards.len());
+        for fwd in forwards {
+            let r = start(fwd, stats_interval, tagged)
                 .map_err(|e| (fwd.batching.cache_path.clone(), e))?;
-            running.push((db.clone(), r));
+            running.push((fwd.database.clone(), r));
         }
         Ok(Self(running))
-    }
-
-    pub fn none() -> Self {
-        Self(Vec::new())
     }
 
     /// The handle for a database, or `None` when nothing archives.
@@ -902,6 +896,7 @@ mod tests {
         match s {
             Sample::Can(c) => c.arb_id,
             Sample::Modbus(m) => wiretap_protocol::ingest::modbus_id(m.unit, m.func),
+            Sample::Serial(r) => r.seq,
         }
     }
 

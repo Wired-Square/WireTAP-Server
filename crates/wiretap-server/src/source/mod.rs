@@ -1,9 +1,11 @@
 //! Capture sources: the things that produce frames.
 //!
-//! The socket and serial code is Linux-only, so the bus arithmetic and the
-//! Modbus framing live here where they can be tested on any machine.
+//! The socket and serial code is Linux-only, so the bus arithmetic, the
+//! Modbus framing and the raw chunking live here where they can be tested on
+//! any machine.
 
 pub mod modbus;
+pub mod raw;
 #[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
 pub mod serial_tap;
 #[cfg(target_os = "linux")]

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::{params_from_iter, Connection};
-use wiretap_model::{CanSample, Direction, ModbusSample, Protocol, Sample, SourceId};
+use wiretap_model::{CanSample, Direction, ModbusSample, Protocol, Sample, SerialSample, SourceId};
 use wiretap_protocol::ingest::{modbus_id, modbus_unit_func};
 use wiretap_protocol::payload_dlc;
 
@@ -380,6 +380,19 @@ impl FrameCache for SqliteCache {
                         f.protocol().as_str(),
                         Some(m.crc_valid),
                     ])?,
+                    // As Modbus, with the read sequence for the id.
+                    Sample::Serial(r) => stmt.execute(rusqlite::params![
+                        to_secs(r.ts_us),
+                        false,
+                        false,
+                        r.seq,
+                        r.data.len() as i64,
+                        r.data,
+                        r.bus.0,
+                        Direction::Rx.as_str(),
+                        f.protocol().as_str(),
+                        Option::<bool>::None,
+                    ])?,
                 };
             }
         }
@@ -412,9 +425,15 @@ impl FrameCache for SqliteCache {
                         raw: r.get(5)?,
                     })
                 }
+                Some(Protocol::Serial) => Sample::Serial(SerialSample {
+                    ts_us,
+                    bus,
+                    seq: r.get(4)?,
+                    data: r.get(5)?,
+                }),
                 // A tag this build cannot carry — a newer build wrote it — is
                 // an error, not a CAN frame with a nonsense id.
-                Some(Protocol::Serial) | None => {
+                None => {
                     return Err(rusqlite::Error::FromSqlConversionFailure(
                         8,
                         rusqlite::types::Type::Text,
@@ -568,7 +587,7 @@ mod tests {
     fn can(s: &Sample) -> &CanSample {
         match s {
             Sample::Can(c) => c,
-            Sample::Modbus(m) => panic!("a CAN frame was expected, not {m:?}"),
+            other => panic!("a CAN frame was expected, not {other:?}"),
         }
     }
 
@@ -646,6 +665,37 @@ mod tests {
         assert_eq!(
             (dir.as_str(), protocol.as_str(), crc),
             ("rx", "modbus", Some(1))
+        );
+    }
+
+    #[test]
+    fn a_raw_serial_chunk_survives_the_round_trip() {
+        let (_dir, mut c) = temp_cache("serial", 100);
+        let original = Arc::new(Sample::Serial(SerialSample {
+            ts_us: 1_700_000_000_000_002,
+            bus: SourceId(3),
+            seq: (1 << 31) - 1,
+            data: (0..=255).collect(),
+        }));
+        c.append(std::slice::from_ref(&original)).unwrap();
+        assert_eq!(c.oldest(1).unwrap()[0].sample, original);
+
+        let (arb_id, dlc, dir, protocol, crc): (i64, i64, String, String, Option<i64>) = c
+            .conn
+            .query_row(
+                "SELECT arb_id, dlc, dir, protocol, crc_valid FROM frames WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (arb_id, dlc),
+            ((1 << 31) - 1, 256),
+            "the sequence, the length"
+        );
+        assert_eq!(
+            (dir.as_str(), protocol.as_str(), crc),
+            ("rx", "serial", None)
         );
     }
 

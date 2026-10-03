@@ -44,7 +44,9 @@ use crate::ingest;
 use crate::settings::Device;
 use crate::settings::{Mode, Settings, TestPattern};
 #[cfg(target_os = "linux")]
-use crate::source::{bus_count, index_for_bus, modbus::RtuTap, serial_tap, socketcan, Transmit};
+use crate::source::{
+    bus_count, index_for_bus, modbus::RtuTap, raw::RawTap, serial_tap, socketcan, Transmit,
+};
 #[cfg(target_os = "linux")]
 use crate::testpattern;
 
@@ -166,17 +168,12 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
     // and none should start before there is somewhere for frames to go. Their
     // absence is warned about at startup and is a legitimate deployment — a
     // GVRET bridge that archives nothing.
-    let archives = match &settings.forward {
-        Some(forward) => {
-            Archives::start_all(forward, &settings.databases(), settings.stats_interval).map_err(
-                |(path, err)| RunError::Cache {
-                    path: path.display().to_string(),
-                    err: err.to_string(),
-                },
-            )?
-        }
-        None => Archives::none(),
-    };
+    let archives = Archives::start_all(&settings.forwards(), settings.stats_interval).map_err(
+        |(path, err)| RunError::Cache {
+            path: path.display().to_string(),
+            err: err.to_string(),
+        },
+    )?;
 
     let mut readers = JoinSet::new();
     if settings.devices.is_empty() {
@@ -190,7 +187,8 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
         let Some(archive) = archives.handle(settings.default_database()) else {
             return Err(RunError::IngestNeedsForward);
         };
-        let server = ingest::Server::bind(ingest, archive)
+        let relays_raw_serial = settings.carries_raw_serial(settings.default_database());
+        let server = ingest::Server::bind(ingest, archive, relays_raw_serial)
             .await
             .map_err(|err| RunError::Bind {
                 addr: format!("{}:{}", ingest.host, ingest.port),
@@ -235,13 +233,21 @@ async fn start_devices(
             "Tapping {}[{}]  {s}  read-only{catalogue}",
             d.interface, d.bus.0
         );
-        let archive = archives.handle(&d.database);
+        let framed_archive = archives.handle(&d.database);
+        let raw_archive = s.raw_database.as_deref().and_then(|db| archives.handle(db));
         let frames = frames.clone();
         readers.spawn(serial_tap::drain(
             d.interface.clone(),
             task,
-            RtuTap::new(d.bus, s),
-            move |m| publish(Sample::Modbus(m), archive.as_ref(), &frames),
+            s.framing.map(|_| RtuTap::new(d.bus, s)),
+            s.raw_database.as_ref().map(|_| RawTap::new(d.bus, s.line)),
+            move |sample| {
+                let archive = match sample {
+                    Sample::Serial(_) => &raw_archive,
+                    _ => &framed_archive,
+                };
+                publish(sample, archive.as_ref(), &frames)
+            },
         ));
     }
     if settings.echo_console {
@@ -487,6 +493,7 @@ async fn echo_loop(mut frames: broadcast::Receiver<Arc<Sample>>, colour: bool) {
                 match &*sample {
                     Sample::Can(c) => console::format_line(&mut line, c, colour, rel_us),
                     Sample::Modbus(m) => console::format_modbus_line(&mut line, m, colour, rel_us),
+                    Sample::Serial(r) => console::format_serial_line(&mut line, r, colour, rel_us),
                 }
                 // Ignored, as the Python ignored it: a console that has gone
                 // away must not stop a capture. `Stdout` is line buffered and

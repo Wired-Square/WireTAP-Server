@@ -79,6 +79,7 @@ async fn frames_survive_a_gateway_outage() {
             queue_flush_pct: 50,
             legacy_cache_path: None,
         },
+        raw_serial: false,
     };
     let running = archive::start(&forward, 2.0, false).expect("an archive");
     let counters = running.frames.counters();

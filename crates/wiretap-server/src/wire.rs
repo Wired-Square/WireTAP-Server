@@ -5,7 +5,7 @@
 //! encodes it and [`crate::ingest`] decodes it, and the two have to agree with
 //! each other and with the gateway's reading of the same record.
 
-use wiretap_model::{CanSample, Direction, ModbusSample, Sample, SourceId};
+use wiretap_model::{CanSample, Direction, ModbusSample, Sample, SerialSample, SourceId};
 use wiretap_protocol::ingest as proto;
 
 /// A capture timestamp as the protocol carries it. One spelling, because the
@@ -35,6 +35,13 @@ fn parts(s: &Sample) -> (proto::RecordFields, &[u8]) {
             },
             &m.raw,
         ),
+        Sample::Serial(r) => (
+            proto::RecordFields::RawSerial {
+                seq: r.seq,
+                transmitted: false,
+            },
+            &r.data,
+        ),
     }
 }
 
@@ -60,9 +67,8 @@ pub fn encode_into(out: &mut Vec<u8>, base_ts_us: u64, s: &Sample) {
     );
 }
 
-/// The sample a record describes, stamped at `ts_us`, or `None` for raw serial,
-/// which no [`Sample`] carries.
-pub fn decode(ts_us: i64, r: proto::Record) -> Option<Sample> {
+/// The sample a record describes, stamped at `ts_us`.
+pub fn decode(ts_us: i64, r: proto::Record) -> Sample {
     let bus = SourceId(r.bus);
     match proto::RecordFields::from_wire(r.kind, r.id_flags, r.flags) {
         proto::RecordFields::Can {
@@ -70,7 +76,7 @@ pub fn decode(ts_us: i64, r: proto::Record) -> Option<Sample> {
             extended,
             fd,
             transmitted,
-        } => Some(Sample::Can(CanSample {
+        } => Sample::Can(CanSample {
             ts_us,
             arb_id,
             extended,
@@ -82,21 +88,26 @@ pub fn decode(ts_us: i64, r: proto::Record) -> Option<Sample> {
             } else {
                 Direction::Rx
             },
-        })),
+        }),
         proto::RecordFields::Modbus {
             unit,
             func,
             crc_valid,
             ..
-        } => Some(Sample::Modbus(ModbusSample {
+        } => Sample::Modbus(ModbusSample {
             ts_us,
             bus,
             unit,
             func,
             crc_valid,
             raw: r.payload,
-        })),
-        proto::RecordFields::RawSerial { .. } => None,
+        }),
+        proto::RecordFields::RawSerial { seq, .. } => Sample::Serial(SerialSample {
+            ts_us,
+            bus,
+            seq,
+            data: r.payload,
+        }),
     }
 }
 
@@ -104,10 +115,10 @@ pub fn decode(ts_us: i64, r: proto::Record) -> Option<Sample> {
 mod tests {
     use super::*;
 
-    /// Encoded, parsed by the server half, decoded: every field of both kinds
+    /// Encoded, parsed by the server half, decoded: every field of every kind
     /// comes back, which is what the relay listener depends on.
     #[test]
-    fn both_kinds_survive_the_round_trip() {
+    fn every_kind_survives_the_round_trip() {
         const BASE: i64 = 1_700_000_000_000_000;
         let samples = [
             Sample::Can(CanSample {
@@ -127,6 +138,12 @@ mod tests {
                 crc_valid: false,
                 raw: vec![0x00, 0x60, 0x00, 0x00, 0x00, 0x05, 0x0A, 0x00],
             }),
+            Sample::Serial(SerialSample {
+                ts_us: BASE + 11,
+                bus: SourceId(3),
+                seq: (1 << 31) - 1,
+                data: (0..=255).collect(),
+            }),
         ];
         let mut records = Vec::new();
         for s in &samples {
@@ -144,7 +161,7 @@ mod tests {
             "fit_input sizes what encode_into writes"
         );
 
-        let mut buf = proto::encode_batch(1, BASE as u64, 2, &records);
+        let mut buf = proto::encode_batch(1, BASE as u64, samples.len() as u16, &records);
         let frame = proto::take_frame(&mut buf).unwrap().unwrap();
         let batch = proto::parse_batch(&frame.body, proto::MAX_BATCH_RECORDS)
             .unwrap()
@@ -152,7 +169,7 @@ mod tests {
         let decoded: Vec<Sample> = batch
             .records
             .into_iter()
-            .map(|r| decode(BASE + i64::from(r.delta_us), r).unwrap())
+            .map(|r| decode(BASE + i64::from(r.delta_us), r))
             .collect();
         assert_eq!(decoded, samples);
     }

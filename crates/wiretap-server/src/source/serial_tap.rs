@@ -1,13 +1,15 @@
-//! A serial line opened through `wiretap-io` and drained into an [`RtuTap`].
+//! A serial line opened through `wiretap-io` and drained into an [`RtuTap`], a
+//! [`RawTap`], or both.
 
 use std::io;
 use std::time::Duration;
 
 use tracing::{error, info};
 use wiretap_io::serial::{self, Access, SerialError, SerialEvent, SerialOptions, SerialTask};
-use wiretap_model::ModbusSample;
+use wiretap_model::Sample;
 
 use super::modbus::RtuTap;
+use super::raw::RawTap;
 use crate::settings::SerialSettings;
 
 pub fn open(path: &str, line: &SerialSettings) -> io::Result<SerialTask> {
@@ -26,24 +28,39 @@ pub fn open(path: &str, line: &SerialSettings) -> io::Result<SerialTask> {
     })
 }
 
-/// Frame every read for as long as the task runs. A loss is logged once and
-/// its end once.
+/// Hand every read to the taps for as long as the task runs. A loss is logged
+/// once and its end once.
 pub async fn drain(
     interface: String,
     mut task: SerialTask,
-    mut tap: RtuTap,
-    mut publish: impl FnMut(ModbusSample),
+    mut framed: Option<RtuTap>,
+    mut raw: Option<RawTap>,
+    mut publish: impl FnMut(Sample),
 ) {
     let mut lost = false;
     while let Some(event) = task.next_event().await {
         match event {
             SerialEvent::Connected => {
+                if let Some(raw) = &mut raw {
+                    raw.reset();
+                }
                 if std::mem::take(&mut lost) {
                     info!("{interface}: reopened");
                 }
             }
             SerialEvent::Read { bytes, at } => {
-                tap.push(&bytes, at).into_iter().for_each(&mut publish)
+                if let Some(raw) = &mut raw {
+                    raw.push(&bytes, at)
+                        .into_iter()
+                        .map(Sample::Serial)
+                        .for_each(&mut publish);
+                }
+                if let Some(tap) = &mut framed {
+                    tap.push(&bytes, at)
+                        .into_iter()
+                        .map(Sample::Modbus)
+                        .for_each(&mut publish);
+                }
             }
             SerialEvent::Disconnected {
                 error, consecutive, ..
@@ -51,7 +68,9 @@ pub async fn drain(
                 if consecutive == 1 {
                     error!("{interface}: {error}; reopening");
                 }
-                tap.reset();
+                if let Some(tap) = &mut framed {
+                    tap.reset();
+                }
                 lost = true;
             }
         }
@@ -69,7 +88,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
     use wiretap_catalog::{LineSettings, Parity};
-    use wiretap_model::SourceId;
+    use wiretap_model::{ModbusSample, SerialSample, SourceId};
 
     use super::*;
     use crate::settings::Framing;
@@ -81,8 +100,9 @@ mod tests {
             parity: Parity::None,
             stop_bits: 1,
         },
-        framing: Framing::ModbusRtu,
+        framing: Some(Framing::ModbusRtu),
         catalogue: None,
+        raw_database: None,
     };
 
     struct Pty {
@@ -125,24 +145,94 @@ mod tests {
 
     const REQUEST: [u8; 8] = [0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A];
 
-    /// The server's path, from the open to what the tap publishes.
-    fn tap(path: &str, bus: SourceId) -> mpsc::UnboundedReceiver<ModbusSample> {
+    /// The server's path, from the open to what the taps publish.
+    fn taps(path: &str, bus: SourceId, framed: bool, raw: bool) -> mpsc::UnboundedReceiver<Sample> {
         let task = open(path, &LINE).expect("open");
         let (samples, received) = mpsc::unbounded_channel();
         tokio::spawn(drain(
             path.to_owned(),
             task,
-            RtuTap::new(bus, &LINE),
-            move |m| samples.send(m).expect("the test is listening"),
+            framed.then(|| RtuTap::new(bus, &LINE)),
+            raw.then(|| RawTap::new(bus, LINE.line)),
+            move |s| samples.send(s).expect("the test is listening"),
         ));
         received
     }
 
-    async fn next(received: &mut mpsc::UnboundedReceiver<ModbusSample>) -> ModbusSample {
+    fn tap(path: &str, bus: SourceId) -> mpsc::UnboundedReceiver<Sample> {
+        taps(path, bus, true, false)
+    }
+
+    async fn next_sample(received: &mut mpsc::UnboundedReceiver<Sample>) -> Sample {
         timeout(Duration::from_secs(1), received.recv())
             .await
             .expect("no sample")
             .expect("the tap ended")
+    }
+
+    async fn next(received: &mut mpsc::UnboundedReceiver<Sample>) -> ModbusSample {
+        match next_sample(received).await {
+            Sample::Modbus(m) => m,
+            other => panic!("a Modbus message was expected, not {other:?}"),
+        }
+    }
+
+    async fn next_raw(received: &mut mpsc::UnboundedReceiver<Sample>) -> SerialSample {
+        match next_sample(received).await {
+            Sample::Serial(r) => r,
+            other => panic!("a raw chunk was expected, not {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_raw_tap_publishes_the_reads_and_counts_them_from_each_open() {
+        let link = std::env::temp_dir().join(format!("wiretap-server-raw-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        let mut first = Pty::new();
+        let mut second = Pty::new();
+        std::os::unix::fs::symlink(&first.slave, &link).expect("symlink");
+        let mut received = taps(link.to_str().expect("utf-8 path"), SourceId(5), false, true);
+
+        // A byte at a time, so no write can arrive as two reads.
+        first.master.write_all(&[0xA5]).expect("write");
+        let r = next_raw(&mut received).await;
+        assert_eq!((r.bus, r.seq, r.data), (SourceId(5), 0, vec![0xA5]));
+        first.master.write_all(&[0x5A]).expect("write");
+        assert_eq!(next_raw(&mut received).await.seq, 1);
+
+        std::fs::remove_file(&link).expect("unlink");
+        drop(first);
+        std::os::unix::fs::symlink(&second.slave, &link).expect("symlink");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        second.master.write_all(&[0xA5]).expect("write");
+        assert_eq!(
+            next_raw(&mut received).await.seq,
+            0,
+            "counted again from the reopen"
+        );
+        let _ = std::fs::remove_file(&link);
+    }
+
+    #[tokio::test]
+    async fn a_line_captured_both_ways_publishes_the_read_and_the_message() {
+        let mut pty = Pty::new();
+        let mut received = taps(&pty.slave, SourceId(1), true, true);
+        pty.master.write_all(&REQUEST).expect("write");
+        let mut raw = Vec::new();
+        let m = loop {
+            match next_sample(&mut received).await {
+                Sample::Serial(r) => raw.push(r),
+                Sample::Modbus(m) => break m,
+                other => panic!("{other:?}"),
+            }
+        };
+        let bytes: Vec<u8> = raw.iter().flat_map(|r| r.data.clone()).collect();
+        assert_eq!((bytes, m.raw), (REQUEST.to_vec(), REQUEST.to_vec()));
+        assert_eq!(
+            raw.last().map(|r| r.ts_us),
+            Some(m.ts_us),
+            "the read with the last byte stamps both"
+        );
     }
 
     #[tokio::test]

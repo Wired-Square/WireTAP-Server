@@ -5,6 +5,32 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **A serial line can be captured raw.** A serial `[[device]]` takes
+  `capture = "framed"`, `"raw"` or `"both"`, `"framed"` when absent, and
+  `raw_database`, which defaults to the device's `database`. `framing` is
+  required unless the capture is raw only. The server refuses to start on a
+  `raw_database` without raw capture, a `catalog` with raw capture only, either
+  key on a CAN device, or a `raw_database` name the gateway would refuse.
+  `--check-config` shows each of a serial device's streams with its database.
+- **The raw tap.** Each read off a line is archived as it came, in chunks of
+  up to 256 bytes, each stamped when its last byte arrived: the read's clock
+  less the wire time of the bytes after it. Every chunk of a read carries the
+  read's number, counted from each open of the line. A raw-only line frames
+  nothing. Raw chunks go to the pipeline of their own database. The forwarder
+  speaks ingest v3 only to a database some device's raw chunks land in, and v2
+  everywhere else, so enabling the ingest listener changes no protocol version.
+  `--echo-console` shows a chunk as `#<read> R [<length>] <bytes>`.
+
+### Changed
+
+- **The daemon's listener relays raw serial and its cache keeps it.** A raw
+  serial record from a pusher is relayed when a device here sends raw serial to
+  the default database, which the listener feeds. Otherwise the batch is still
+  refused as malformed, with a warning saying why. The disk cache holds raw
+  chunks through a gateway outage.
+
 ## [0.1.7] — 2026-10-03
 
 The gateway and the capture daemon's listener speak ingest protocol v3, the

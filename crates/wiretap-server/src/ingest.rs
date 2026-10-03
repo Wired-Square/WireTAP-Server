@@ -23,7 +23,7 @@ use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
-use wiretap_model::Secret;
+use wiretap_model::{Sample, Secret};
 use wiretap_protocol::ingest::{
     self as proto, Action, CloseReason, IncomingBatch, ServerConfig, ServerSession, ShortBatch,
 };
@@ -54,6 +54,7 @@ struct Config {
     /// a closed private network deployment relies on.
     token: Secret,
     session: ServerConfig,
+    relays_raw_serial: bool,
 }
 
 pub struct Server {
@@ -63,7 +64,13 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn bind(ingest: &Ingest, archive: Archive) -> std::io::Result<Self> {
+    /// `relays_raw_serial`: whether the archive's database is forwarded with a
+    /// protocol that carries raw serial.
+    pub async fn bind(
+        ingest: &Ingest,
+        archive: Archive,
+        relays_raw_serial: bool,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind((ingest.host.as_str(), ingest.port)).await?;
         info!(
             "Ingest listening on {}:{} (auth {})",
@@ -89,6 +96,7 @@ impl Server {
                         ingest.keepalive_secs.max(0.0) * f64::from(IDLE_MULTIPLIER),
                     )),
                 },
+                relays_raw_serial,
             }),
             archive,
         })
@@ -213,18 +221,23 @@ impl Session {
 
     fn batch(&self, incoming: IncomingBatch) -> u8 {
         let seq = incoming.batch.seq;
-        let Some(samples) = incoming
+        let samples: Vec<Sample> = incoming
             .batch
             .stamped(incoming.time_relative, now_us())
             .map(|(ts_us, record)| wire::decode(ts_us as i64, record))
-            .collect::<Option<Vec<_>>>()
-        else {
+            .collect();
+        // Refused here rather than quarantined at the gateway, which a v2
+        // forward session cannot carry raw serial to.
+        if !self.config.relays_raw_serial && samples.iter().any(|s| matches!(s, Sample::Serial(_)))
+        {
             warn!(
-                "Ingest client {} sent batch seq={seq} with a record this server cannot relay",
+                "Ingest client {} sent batch seq={seq} with raw serial, refused: no device here \
+                 sends raw serial to the default database, so it is not forwarded with a \
+                 protocol that carries it",
                 self.peer
             );
             return proto::ACK_MALFORMED;
-        };
+        }
 
         // Refused before anything is enqueued: accepting a batch this server
         // will only drop would tell the device its frames are safe.
@@ -252,7 +265,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use tokio::sync::watch;
-    use wiretap_model::{CanSample, Sample};
+    use wiretap_model::CanSample;
 
     /// What a test reads back: every frame the archive handed to the sink.
     type Seen = Arc<Mutex<Vec<Arc<Sample>>>>;
@@ -261,7 +274,7 @@ mod tests {
     fn can(s: &Sample) -> &CanSample {
         match s {
             Sample::Can(c) => c,
-            Sample::Modbus(m) => panic!("expected a CAN frame, got {m:?}"),
+            other => panic!("expected a CAN frame, got {other:?}"),
         }
     }
 
@@ -372,8 +385,16 @@ mod tests {
     }
 
     async fn listener(token: &str, queue_size: usize) -> (SocketAddr, Seen, watch::Sender<bool>) {
+        listener_relaying(token, queue_size, false).await
+    }
+
+    async fn listener_relaying(
+        token: &str,
+        queue_size: usize,
+        relays_raw_serial: bool,
+    ) -> (SocketAddr, Seen, watch::Sender<bool>) {
         let (archive, seen, stop) = archive_capturing(queue_size);
-        let server = Server::bind(&ingest_settings(token), archive)
+        let server = Server::bind(&ingest_settings(token), archive, relays_raw_serial)
             .await
             .expect("bind");
         let addr = server.local_addr().expect("bound");
@@ -560,7 +581,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_batch_during_shutdown_is_refused() {
         let (archive, seen, stop) = archive_capturing(100);
-        let server = Server::bind(&ingest_settings(""), archive.clone())
+        let server = Server::bind(&ingest_settings(""), archive.clone(), false)
             .await
             .expect("bind");
         let addr = server.local_addr().expect("bound");
@@ -594,7 +615,9 @@ mod tests {
             0.0,
             None,
         );
-        let server = Server::bind(&ingest_settings(""), archive).await.unwrap();
+        let server = Server::bind(&ingest_settings(""), archive, false)
+            .await
+            .unwrap();
         let addr = server.local_addr().unwrap();
         tokio::spawn(server.run());
         let mut c = TcpStream::connect(addr).await.unwrap();
@@ -726,10 +749,10 @@ mod tests {
         );
     }
 
-    /// No sample carries raw serial, so a batch holding any is refused whole
-    /// rather than relayed in part.
+    /// Where the default database is forwarded with v2, the pusher is told;
+    /// nothing of the batch is archived.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_raw_serial_batch_is_nacked_as_malformed() {
+    async fn a_raw_serial_batch_is_nacked_where_nothing_forwards_raw_serial() {
         let (addr, seen, _stop) = listener("", 100).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
         c.write_all(&hello(b"", false)).await.unwrap();
@@ -760,6 +783,47 @@ mod tests {
         let frames = wait_for(&seen, 1).await;
         assert_eq!(frames.len(), 1, "nothing of the refused batch was archived");
         assert_eq!(can(&frames[0]).arb_id, 0x2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_raw_serial_batch_is_relayed_intact() {
+        let (addr, seen, _stop) = listener_relaying("", 100, true).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&hello(b"", false)).await.unwrap();
+        reply(&mut c).await;
+
+        let chunks: [&[u8]; 2] = [&[0xAA; 256], b"tail"];
+        let mut records = one_record(0, 0x1);
+        for (delta_us, chunk) in [(4, chunks[0]), (9, chunks[1])] {
+            proto::encode_record_into(
+                &mut records,
+                0,
+                delta_us,
+                proto::RecordKind::RawSerial,
+                0,
+                4,
+                proto::raw_serial_id(17),
+                chunk,
+            );
+        }
+        c.write_all(&proto::encode_batch(5, 1_000, 3, &records))
+            .await
+            .unwrap();
+        let ack = proto::parse_ack(&reply(&mut c).await.body).unwrap();
+        assert_eq!((ack.seq, ack.status), (5, proto::ACK_OK));
+
+        let frames = wait_for(&seen, 3).await;
+        assert_eq!(can(&frames[0]).arb_id, 0x1);
+        for (frame, (ts_us, chunk)) in frames[1..]
+            .iter()
+            .zip([(1_004, chunks[0]), (1_009, chunks[1])])
+        {
+            let Sample::Serial(r) = &**frame else {
+                panic!("relayed as {frame:?}");
+            };
+            assert_eq!((r.ts_us, r.bus.0, r.seq), (ts_us, 4, 17));
+            assert_eq!(r.data, chunk);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

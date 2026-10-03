@@ -97,6 +97,22 @@ service after editing it. A catalogue that fails validation stops the server
 from starting, naming the key, and `--check-config` lists each device's
 catalogue with its name and vendor codes.
 
+A serial line can be captured raw as well: the bytes each read returned,
+unframed, in chunks of up to 256 bytes, each stamped when its last byte
+arrived. `capture = "raw"` stores only those, `"both"` stores the framed
+messages too, and the default, `"framed"`, stores messages alone. Raw chunks
+land in `raw_database`, or in `database` when it is absent:
+
+```toml
+capture = "both"
+raw_database = "rs485_raw"
+```
+
+`framing` is not needed for `capture = "raw"`, and a catalogue there is refused.
+Raw chunks reach the gateway over ingest protocol v3, so upgrade the gateway
+first. Only a database that takes raw chunks is forwarded with v3; the rest stay
+on v2.
+
 Port 23 is the GVRET default and needs `CAP_NET_BIND_SERVICE`; the packaged unit
 grants it.
 

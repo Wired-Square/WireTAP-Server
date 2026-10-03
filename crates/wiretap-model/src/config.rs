@@ -146,11 +146,16 @@ pub struct DeviceSection {
     /// `none` | `even` | `odd`.
     pub parity: Option<String>,
     pub stop_bits: Option<u8>,
-    /// Serial: `modbus-rtu`. Required.
+    /// Serial: `modbus-rtu`. Required unless `capture = "raw"`.
     pub framing: Option<String>,
     /// `modbus-rtu`: the absolute path of a catalogue declaring the line's
     /// vendor function codes.
     pub catalog: Option<String>,
+    /// Serial: `framed` | `raw` | `both`. Absent means `framed`.
+    pub capture: Option<String>,
+    /// Serial: the gateway database raw chunks land in. Absent means
+    /// `database`.
+    pub raw_database: Option<String>,
     #[serde(flatten)]
     pub unknown: toml::Table,
 }
@@ -340,6 +345,20 @@ mod tests {
             "absent, not defaulted"
         );
         assert_eq!((d.data_bits, d.stop_bits, d.fd), (None, None, None));
+        assert_eq!((&d.capture, &d.raw_database), (&None, &None));
+        assert!(cfg.unknown_keys().is_empty());
+    }
+
+    #[test]
+    fn a_raw_capture_table_parses() {
+        let cfg = FileConfig::parse(
+            "[[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nbaud = 9600\n\
+             capture = \"both\"\nraw_database = \"line_raw\"\n",
+        )
+        .unwrap();
+        let d = &cfg.device[0];
+        assert_eq!(d.capture.as_deref(), Some("both"));
+        assert_eq!(d.raw_database.as_deref(), Some("line_raw"));
         assert!(cfg.unknown_keys().is_empty());
     }
 

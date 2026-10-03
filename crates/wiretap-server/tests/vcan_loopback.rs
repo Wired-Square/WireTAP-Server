@@ -373,6 +373,7 @@ async fn a_gvret_transmit_is_archived_once_as_tx_and_not_broadcast() {
             queue_flush_pct: 1,
             legacy_cache_path: None,
         },
+        raw_serial: false,
     });
     let (_server, mut client) = server_listening(settings).await;
 
