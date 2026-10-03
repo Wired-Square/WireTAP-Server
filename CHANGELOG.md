@@ -30,6 +30,10 @@ All notable changes to this project are documented here. Entries go under
   the default database, which the listener feeds. Otherwise the batch is still
   refused as malformed, with a warning saying why. The disk cache holds raw
   chunks through a gateway outage.
+- **The gateway stores raw serial.** A raw serial record becomes a
+  `capture_frame` row with `protocol = 'serial'`, `id = 0`, `dlc` the chunk's
+  length, and the CAN and Modbus columns NULL, where the batch was refused as
+  malformed. No schema change.
 
 ## [0.1.7] — 2026-10-03
 

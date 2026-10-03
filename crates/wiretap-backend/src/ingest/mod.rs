@@ -237,16 +237,10 @@ impl IngestServer {
     /// unless no retry could store it (see [`writer::refused_the_rows`]).
     async fn handle_batch(&self, incoming: IncomingBatch, session: &Session) -> u8 {
         let seq = incoming.batch.seq;
-        let count = incoming.batch.records.len() as u64;
-        let rows: Result<Vec<FrameRow>, _> = incoming
-            .batch
-            .stamped(incoming.time_relative, now_us())
-            .map(|(ts_us, r)| {
-                FrameRow::new(ts_us as i64, r.kind, r.id_flags, r.flags, r.bus, r.payload)
-            })
-            .collect();
+        let rows = rows(incoming);
+        let count = rows.len() as u64;
 
-        match async { copy_rows(&session.pool, &rows?).await }.await {
+        match copy_rows(&session.pool, &rows).await {
             Ok(()) => {
                 if let Some(s) = self.sessions.inner.lock().await.get_mut(&session.id) {
                     s.frames += count;
@@ -260,6 +254,16 @@ impl IngestServer {
             }
         }
     }
+}
+
+fn rows(incoming: IncomingBatch) -> Vec<FrameRow> {
+    incoming
+        .batch
+        .stamped(incoming.time_relative, now_us())
+        .map(|(ts_us, r)| {
+            FrameRow::new(ts_us as i64, r.kind, r.id_flags, r.flags, r.bus, r.payload)
+        })
+        .collect()
 }
 
 fn ack_for_copy_error(code: Option<&SqlState>) -> u8 {
@@ -363,8 +367,16 @@ mod tests {
         }
     }
 
+    /// Taken to the database like any other batch, as serial rows: here the
+    /// database is down, so it is refused as overloaded rather than malformed.
     #[tokio::test]
-    async fn a_raw_serial_batch_is_refused_as_malformed_without_reaching_the_database() {
+    async fn a_raw_serial_batch_is_written_as_serial_rows() {
+        let row = &rows(incoming(RecordKind::RawSerial, raw_serial_id(1)))[0];
+        assert_eq!(
+            (row.protocol, row.id, row.dlc),
+            (wiretap_model::Protocol::Serial, 0, 1)
+        );
+
         let server = server(unreachable_databases(true));
         let pool = Pool::builder(deadpool_postgres::Manager::new(
             server.config.pg_dsn("wiretap").parse().unwrap(),
@@ -373,11 +385,8 @@ mod tests {
         .build()
         .unwrap();
         let session = Session { pool, id: 0 };
-
         let raw = incoming(RecordKind::RawSerial, raw_serial_id(1));
-        assert_eq!(server.handle_batch(raw, &session).await, ACK_MALFORMED);
-        let can = incoming(RecordKind::Can, 0x123);
-        assert_eq!(server.handle_batch(can, &session).await, ACK_OVERLOADED);
+        assert_eq!(server.handle_batch(raw, &session).await, ACK_OVERLOADED);
     }
 
     #[tokio::test]

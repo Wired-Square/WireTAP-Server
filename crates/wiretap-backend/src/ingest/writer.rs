@@ -38,8 +38,7 @@ pub struct FrameRow {
 
 impl FrameRow {
     /// A wire record's row. A Modbus row's `dlc` is the message length, CRC
-    /// included, not a CAN length code. Raw serial has no row yet, and is
-    /// refused as a data exception, as a row PostgreSQL refused would be.
+    /// included, and a raw serial row's the chunk length, not a CAN length code.
     pub fn new(
         ts_us: i64,
         kind: RecordKind,
@@ -47,8 +46,8 @@ impl FrameRow {
         flags: u8,
         bus: u8,
         data: Vec<u8>,
-    ) -> Result<Self, CopyError> {
-        Ok(match RecordFields::from_wire(kind, id_flags, flags) {
+    ) -> Self {
+        match RecordFields::from_wire(kind, id_flags, flags) {
             RecordFields::Can {
                 arb_id,
                 extended,
@@ -87,13 +86,24 @@ impl FrameRow {
                 func: Some(i16::from(func)),
                 crc_valid: Some(crc_valid),
             },
-            RecordFields::RawSerial { .. } => {
-                return Err(CopyError {
-                    code: Some(SqlState::DATA_EXCEPTION),
-                    message: "raw serial records are not stored".into(),
-                })
-            }
-        })
+            // Id 0, not the read sequence: compression segments by
+            // (protocol, id), and an id per read would make every row its own
+            // segment.
+            RecordFields::RawSerial { transmitted, .. } => Self {
+                ts_us,
+                protocol: Protocol::Serial,
+                id: 0,
+                extended: None,
+                dlc: data.len() as u16,
+                is_fd: None,
+                data,
+                bus,
+                dir_tx: transmitted,
+                unit: None,
+                func: None,
+                crc_valid: None,
+            },
+        }
     }
 }
 
@@ -220,7 +230,7 @@ fn copy_text(batch: &[FrameRow]) -> Result<String, CopyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiretap_protocol::ingest::{modbus_id, FLAG_CRC_VALID, ID_FD, ID_TX};
+    use wiretap_protocol::ingest::{modbus_id, raw_serial_id, FLAG_CRC_VALID, ID_FD, ID_TX};
 
     #[test]
     fn a_modbus_row_fills_the_columns_a_can_row_leaves_null() {
@@ -234,8 +244,7 @@ mod tests {
             FLAG_CRC_VALID,
             2,
             raw.clone(),
-        )
-        .unwrap();
+        );
         assert_eq!((m.protocol, m.id, m.dlc), (Protocol::Modbus, 0x0120, 11));
         assert_eq!(
             (m.unit, m.func, m.crc_valid),
@@ -244,8 +253,7 @@ mod tests {
         assert_eq!((m.extended, m.is_fd, m.dir_tx), (None, None, false));
         assert_eq!(m.data, raw);
 
-        let c =
-            FrameRow::new(5, RecordKind::Can, 0x7E0 | ID_FD | ID_TX, 0, 0, vec![0; 12]).unwrap();
+        let c = FrameRow::new(5, RecordKind::Can, 0x7E0 | ID_FD | ID_TX, 0, 0, vec![0; 12]);
         assert_eq!((c.protocol, c.id, c.dlc), (Protocol::Can, 0x7E0, 9));
         assert_eq!(
             (c.extended, c.is_fd, c.dir_tx),
@@ -254,9 +262,39 @@ mod tests {
         assert_eq!((c.unit, c.func, c.crc_valid), (None, None, None));
     }
 
+    /// Every column the schema's check holds a serial row to, and none of the
+    /// read sequence.
+    #[test]
+    fn a_raw_serial_chunk_is_a_serial_row_with_id_0() {
+        let chunk: Vec<u8> = (0..=255).collect();
+        let r = FrameRow::new(
+            7,
+            RecordKind::RawSerial,
+            raw_serial_id(12_345),
+            0,
+            3,
+            chunk.clone(),
+        );
+        assert_eq!(
+            (r.ts_us, r.protocol, r.id, r.dlc, r.bus, r.dir_tx),
+            (7, Protocol::Serial, 0, 256, 3, false)
+        );
+        assert_eq!((r.extended, r.is_fd), (None, None));
+        assert_eq!((r.unit, r.func, r.crc_valid), (None, None, None));
+        assert_eq!(r.data, chunk);
+        let line = copy_text(&[r]).unwrap();
+        assert!(
+            line.starts_with(
+                "1970-01-01T00:00:00.000007+00:00\tserial\t0\t\\N\t256\t\\N\t\\\\x0001"
+            ),
+            "{line}"
+        );
+        assert!(line.ends_with("feff\t3\trx\t\\N\t\\N\t\\N\n"), "{line}");
+    }
+
     #[test]
     fn a_timestamp_out_of_range_is_a_datetime_field_overflow() {
-        let row = FrameRow::new(i64::MAX, RecordKind::Can, 0x123, 0, 0, vec![1]).unwrap();
+        let row = FrameRow::new(i64::MAX, RecordKind::Can, 0x123, 0, 0, vec![1]);
         let err = copy_text(&[row]).unwrap_err();
         assert_eq!(err.code, Some(SqlState::DATETIME_FIELD_OVERFLOW));
         assert!(err.to_string().contains("timestamp out of range"), "{err}");
