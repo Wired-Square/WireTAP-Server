@@ -1,6 +1,8 @@
 #!/bin/sh
-# Builds wiretap-appliance's .deb, from the files `appliance-xtask packaging render`
-# wrote beside this one.
+# Builds wiretap-appliance's .deb for one target, from the files `appliance-xtask
+# packaging render` wrote beside this one.
+#
+#     scaffold/packaging/make-deb.sh --target image
 #
 # Chassis-owned, and rewritten unconditionally by every render. **There is no
 # hook for the build itself, and that is deliberate**: this runs on a build host
@@ -15,13 +17,6 @@ NAME='wiretap-appliance'
 BINARY='wiretap-appliance'
 MIN_BINARY_BYTES='14000000'
 
-# The Rust target to build, and below, the Debian architecture it produces. An
-# appliance ships as a static musl binary on 64-bit ARM; the override exists so
-# a package can be built for a test VM without editing a chassis-owned file. It
-# takes cargo's environment variable name; `build.target` in a cargo config is
-# not read.
-CARGO_BUILD_TARGET="${CARGO_BUILD_TARGET:-aarch64-unknown-linux-musl}"
-
 # The cargo package the `--bin` target lives in. The two are the same name in
 # most products, and `cargo pkgid` fails loudly when they are not.
 PACKAGE="${PACKAGE:-$BINARY}"
@@ -35,6 +30,27 @@ warn() {
     echo "make-deb: warning: $1" >&2
 }
 
+[ "$#" = 2 ] && [ "$1" = --target ] || die "usage: $0 --target image"
+TARGET=$2
+case "$TARGET" in
+image) ;;
+*) die "appliance.toml declares no target $TARGET — image" ;;
+esac
+
+# The Rust target to build, and below, the Debian architecture it produces. A
+# card is a static musl binary on 64-bit ARM; the override exists so a package
+# can be built for a test VM without editing a chassis-owned file. The generic
+# package has no default: a host the product does not own may be either
+# architecture, so it is named. It takes cargo's environment variable name;
+# `build.target` in a cargo config is not read.
+case "$TARGET" in
+deb)
+    [ -n "${CARGO_BUILD_TARGET:-}" ] ||
+        die "--target deb needs CARGO_BUILD_TARGET set: x86_64-unknown-linux-musl for amd64, aarch64-unknown-linux-musl for arm64"
+    ;;
+esac
+CARGO_BUILD_TARGET="${CARGO_BUILD_TARGET:-aarch64-unknown-linux-musl}"
+
 # Addressed from this script's own location, so it runs from anywhere:
 # scaffold/packaging/make-deb.sh -> scaffold -> the repo root, which is where
 # cargo is invoked.
@@ -42,11 +58,13 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SCAFFOLD=$(dirname -- "$HERE")
 cd -- "$(dirname -- "$SCAFFOLD")"
 
-CONTROL_IN="$SCAFFOLD/debian/control.in"
-UNIT="$SCAFFOLD/systemd/$NAME.service"
-# Under the product root, whatever `CARGO_TARGET_DIR` says: `build-image.sh` and
-# `build-remote.sh` look for the package here.
-OUT=target/debian
+TARGET_SCAFFOLD="$SCAFFOLD/targets/$TARGET"
+CONTROL_IN="$TARGET_SCAFFOLD/debian/control.in"
+UNIT="$TARGET_SCAFFOLD/systemd/$NAME.service"
+# Under the product root, whatever `CARGO_TARGET_DIR` says, and one directory
+# per target: the image scripts take the package from `target/debian/image`,
+# so a generic build can never be the one that lands on a card.
+OUT="target/debian/$TARGET"
 
 # Passed to cargo rather than read back: a workspace member's default is the
 # workspace's `target/`, not this product's.
@@ -178,8 +196,12 @@ done)
 # No shipped files: `appliance.toml` has no `[package.files]` table.
 
 # The journald drop-in `appliance-xtask` rendered, which postinst flushes into.
-[ -f "$SCAFFOLD/debian/journald.conf" ] ||
-    die "$SCAFFOLD/debian/journald.conf is not there — run \`appliance-xtask packaging render\`"
+case "$TARGET" in
+image)
+    [ -f "$TARGET_SCAFFOLD/debian/journald.conf" ] ||
+        die "$TARGET_SCAFFOLD/debian/journald.conf is not there — run \`appliance-xtask packaging render\`"
+    ;;
+esac
 
 # The unit's real drop-ins, which ship; the `.sample` beside them does not. The
 # name is held to a character set before the build, because a newline or a
@@ -350,7 +372,7 @@ find "$UI_STAGE" -type f -exec chmod 0644 {} +
 # normalises to 0644 whatever the staging tree says. Setting those here would be
 # a line that looks like this one and does nothing.
 for script in postinst prerm postrm; do
-    install -D -m 0755 "$SCAFFOLD/debian/$script" "$STAGE/DEBIAN/$script"
+    install -D -m 0755 "$TARGET_SCAFFOLD/debian/$script" "$STAGE/DEBIAN/$script"
 done
 
 # ---------------------------------------------------------------------------
@@ -374,7 +396,11 @@ done
 # Nothing is staged from [package.files].
 
 # The journald drop-in, a vendor file numbered above the distribution's own.
-install -D -m 0644 "$SCAFFOLD/debian/journald.conf" "$STAGE/usr/lib/systemd/journald.conf.d/95-wiretap-appliance-persistent.conf"
+case "$TARGET" in
+image)
+    install -D -m 0644 "$TARGET_SCAFFOLD/debian/journald.conf" "$STAGE/usr/lib/systemd/journald.conf.d/95-wiretap-appliance-persistent.conf"
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # /usr/share/doc

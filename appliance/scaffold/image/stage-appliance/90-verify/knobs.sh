@@ -3,6 +3,7 @@
 # rendered once so a knob cannot reach one and not the other.
 NAME='wiretap-appliance'
 BINARY='wiretap-appliance'
+ENV_PREFIX='WIRETAP_APPLIANCE'
 GROUP='wiretap-appliance'
 CONFIG_DIR='/etc/wiretap-appliance'
 STATE_DIR='/var/lib/wiretap-appliance'

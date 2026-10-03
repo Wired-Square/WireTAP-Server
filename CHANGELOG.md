@@ -30,6 +30,12 @@ All notable changes to this project are documented here. Entries go under
 - **Clearing an unassigned interface answers 204, not 404.** `DELETE
   /v1/admin/assignments` is idempotent; a clear whose `expected` no longer
   matches still answers 409 with `current` null.
+- **`wiretap-appliance` is built on chassis `v0.16.1`.** `appliance.toml`
+  declares the card's package as `[targets.image]`, the package builds with
+  `make-deb.sh --target image` into `target/debian/image/`, and a daemon run
+  by hand needs `WIRETAP_APPLIANCE_PRIVILEGE=host-admin` and
+  `WIRETAP_APPLIANCE_ONBOARDING=browser` for the host screens and the
+  first-account screen.
 
 ## [0.1.9] — 2026-10-03
 

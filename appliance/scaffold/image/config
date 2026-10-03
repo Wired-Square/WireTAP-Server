@@ -45,8 +45,9 @@ KEYBOARD_LAYOUT='English (US)'
 # ---------------------------------------------------------------------------
 # The way in, if there is one
 # ---------------------------------------------------------------------------
-# Rendered from `[image]` in `appliance.toml` — `root_ssh_key`, `first_user`,
-# `first_user_ssh_key`, `passwordless_sudo` — and a key and never a password.
+# Rendered from `[targets.image]` in `appliance.toml` — `root_ssh_key`,
+# `first_user`, `first_user_ssh_key`, `passwordless_sudo` — and a key and never
+# a password.
 # With none of them set this is `ENABLE_SSH=0` and a card has no way in but a
 # console, which is the shape a shipped appliance wants. A developer's own key
 # goes in `config.local`, spelled the same way, and wins because it is sourced

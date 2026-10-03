@@ -466,9 +466,9 @@ jobs:
 
   # The Raspberry Pi appliance: a workspace of its own on the private chassis,
   # fetched with the organisation's read-only deploy key, so these three jobs
-  # fail on a fork and nothing above needs the key. The chassis's own gates.yml
-  # runs cargo at the repository root and has no input for a subdirectory,
-  # which is why its gates are written out here.
+  # fail on a fork and nothing above needs the key. The chassis's gates.yml is
+  # not called because GitHub lets only private repositories use a private
+  # repository's reusable workflows, so its gates are written out here.
   appliance:
     name: Appliance gates
     runs-on: ubuntu-latest

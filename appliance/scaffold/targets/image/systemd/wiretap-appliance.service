@@ -36,8 +36,9 @@ After=time-sync.target
 # consumer's own unit that must wait for the port has to wait for the port.
 Type=exec
 ExecStart=/usr/bin/wiretap-appliance
-# `privilege = "host-admin"` in appliance.toml. This product administers the
-# box's own name or power state over D-Bus, and root is what those calls need.
+# `privilege = "host-admin"` in appliance.toml's `[targets.image]`. This
+# product administers the box's own name or power state over D-Bus, and root is
+# what those calls need.
 #
 # **`Group=` still names the appliance's group**, and that is not decoration:
 # the control socket is `0660` owned by that group, and adding an operator to
@@ -50,8 +51,8 @@ ExecStart=/usr/bin/wiretap-appliance
 # one directory systemd does not chown for it. See `ConfigurationDirectory=`.
 #
 # `user = "wiretap-appliance"` in appliance.toml is not read here. It is still the account the
-# package creates, so a product that drops back to `unprivileged` does not have
-# to invent one first.
+# package creates, and the one the generic package runs as, so a product that
+# drops back to `unprivileged` does not have to invent one first.
 User=root
 Group=wiretap-appliance
 Restart=always
@@ -90,6 +91,14 @@ RuntimeDirectory=wiretap-appliance
 Environment=WIRETAP_APPLIANCE_BIND_ADDRESS=0.0.0.0
 Environment=WIRETAP_APPLIANCE_HTTPS_PORT=443
 Environment=WIRETAP_APPLIANCE_REDIRECT_PORT=80
+
+# **The deployment**, which the daemon learns nowhere else and this package's
+# target decides: whether it administers this box (`privilege`), whether a box
+# with no accounts offers the first one to a browser, and whether journald keeps
+# its log on disk (`journal`). A run without these lines has all three off.
+Environment=WIRETAP_APPLIANCE_PRIVILEGE=host-admin
+Environment=WIRETAP_APPLIANCE_ONBOARDING=browser
+Environment=WIRETAP_APPLIANCE_JOURNAL=persistent
 
 # **`0751`, and this one is asserted rather than enforced — read this before
 # changing it.** systemd chowns `StateDirectory=` and `RuntimeDirectory=` to

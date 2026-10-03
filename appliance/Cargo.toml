@@ -14,14 +14,14 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 
 [workspace.dependencies]
 # One tag on every line: two would be two checkouts and two `Store` types.
-appliance-backup = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.15.6" }
-appliance-backup-host = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.15.6" }
-appliance-build-id = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.15.6" }
-appliance-config = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.15.6" }
-appliance-host = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.15.6" }
-appliance-server = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.15.6" }
-appliance-store = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.15.6" }
-appliance-types = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.15.6" }
+appliance-backup = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.16.1" }
+appliance-backup-host = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.16.1" }
+appliance-build-id = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.16.1" }
+appliance-config = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.16.1" }
+appliance-host = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.16.1" }
+appliance-server = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.16.1" }
+appliance-store = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.16.1" }
+appliance-types = { git = "https://github.com/Wired-Square/appliance-rpi-bootstrap.git", tag = "v0.16.1" }
 
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }

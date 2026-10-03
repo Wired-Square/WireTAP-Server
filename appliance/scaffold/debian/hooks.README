@@ -12,7 +12,8 @@ writes.
 `appliance.toml` — `<hooks_dir>/postinst.d/*` and `<hooks_dir>/prerm.d/*`, each
 `0755`, checked before the build for the two ways a hook silently never runs
 (below). Anything else in that directory is refused, because nothing else there
-could ever run.
+could ever run. Every target's package ships the same hooks, and every file
+named below but the journal drop-in; there is no per-target knob.
 
 | Script | Hook directory | Runs |
 | --- | --- | --- |
@@ -32,9 +33,10 @@ ships them without a hook:
   a conffile: dpkg keeps an operator's edit across an upgrade and asks before
   replacing one the upgrade changed. `/etc/wiretap-appliance/config.toml` is refused
   there — that file is the operator's; ship a `config.toml.example` beside it.
-- **The journal.** `journal = "persistent"` ships a journald drop-in under
-  `/usr/lib`, numbered above the distribution's, and flushes the running journal
-  into it from `postinst` before your hooks run. Raspberry Pi OS keeps the
+- **The journal.** `journal = "persistent"` in `[targets.image]` ships, in the
+  image's package alone, a journald drop-in under `/usr/lib`, numbered above
+  the distribution's, and flushes the running journal into it from `postinst`
+  before your hooks run. Raspberry Pi OS keeps the
   journal in RAM otherwise, and what that loses at a reboot is the daemon's own
   log — every refusal reaches only the journal.
 - **`scaffold/debian/copyright`**, a DEP-5 file you write, shipped to
@@ -154,8 +156,9 @@ a service to poke.
   where the SSH screen's authorised keys go, through
   `/etc/ssh/sshd_config.d/50-wiretap-appliance.conf` — checked with `sshd -t` where that
   check passes on its own, and taken back out on purge. An unprivileged daemon
-  cannot keep a file under a directory root owns, so nothing is written and its
-  SSH screen says so.
+  cannot keep a file under a directory root owns, so its SSH screen says so,
+  nothing is written, and what a host-admin package of this name wrote is
+  removed.
 - For `privilege = "host-admin"`, links
   `/etc/systemd/timesyncd.conf.d/90-wiretap-appliance.conf` to
   `/etc/wiretap-appliance/timesyncd.conf`, where the Clock screen's NTP servers go, and

@@ -16,16 +16,8 @@ runtime_dir = "/run/wiretap-appliance"
 socket = "/run/wiretap-appliance/wiretap-appliance.sock"
 env_prefix = "WIRETAP_APPLIANCE"
 
-# The Host, Network and SSH screens talk to hostnamed, NetworkManager and
-# sshd's key file.
-privilege = "host-admin"
-
 address_families = []
 capabilities = []
-
-bind_address = "0.0.0.0"
-https_port = 443
-redirect_port = 80
 
 [package]
 section = "admin"
@@ -36,11 +28,18 @@ depends = ["init-system-helpers (>= 1.54)", "adduser", "ca-certificates"]
 # daemon this box exists for; the image installs them all.
 suggests = ["wiretap-server", "network-manager", "bluez", "avahi-daemon", "libnss-mdns"]
 ui_dist = "frontend/dist"
-journal = "persistent"
 # Just under a known-good static build; raise it when the real size moves.
 min_binary_bytes = 14_000_000
 
-[image]
+[targets.image]
+# The Host, Network and SSH screens talk to hostnamed, NetworkManager and
+# sshd's key file.
+privilege = "host-admin"
+bind_address = "0.0.0.0"
+https_port = 443
+redirect_port = 80
+journal = "persistent"
+
 pi_gen_ref = "arm64"
 release = "trixie"
 hostname_prefix = "wiretap"
@@ -60,4 +59,4 @@ bluetooth = false
 # Tailscale on the image, unenrolled, against Tailscale's own control server.
 # Cards join by themselves once `TAILSCALE_AUTH_KEY` is in `config.local`, or
 # when an administrator enrols one from the Network screen.
-[image.tailscale]
+[targets.image.tailscale]

@@ -4,7 +4,7 @@ The Raspberry Pi appliance: `wiretap-appliance`, a web daemon that administers
 the box from a browser, beside `wiretap-server`, which captures as it does on
 any Debian host. It is built on the Wired Square appliance chassis
 ([`appliance-rpi-bootstrap`](https://github.com/Wired-Square/appliance-rpi-bootstrap),
-pinned at `v0.15.6`), which supplies HTTPS, accounts, the host, network, SSH,
+pinned at `v0.16.1`), which supplies HTTPS, accounts, the host, network, SSH,
 certificate, backup and log screens, the package and the card image.
 
 This is a cargo workspace of its own, not a member of the root one, because
@@ -34,12 +34,26 @@ rev="$(grep -om1 'appliance-rpi-bootstrap\.git?[^#"]*#[0-9a-f]*' Cargo.lock | cu
 cargo install --locked --git https://github.com/Wired-Square/appliance-rpi-bootstrap.git --rev "$rev" appliance-xtask
 ```
 
+## Running it on a development machine
+
+The card's unit switches on host administration and the browser's
+first-account screen; a plain `cargo run` has both off. From this directory:
+
+```sh
+WIRETAP_APPLIANCE_PRIVILEGE=host-admin WIRETAP_APPLIANCE_ONBOARDING=browser \
+  cargo run -- --bind-address 127.0.0.1 --redirect-port 0 --socket /tmp/wiretap-appliance.sock
+```
+
+It serves `https://127.0.0.1:8443` and keeps its database and certificate in
+the working directory. With no system D-Bus, the host screens say host
+administration is unavailable.
+
 ## Building the package
 
 From this directory, after `npm ci && npm run build` in `frontend/`:
 
 ```sh
-scaffold/packaging/make-deb.sh    # -> target/debian/wiretap-appliance_*_arm64.deb
+scaffold/packaging/make-deb.sh --target image    # -> target/debian/image/wiretap-appliance_*_arm64.deb
 ```
 
 It cross-builds a static `aarch64-unknown-linux-musl` binary and wants `cargo`,

@@ -1,10 +1,10 @@
 # A developer's card, never a shipped one — and where the build box goes.
 #
 # Chassis-owned and rewritten by every render; `config.local` beside it is
-# yours and git-ignored. Unless `[image]` in appliance.toml names a key, the
-# rendered `config` ships no shell account and no SSH, so the only way to
-# reach the control socket — and so to make the first administrator — is from
-# a console nobody can log in to. Copy this to
+# yours and git-ignored. Unless `[targets.image]` in appliance.toml names a
+# key, the rendered `config` ships no shell account and no SSH, so the only way
+# to reach the control socket — and so to make the first administrator — is
+# from a console nobody can log in to. Copy this to
 # `config.local`, which `build-image.sh` appends after `config`, put your own
 # public key in it, and the card you write can be signed into over SSH as root.
 #
@@ -27,11 +27,11 @@ PUBKEY_SSH_ROOT='ssh-ed25519 AAAA… you@host'
 # PUBKEY_ONLY_SSH=1
 # PASSWORDLESS_SUDO=1
 
-# The product's Tailscale auth key: with `[image.tailscale]` in appliance.toml,
-# every card written from the image tries to join the product's tailnet at
-# every boot, and every five minutes within one, until it does, then deletes
-# the key. **A secret**, and so is every image built with it. It does not name
-# the image `<name>-dev`: a release carries it.
+# The product's Tailscale auth key: with `[targets.image.tailscale]` in
+# appliance.toml, every card written from the image tries to join the
+# product's tailnet at every boot, and every five minutes within one, until it
+# does, then deletes the key. **A secret**, and so is every image built with
+# it. It does not name the image `<name>-dev`: a release carries it.
 #
 # Make the key for the image, not for one card: reusable, tagged, and expiring
 # after the last card written from the image has first booted. Tailscale's
@@ -53,6 +53,6 @@ PUBKEY_SSH_ROOT='ssh-ed25519 AAAA… you@host'
 # box wants a Host alias in ~/.ssh/config. All three may come from the
 # environment instead, where they win over this file.
 #
-# BUILD_HOST=10.0.0.56
+# BUILD_HOST=build.example.invalid
 # BUILD_USER=root
 # BUILD_DIR=/root/wiretap-appliance

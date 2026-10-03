@@ -59,7 +59,7 @@ good() {
 	for unit in wpa_supplicant bluetooth regenerate_ssh_host_keys ssh "$NAME-firstboot"; do
 		: > "$T/usr/lib/systemd/system/$unit.service"
 	done
-	cp "$SCAFFOLD/systemd/$NAME.service" "$T/usr/lib/systemd/system/"
+	cp "$SCAFFOLD/targets/image/systemd/$NAME.service" "$T/usr/lib/systemd/system/"
 	ln -s /usr/lib/systemd/system/regenerate_ssh_host_keys.service "$T/etc/systemd/system/sysinit.target.wants/"
 	for unit in ssh "$NAME" "$NAME-firstboot"; do
 		ln -s "/usr/lib/systemd/system/$unit.service" "$T/etc/systemd/system/multi-user.target.wants/"
@@ -80,7 +80,7 @@ good() {
 	printf '[main]\nNetworkingEnabled=true\nWirelessEnabled=%s\nWWANEnabled=true\n' "$wireless" > "$T/var/lib/NetworkManager/NetworkManager.state"
 	[ "$BLUETOOTH" = 1 ] || ln -s /dev/null "$T/etc/systemd/system/bluetooth.service"
 	[ "$LINK_LOCAL" = 0 ] || cp "$STAGE/00-appliance/files/link-local.conf" "$T/etc/NetworkManager/conf.d/10-$NAME-link-local.conf"
-	[ "$JOURNAL_PERSISTENT" = 0 ] || cp "$SCAFFOLD/debian/journald.conf" "$T$JOURNALD_DROPIN"
+	[ "$JOURNAL_PERSISTENT" = 0 ] || cp "$SCAFFOLD/targets/image/debian/journald.conf" "$T$JOURNALD_DROPIN"
 	[ "$HOST_ADMIN" = 0 ] || printf 'AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2 %s/ssh/%%u\n' "$CONFIG_DIR" > "$T/etc/ssh/sshd_config.d/50-$NAME.conf"
 	[ "$ROOT_KEY" = 0 ] || printf '%s\n' "$KEY" > "$T/root/.ssh/authorized_keys"
 	[ "$FIRST_USER_KEY" = 0 ] || printf '%s\n' "$KEY" > "$T/home/$U/.ssh/authorized_keys"
@@ -367,8 +367,14 @@ case_run VERIFY-17 "cloud-init installed" \
 	"printf '#!/bin/sh\n' > usr/bin/cloud-init && chmod 0755 usr/bin/cloud-init"
 
 UNIT=usr/lib/systemd/system/$NAME.service
-case_run "VERIFY-14 VERIFY-18" "the unit is missing (trips both unit checks, correctly)" \
+case_run "VERIFY-14 VERIFY-18 VERIFY-22" "the unit is missing (trips every unit check, correctly)" \
 	"rm -f $UNIT"
+case_run VERIFY-22 "the unit predates the deployment lines" \
+	"resed '/_ONBOARDING=/d' $UNIT"
+if [ "$HOST_ADMIN" = 1 ]; then
+	case_run VERIFY-22 "a host-admin unit that says unprivileged" \
+		"resed 's/_PRIVILEGE=host-admin/_PRIVILEGE=unprivileged/' $UNIT"
+fi
 case_run VERIFY-18 "the unit has no After=time-sync.target" \
 	"resed '/^After=time-sync/d' $UNIT"
 case_run VERIFY-18 "the unit says Wants=time-sync.target and no After=" \
@@ -428,7 +434,7 @@ if [ "$TAILSCALE" = 1 ]; then
 			'rm -rf var/lib/tailscale'
 	fi
 else
-	case_run VERIFY-19 "Tailscale installed on a product with no [image.tailscale]" \
+	case_run VERIFY-19 "Tailscale installed on a product with no [targets.image.tailscale]" \
 		"mkdir -p usr/sbin && printf '#!/bin/sh\n' > usr/sbin/tailscaled"
 fi
 case_run VERIFY-20 "a fleet key nobody asked for" \

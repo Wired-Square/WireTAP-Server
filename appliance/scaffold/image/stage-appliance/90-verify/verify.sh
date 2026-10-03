@@ -474,7 +474,7 @@ for f in "$R"/etc/systemd/system/tailscaled.service.d/*.conf "$R"/usr/lib/system
 done
 if [ "$TAILSCALE" = 0 ]; then
 	if [ -e "$R/usr/sbin/tailscaled" ] || [ -e "$R/usr/bin/tailscale" ] || [ -e "$TAILSCALED" ]; then
-		fail VERIFY-19 "Tailscale is installed, but appliance.toml has no [image.tailscale] (a reused rootfs? clean.sh first)"
+		fail VERIFY-19 "Tailscale is installed, but appliance.toml has no [targets.image.tailscale] (a reused rootfs? clean.sh first)"
 	else
 		ok VERIFY-19 "no Tailscale, as appliance.toml says"
 	fi
@@ -529,6 +529,20 @@ elif [ ! -d "$R/var/lib/tailscale" ]; then
 	fail VERIFY-21 "/var/lib/tailscale is missing - it would be read-only to the daemon"
 else
 	ok VERIFY-21 "the daemon may write the auth key's directory and tailscaled's state"
+fi
+
+# --- VERIFY-22: the unit tells the daemon how this image deploys it -------------
+# A unit rendered before the daemon read these lacks them, and then a headless
+# card offers no first account to claim it by. A drop-in that sets them again is
+# not followed.
+UNIT="$R/usr/lib/systemd/system/$NAME.service"
+told() { grep -qxE "Environment=${ENV_PREFIX}_$1=$2[[:space:]]*" "$UNIT" 2>/dev/null; }
+if ! told ONBOARDING browser; then
+	fail VERIFY-22 "$NAME.service does not set ${ENV_PREFIX}_ONBOARDING=browser - nobody could claim a card from a browser"
+elif [ "$HOST_ADMIN" = 1 ] && ! told PRIVILEGE host-admin; then
+	fail VERIFY-22 "$NAME.service does not set ${ENV_PREFIX}_PRIVILEGE=host-admin - every host screen would say host administration is off"
+else
+	ok VERIFY-22 "$NAME.service sets the deployment appliance.toml decides"
 fi
 
 # --- A product's own checks ------------------------------------------------------

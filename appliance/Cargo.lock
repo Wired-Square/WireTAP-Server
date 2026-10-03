@@ -94,8 +94,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-auth"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "appliance-store",
  "appliance-types",
@@ -112,8 +112,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-backup"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "appliance-core",
  "appliance-store",
@@ -135,8 +135,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-backup-host"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "appliance-auth",
  "appliance-backup",
@@ -155,13 +155,13 @@ dependencies = [
 
 [[package]]
 name = "appliance-build-id"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 
 [[package]]
 name = "appliance-config"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "clap",
  "serde",
@@ -172,8 +172,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-core"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -212,8 +212,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-host"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "appliance-config",
  "appliance-server",
@@ -234,8 +234,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-server"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -257,8 +257,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-store"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "appliance-types",
  "chrono",
@@ -274,8 +274,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-test-support"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -283,8 +283,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-types"
-version = "0.15.6"
-source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.15.6#e4ab9e820c43a6853bac0b032be08c216b671421"
+version = "0.16.1"
+source = "git+https://github.com/Wired-Square/appliance-rpi-bootstrap.git?tag=v0.16.1#e322e3cdaeba9e9cefec78a43b0c2c98163a73f9"
 dependencies = [
  "chrono",
  "serde",

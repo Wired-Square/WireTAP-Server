@@ -42,9 +42,9 @@ command -v git >/dev/null || die "git is not on PATH"
 
 # A pipeline's status is `head`'s, which always succeeds, so the emptiness test
 # below is the guard rather than a `|| die` on the assignment.
-DEB=$(ls -t target/debian/"${NAME}"_*_arm64.deb 2>/dev/null | head -1)
+DEB=$(ls -t target/debian/image/"${NAME}"_*_arm64.deb 2>/dev/null | head -1)
 [ -n "$DEB" ] ||
-    die "no arm64 package in target/debian — run scaffold/packaging/make-deb.sh first"
+    die "no arm64 package in target/debian/image — run scaffold/packaging/make-deb.sh --target image first"
 
 # **Pinned to a ref rather than tracking a branch.** pi-gen's stages change, and
 # an image that built last month and does not today is a day spent bisecting
@@ -138,7 +138,7 @@ if [ -f "$HERE/config.local" ]; then
         . "$HERE/config.local"
         [ -n "${TAILSCALE_AUTH_KEY:-}" ] || exit 0
         [ "$TAILSCALE" = 1 ] ||
-            die "TAILSCALE_AUTH_KEY is set in config.local, but appliance.toml has no [image.tailscale] to enrol with"
+            die "TAILSCALE_AUTH_KEY is set in config.local, but appliance.toml has no [targets.image.tailscale] to enrol with"
         [ -z "${DEPLOY_DIR:-}${WORK_DIR:-}" ] ||
             die "DEPLOY_DIR or WORK_DIR is set in config.local beside TAILSCALE_AUTH_KEY — an image holding the key goes only where this script can make it private"
         umask 077

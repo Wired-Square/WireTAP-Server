@@ -52,11 +52,12 @@ configure)
     # ConfigurationDirectoryMode=0751 to match, so systemd has nothing to
     # complain about on every start.
     #
-    # 0751 and not 0750: sshd opens an authorised-keys file *as the account
-    # logging in*, and timesyncd the NTP servers as its own user, and both
-    # are under this directory, so every account has to be able to traverse
-    # it. Traverse, not list or read — what
-    # is readable in here is what its owner made readable.
+    # 0751 and not 0750: in a host-admin package, sshd opens an
+    # authorised-keys file under this directory *as the account logging in*,
+    # and timesyncd the NTP servers as its own user, so every account has to be
+    # able to traverse it. Traverse, not list or read — what is readable in
+    # here is what its owner made readable. One mode for both privilege shapes,
+    # so the unit renders one.
     #
     # It is re-asserted on every configure, deliberately — the reason it exists
     # is that nothing else maintains it. An operator who wants different

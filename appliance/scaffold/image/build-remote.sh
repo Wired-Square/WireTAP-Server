@@ -80,7 +80,7 @@ if [ "$build" = 1 ] && [ -n "$ENV_KEY" ]; then
     only "$ENV_KEY" _- ||
         die "TAILSCALE_AUTH_KEY in the environment holds a character other than A-Z, a-z, 0-9, _ and -, so it is not a plain auth key; put anything else in config.local"
     [ "$TAILSCALE" = 1 ] ||
-        die "TAILSCALE_AUTH_KEY is in the environment, but appliance.toml has no [image.tailscale] to enrol with"
+        die "TAILSCALE_AUTH_KEY is in the environment, but appliance.toml has no [targets.image.tailscale] to enrol with"
 fi
 
 build_box
@@ -146,8 +146,8 @@ fi
 
 # The same package `build-image.sh` will look for, checked here so the refusal
 # is a second and not a round trip.
-DEB=$(ls -t target/debian/"${NAME}"_*_arm64.deb 2>/dev/null | head -1)
-[ -n "$DEB" ] || die "no target/debian/${NAME}_*_arm64.deb — run scaffold/packaging/make-deb.sh first"
+DEB=$(ls -t target/debian/image/"${NAME}"_*_arm64.deb 2>/dev/null | head -1)
+[ -n "$DEB" ] || die "no target/debian/image/${NAME}_*_arm64.deb — run scaffold/packaging/make-deb.sh --target image first"
 
 connect
 box "$TARGET" 'command -v git >/dev/null && command -v sudo >/dev/null && command -v pgrep >/dev/null' ||
@@ -164,12 +164,12 @@ box -n "$TARGET" "! pgrep -f '[b]uild-image.sh' >/dev/null" ||
 # package goes first: `build-image.sh` takes the newest by mtime, which
 # `rsync -a` preserves, so a stale one could outrank this.
 say "sending scaffold/ and $(basename "$DEB")"
-box "$TARGET" "mkdir -p '$BUILD_DIR/target/debian' && rm -f '$BUILD_DIR'/target/debian/${NAME}_*_arm64.deb"
+box "$TARGET" "mkdir -p '$BUILD_DIR/target/debian/image' && rm -f '$BUILD_DIR'/target/debian/image/${NAME}_*_arm64.deb"
 rsync -az --delete -e "$RSH" \
     --exclude 'image/pi-gen/' --exclude 'image/deploy/' --exclude 'image/config.local' \
     --exclude 'image/stage-appliance/00-appliance/files/appliance.deb' \
     "$SCAFFOLD/" "$TARGET:$BUILD_DIR/scaffold/"
-rsync -a -e "$RSH" "$DEB" "$TARGET:$BUILD_DIR/target/debian/"
+rsync -a -e "$RSH" "$DEB" "$TARGET:$BUILD_DIR/target/debian/image/"
 # config.local may hold the fleet key, so it lands readable by its owner alone
 # whatever its mode here. Not `rsync --chmod`, which macOS's openrsync ignores.
 # The environment's key follows the file, so it wins, and goes through stdin:
