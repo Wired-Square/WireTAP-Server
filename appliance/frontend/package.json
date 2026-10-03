@@ -1,0 +1,21 @@
+{
+  "name": "wiretap-appliance-frontend",
+  "version": "0.1.0",
+  "description": "The WireTAP appliance's browser half: the chassis's shell and Settings screens.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "tsc --noEmit",
+    "ci": "npm run check && npm run build"
+  },
+  "dependencies": {
+    "@wired-square/appliance-ui": "github:Wired-Square/appliance-rpi-bootstrap#v0.15.6",
+    "solid-js": "^1.9.14"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1"
+  }
+}

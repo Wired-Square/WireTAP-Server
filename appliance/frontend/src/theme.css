@@ -1,0 +1,13 @@
+/* The one layer allowed to name a colour. The accent matches `branding()` in
+   main.rs, so the page does not repaint when the branding request lands. */
+:root {
+  --app-accent: #c2410c;
+  --app-accent-sunken: #9a3412;
+  --app-accent-contrast: #ffffff;
+}
+
+.locked-out {
+  margin: 1rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--app-text-muted);
+}
