@@ -11,12 +11,15 @@ Homepage: https://github.com/Wired-Square/WireTAP-Server
 # can-utils is only suggested, not depended on: candump and cansend are what the
 # troubleshooting documentation reaches for, but an ingest-only deployment has
 # no local CAN hardware to point them at and should not be made to carry them.
+# iproute2 is only recommended for the same reason: its `ip` is what
+# wiretap-can@.service brings an interface up with.
 #
 # Architecture is `any` here and concrete in the built package; make-deb.sh
 # overrides it per build.
 Package: wiretap-server
 Architecture: any
 Depends: init-system-helpers (>= 1.54), adduser
+Recommends: iproute2
 Suggests: can-utils
 Description: captures CAN bus traffic and archives it to a WireTAP gateway
  wiretap-server reads frames from a Linux host's SocketCAN interfaces, bridges

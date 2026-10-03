@@ -33,8 +33,8 @@
 
 [server]
 # SocketCAN interface(s), comma-separated for several buses. The interface must
-# already be up: see
-# /usr/share/doc/wiretap-server/examples/can-interface.service.
+# already be up: see wiretap-can@.service and
+# /usr/share/doc/wiretap-server/examples/can0.conf.
 #
 # Shorthand for one [[device]] of kind = "can" each; see the end of this file
 # for what a [[device]] can say that this cannot.

@@ -58,6 +58,28 @@ round. That is deliberate — deployed units pass both — and
 `wiretap-server --check-config` prints what a given combination actually resolves
 to, so it never has to be argued about.
 
+### CAN interfaces
+
+The daemon opens an interface that is already up. The package brings one up
+with `wiretap-can@<interface>.service`, from a file you write naming it:
+
+```sh
+cp /usr/share/doc/wiretap-server/examples/can0.conf /etc/wiretap-server/can.d/
+$EDITOR /etc/wiretap-server/can.d/can0.conf    # BITRATE, and DBITRATE for CAN FD
+```
+
+A candleLight or CANable adapter (`gs_usb`) is then brought up whenever it is
+plugged in. Anything else, a Pi HAT for one, is enabled once:
+
+```sh
+systemctl enable --now wiretap-can@can0
+```
+
+Nothing comes up without a file in `can.d`. A unit made from the old
+`can-interface.service` example (`wiretap-can0.service`, or the Python
+deployment's `can-interface.service`) is left alone by the package; disable it
+once `wiretap-can@` has taken over its interface.
+
 `--iface ""` is an ingest-only deployment: no local CAN hardware, just the
 listener and the archive. `--help` lists the rest; the ones worth knowing are
 `--can-fd`, `--ingest-enable`, `--echo-console` and `--test-pattern-enable`.

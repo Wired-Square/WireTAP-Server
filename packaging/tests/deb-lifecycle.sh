@@ -103,6 +103,43 @@ getent passwd wiretap >/dev/null || die "no wiretap user"
 ! active || die "the unit was started on a fresh install"
 ok "user, state directory, config and unit; enabled, not started"
 
+# --- 1b. the CAN interface unit -------------------------------------------
+# No runner has a real CAN interface, and vcan cannot stand in: `type can` is
+# refused on it. So the unit is verified, and can-up is run against a stub `ip`.
+say "1b. wiretap-can@ and its udev rule"
+CAN_UP=/usr/lib/wiretap-server/can-up
+CAN_RULES=/usr/lib/udev/rules.d/90-wiretap-can.rules
+for f in /usr/lib/systemd/system/wiretap-can@.service "$CAN_UP" "$CAN_RULES" \
+         /usr/share/doc/wiretap-server/examples/can0.conf; do
+	[ -f "$f" ] || die "no $f"
+done
+[ -d /etc/wiretap-server/can.d ] || die "no /etc/wiretap-server/can.d"
+[ -z "$(ls -A /etc/wiretap-server/can.d)" ] \
+	|| die "can.d is not empty, so an interface would come up unasked"
+
+scratch="$(mktemp -d)"
+cp /usr/lib/systemd/system/wiretap-can@.service "$scratch/wiretap-can@can9.service"
+systemd-analyze verify "$scratch/wiretap-can@can9.service" \
+	|| die "systemd-analyze rejects wiretap-can@.service"
+# `udevadm verify` is systemd 254 and later; bookworm's 252 has no way to ask.
+if udevadm verify --help >/dev/null 2>&1; then
+	udevadm verify "$CAN_RULES" || die "udevadm rejects $CAN_RULES"
+fi
+
+mkdir "$scratch/bin"
+printf '#!/bin/sh\necho "$*" >> "%s/calls"\n' "$scratch" > "$scratch/bin/ip"
+chmod +x "$scratch/bin/ip"
+PATH="$scratch/bin:$PATH" BITRATE=250000 DBITRATE=2000000 "$CAN_UP" can9 \
+	|| die "can-up failed against a stub ip"
+[ "$(cat "$scratch/calls")" = "link set can9 down
+link set can9 type can bitrate 250000 restart-ms 100 dbitrate 2000000 fd on
+link set can9 txqueuelen 65536
+link set can9 up" ] || die "can-up ran: $(cat "$scratch/calls")"
+! env -u BITRATE PATH="$scratch/bin:$PATH" "$CAN_UP" can9 2>/dev/null \
+	|| die "can-up ran with no BITRATE"
+rm -rf "$scratch"
+ok "installed, nothing in can.d, unit and rule verify, can-up's ip calls right"
+
 # --- 2. it runs, under the unit's hardening -------------------------------
 # Ingest-only, because a runner has no CAN interface. The forward target is a
 # closed port on purpose: that is the outage path, so every frame pushed below

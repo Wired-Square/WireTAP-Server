@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **The package brings CAN interfaces up.** `wiretap-can@<interface>.service`
+  configures one from `/etc/wiretap-server/can.d/<interface>.conf`: bitrate,
+  CAN FD's data bitrate, a 65536-frame transmit queue and bus-off recovery,
+  ahead of the daemon. A candleLight or CANable adapter with a conf comes up
+  when plugged in; a HAT is enabled once. Nothing comes up without a conf. It
+  replaces the `can-interface.service` example, and a unit made from that is
+  left alone.
+
 ### Changed
 
 - **Clearing an unassigned interface answers 204, not 404.** `DELETE

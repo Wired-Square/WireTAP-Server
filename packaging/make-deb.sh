@@ -134,7 +134,10 @@ fi
 # than of an architecture, and each costs far more to discover after the fact.
 UNIT="${ROOT}/packaging/${PKG}.service"
 CONFIG="${ROOT}/packaging/${PKG}.toml"
-EXAMPLE="${ROOT}/packaging/examples/can-interface.service"
+CAN_UNIT="${ROOT}/packaging/wiretap-can@.service"
+CAN_UP="${ROOT}/packaging/can-up"
+CAN_RULES="${ROOT}/packaging/90-wiretap-can.rules"
+CAN_CONF="${ROOT}/packaging/examples/can0.conf"
 CATALOGUE="${ROOT}/packaging/examples/sungrow-rs485.catalog.toml"
 # The ingest spec from the wiretap-protocol checkout Cargo.lock pins, so the
 # package documents the protocol its binary speaks.
@@ -144,7 +147,8 @@ protocol_manifest="$(cd "${ROOT}" && cargo metadata --format-version 1 --locked 
 	|| die "could not find wiretap-protocol in cargo metadata"
 PROTOCOL="$(dirname "${protocol_manifest}")/docs/ingest.md"
 
-for f in "${UNIT}" "${CONFIG}" "${EXAMPLE}" "${CATALOGUE}" "${PROTOCOL}"; do
+for f in "${UNIT}" "${CONFIG}" "${CAN_UNIT}" "${CAN_UP}" "${CAN_RULES}" "${CAN_CONF}" \
+         "${CATALOGUE}" "${PROTOCOL}"; do
 	[ -f "${f}" ] || die "missing ${f#"${ROOT}"/}"
 done
 
@@ -395,19 +399,24 @@ build_arch() {  # build_arch <arch>
 	mkdir -p "${stage}/DEBIAN" \
 	         "${stage}/usr/bin" \
 	         "${stage}/usr/lib/systemd/system" \
+	         "${stage}/usr/lib/udev/rules.d" \
+	         "${stage}/usr/lib/${PKG}" \
 	         "${stage}$(dirname "${REF_PATH}")" \
 	         "${stage}${DOC_DIR}/examples"
 
 	install -m 0755 "${bin}"  "${stage}/usr/bin/${PKG}"
 	install -m 0644 "${UNIT}" "${stage}/usr/lib/systemd/system/${PKG}.service"
+	install -m 0644 "${CAN_UNIT}" "${stage}/usr/lib/systemd/system/"
+	install -m 0755 "${CAN_UP}" "${stage}/usr/lib/${PKG}/can-up"
+	install -m 0644 "${CAN_RULES}" "${stage}/usr/lib/udev/rules.d/"
 	# The reference configuration, which the postinst copies into /etc when
 	# there is nothing there. Kept on the box so an upgrade can be diffed
 	# against what this version ships.
 	install -m 0644 "${CONFIG}"   "${stage}${REF_PATH}"
 	install -m 0644 "${PROTOCOL}" "${stage}${DOC_DIR}/ingest-protocol.md"
-	# Documentation, not a unit: bringing a CAN interface up is the host's job
-	# and the scope of what this package should own is still open.
-	install -m 0644 "${EXAMPLE}"  "${stage}${DOC_DIR}/examples/can-interface.service"
+	# Documentation, not a conffile: a can0.conf in /etc would bring up any
+	# candleLight plugged in as can0, on a box that never asked for it.
+	install -m 0644 "${CAN_CONF}" "${stage}${DOC_DIR}/examples/can0.conf"
 	install -m 0644 "${CATALOGUE}" "${stage}${DOC_DIR}/examples/sungrow-rs485.catalog.toml"
 	install -m 0644 "${DEBIAN}/copyright" "${stage}${DOC_DIR}/copyright"
 	gzip -9nc "${DEBIAN}/changelog" > "${stage}${DOC_DIR}/changelog.Debian.gz"

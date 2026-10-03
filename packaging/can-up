@@ -1,0 +1,19 @@
+#!/bin/sh
+# Configures and brings up a CAN interface from the variables wiretap-can@.service
+# loads from /etc/wiretap-server/can.d/<interface>.conf.
+set -eu
+
+iface="${1:?usage: can-up <interface>}"
+: "${BITRATE:?is not set in /etc/wiretap-server/can.d/$iface.conf}"
+
+set -- bitrate "$BITRATE" restart-ms "${RESTART_MS:-100}"
+if [ -n "${DBITRATE:-}" ]; then
+    set -- "$@" dbitrate "$DBITRATE" fd on
+else
+    set -- "$@" fd off
+fi
+
+ip link set "$iface" down
+ip link set "$iface" type can "$@"
+ip link set "$iface" txqueuelen "${TXQUEUELEN:-65536}"
+ip link set "$iface" up

@@ -1,0 +1,3 @@
+# A candleLight or CANable adapter is brought up when it appears, but only one
+# with a /etc/wiretap-server/can.d/<interface>.conf. Any other is left alone.
+ACTION!="remove", SUBSYSTEM=="net", DRIVERS=="gs_usb", TEST=="/etc/wiretap-server/can.d/$name.conf", ENV{SYSTEMD_WANTS}+="wiretap-can@$name.service"

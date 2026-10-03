@@ -1,0 +1,20 @@
+[Unit]
+Description=CAN interface %i for wiretap-server
+Documentation=https://github.com/Wired-Square/WireTAP-Server#can-interfaces
+# Waits for the interface rather than failing on it: a HAT's driver probes late
+# in boot, and a USB adapter is started by 90-wiretap-can.rules when it appears.
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+Before=wiretap-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Not optional: an interface someone enabled without saying its bitrate is a
+# failed unit, not a guess.
+EnvironmentFile=/etc/wiretap-server/can.d/%i.conf
+ExecStart=/usr/lib/wiretap-server/can-up %i
+ExecStop=-ip link set %i down
+
+[Install]
+WantedBy=sys-subsystem-net-devices-%i.device
