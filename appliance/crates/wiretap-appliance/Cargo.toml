@@ -1,0 +1,32 @@
+[package]
+name = "wiretap-appliance"
+description = "The WireTAP appliance's web daemon: the chassis's screens beside wiretap-server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+appliance-backup = { workspace = true }
+appliance-backup-host = { workspace = true }
+appliance-build-id = { workspace = true }
+appliance-config = { workspace = true }
+appliance-host = { workspace = true }
+appliance-server = { workspace = true }
+appliance-store = { workspace = true }
+appliance-types = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "time"] }
+tracing = { workspace = true }
+
+[build-dependencies]
+appliance-build-id = { workspace = true }
+
+[dev-dependencies]
+appliance-server = { workspace = true, features = ["test-support"] }
+axum = { workspace = true }
+serde_json = { workspace = true }

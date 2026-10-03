@@ -14,6 +14,16 @@ All notable changes to this project are documented here. Entries go under
   when plugged in; a HAT is enabled once. Nothing comes up without a conf. It
   replaces the `can-interface.service` example, and a unit made from that is
   left alone.
+- **`wiretap-appliance`, the Raspberry Pi appliance's web daemon.** A cargo
+  workspace of its own under `appliance/`, built on the private Wired Square
+  appliance chassis: HTTPS with its own certificate, first-account
+  onboarding, accounts, the host, network, SSH, certificate, backup and log
+  screens, and an About page naming the installed `wiretap-server`'s version.
+  A backup carries `/etc/wiretap-server/`, and a factory reset removes its
+  gateway token and CAN settings and puts the packaged configuration back. It
+  packages as `wiretap-appliance_*_arm64.deb`, and its scaffold builds the
+  card image. The root workspace, its release and a fork build without the
+  chassis.
 
 ### Changed
 
