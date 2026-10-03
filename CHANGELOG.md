@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Changed
+
+- **Clearing an unassigned interface answers 204, not 404.** `DELETE
+  /v1/admin/assignments` is idempotent; a clear whose `expected` no longer
+  matches still answers 409 with `current` null.
+
 ## [0.1.9] — 2026-10-03
 
 A catalogue can be assigned to a capture daemon's serial line at the gateway,

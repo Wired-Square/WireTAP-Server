@@ -284,7 +284,7 @@ impl Catalogs {
         &self,
         params: &UnassignParams,
         cleared_by: &str,
-    ) -> Result<bool, AssignError> {
+    ) -> Result<(), AssignError> {
         let UnassignParams {
             daemon_id,
             interface,
@@ -315,7 +315,7 @@ impl Catalogs {
         if cleared {
             self.sessions.reassign(daemon_id, interface).await;
         }
-        Ok(cleared)
+        Ok(())
     }
 
     /// Every daemon that has named a device or been assigned a catalogue.

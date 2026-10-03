@@ -249,7 +249,10 @@ check "assign a catalogue that does not validate -> 400 with its findings" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$A" "$BASE/v1/admin/assignments?daemon_id=$CAT_DAEMON&interface=%2Fdev%2FttySMOKE&expected=$cat_sha")
 [ "$code" = "204" ]; check "clear the assignment -> 204" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$A" "$BASE/v1/admin/assignments?daemon_id=$CAT_DAEMON&interface=%2Fdev%2FttySMOKE")
-[ "$code" = "404" ]; check "clear again -> 404" $?
+[ "$code" = "204" ]; check "clear again -> 204" $?
+resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "$A" "$BASE/v1/admin/assignments?daemon_id=$CAT_DAEMON&interface=%2Fdev%2FttySMOKE&expected=$cat_sha")
+[ "${resp##*$'\n'}" = "409" ] && printf '%s' "${resp%$'\n'*}" | python3 -c 'import sys,json;assert json.load(sys.stdin)["current"] is None'
+check "clear again with the old expected -> 409, current null" $?
 
 # --- logs ---
 curl -fsS -H "$A" "$BASE/v1/admin/logs" | grep -q records; check "logs" $?

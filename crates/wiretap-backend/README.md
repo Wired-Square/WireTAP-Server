@@ -126,7 +126,7 @@ catalogue's Git blob SHA-1 as 40 hex characters, and times are epoch µs.
 |----------|------|---------|
 | `GET /v1/admin/daemons` | | 200 `DaemonList` |
 | `PUT /v1/admin/assignments` | `AssignCatalog` | 200 `AssignedCatalog`, 400 `CatalogRejected`, 409 `AssignmentConflict` |
-| `DELETE /v1/admin/assignments?daemon_id&interface&expected` | | 204, 404, 409 `AssignmentConflict` |
+| `DELETE /v1/admin/assignments?daemon_id&interface&expected` | | 204, 409 `AssignmentConflict` |
 | `GET /v1/admin/catalogs/{sha}` | | 200 `StoredCatalog`, 404 |
 
 `daemons` lists every daemon that has named a device or been assigned a

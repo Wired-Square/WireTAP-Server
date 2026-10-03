@@ -949,8 +949,7 @@ async fn assignments_delete(
         return e.into_response();
     }
     match state.catalogs.clear(&params, &key.name).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => not_found("nothing is assigned there").into_response(),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => e.into_response(),
     }
 }
