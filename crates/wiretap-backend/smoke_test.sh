@@ -190,6 +190,46 @@ if [ -n "${PGHOST:-}" ]; then
     code=$(curl -s -o /dev/null -w '%{http_code}' -H "$A" "$BASE/v1/db/$PROBE_DB/events")
     [ "$code" = "503" ]; check "a query PostgreSQL fails -> 503" $?
     curl -fsS -X DELETE -H "$A" "$BASE/v1/databases/$PROBE_DB" >/dev/null
+
+    # Catalogue assignment, seeded in wiretap_meta by hand until the admin API
+    # assigns. A CRLF blob, which must come back byte for byte.
+    META_DB="${WIRETAP_DEFAULT_DB:-wiretap}"
+    CAT_DAEMON="smoke-$(date +%s)"
+    meta() { psql -U postgres -d "$META_DB" -tAc "$1"; }
+    read -r cat_sha cat_hex < <(python3 -c 'import hashlib;c=b"[meta]\r\nname = \"smoke\"\r\n";print(hashlib.sha1(b"blob %d\0"%len(c)+c).hexdigest(),c.hex())')
+    meta "INSERT INTO wiretap_meta.catalog_blobs (blob_sha, content) VALUES (decode('$cat_sha','hex'), convert_from(decode('$cat_hex','hex'),'UTF8')) ON CONFLICT DO NOTHING;
+          INSERT INTO wiretap_meta.catalog_assignments (daemon_id, interface, blob_sha) VALUES ('$CAT_DAEMON', '/dev/ttySMOKE', decode('$cat_sha','hex'))" >/dev/null
+    PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ADMIN_KEY" "$CAT_DAEMON" "$cat_sha" "$cat_hex" <<'PYEOF'
+import struct, sys
+from test_ingest_client import ReferenceClient, frame_message
+host, port, token, daemon, sha, content = sys.argv[1:]
+c = ReferenceClient(host, int(port))
+name = b"/dev/ttySMOKE"
+hello = (b"WTAP" + bytes([3, 0, len(token)]) + token.encode() + b"\0"
+         + bytes([len(daemon)]) + daemon.encode() + bytes([1, 7, len(name)]) + name)
+c.send_raw(frame_message(0x01, hello))
+mtype, ack = c.recv_message()
+assert mtype == 0x81 and ack[:2] == bytes([0, 3]), ack.hex()
+assert ack[10:] == bytes([1, 7]) + bytes.fromhex(sha), ack.hex()
+got = b""
+while True:
+    c.send_raw(frame_message(0x04, bytes.fromhex(sha) + struct.pack("<I", len(got))))
+    mtype, cat = c.recv_message()
+    assert mtype == 0x84 and cat[0] == 0, cat[:1].hex()
+    got += cat[29:]
+    if len(got) >= struct.unpack_from("<I", cat, 21)[0]:
+        break
+assert got == bytes.fromhex(content), got
+c.send_raw(frame_message(0x04, bytes(20) + struct.pack("<I", 0)))
+mtype, cat = c.recv_message()
+assert mtype == 0x84 and cat[0] == 1, cat[:1].hex()
+PYEOF
+    check "a v3 HELLO gets its assignment, and CATALOG serves the blob byte for byte" $?
+    [ "$(meta "SELECT bus || ' ' || database FROM wiretap_meta.daemon_devices WHERE daemon_id = '$CAT_DAEMON'")" = "7 $META_DB" ]
+    check "a v3 HELLO records the daemon's devices" $?
+    meta "DELETE FROM wiretap_meta.catalog_assignments WHERE daemon_id = '$CAT_DAEMON';
+          DELETE FROM wiretap_meta.daemon_devices WHERE daemon_id = '$CAT_DAEMON';
+          DELETE FROM wiretap_meta.catalog_blobs WHERE blob_sha = decode('$cat_sha','hex')" >/dev/null
 else
     echo "  [skip] PostgreSQL checks: set PGHOST and PGPASSWORD to reach it with psql"
 fi

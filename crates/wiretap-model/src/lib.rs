@@ -9,11 +9,13 @@
 //! `wiretap-protocol` — the data length code table included, because a code on
 //! the wire and a length in a column is a distinction both ends must share.
 
+pub mod blob;
 #[cfg(feature = "config")]
 pub mod config;
 pub mod sample;
 pub mod secret;
 
+pub use blob::{blob_sha1, blob_sha1_hex};
 #[cfg(feature = "config")]
 pub use config::{parse_ifaces, FileConfig};
 pub use sample::{CanSample, Direction, ModbusSample, Protocol, Sample, SerialSample, SourceId};

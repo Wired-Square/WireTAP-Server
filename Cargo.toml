@@ -91,6 +91,8 @@ hex = "0.4"
 # its length or contents to a timing attack, which is what the Python used
 # `hmac.compare_digest` for.
 sha2 = "0.10"
+# A catalogue is named by its Git blob SHA-1, as `git hash-object` names it.
+sha1 = "0.10"
 rand = "0.8"
 subtle = "2"
 

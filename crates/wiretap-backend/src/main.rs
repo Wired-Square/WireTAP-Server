@@ -8,6 +8,7 @@
 /// server, because the image's documented tag is the mutable `:latest`.
 pub const VERSION: &str = wiretap_build_id::build_version!();
 
+mod catalogs;
 mod config;
 mod db;
 mod events;
@@ -27,6 +28,7 @@ use std::time::Duration;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use catalogs::Catalogs;
 use config::Config;
 use db::Databases;
 use ingest::{IngestServer, Sessions};
@@ -98,12 +100,15 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
     }
 
     let sessions = Sessions::default();
+    let catalogs = Catalogs::new(dbs.clone(), sessions.clone());
+    catalogs.bootstrap().await?;
 
     let ingest = Arc::new(IngestServer {
         config: config.clone(),
         dbs: dbs.clone(),
         keys: keys.clone(),
         sessions: sessions.clone(),
+        catalogs,
     });
     tokio::spawn(async move {
         if let Err(e) = ingest.run().await {

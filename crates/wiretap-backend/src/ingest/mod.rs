@@ -3,6 +3,9 @@
 //! capture database, and writes each batch to Postgres synchronously — the
 //! client is only ACKed once the batch is durably stored (ACK-after-write), so
 //! a DB outage back-pressures the device into its own disk cache.
+//!
+//! A capture daemon's v3 HELLO also records its devices and is answered with
+//! their catalogue assignments, which its `CATALOG_GET`s then fetch.
 
 pub mod writer;
 
@@ -16,10 +19,11 @@ use deadpool_postgres::Pool;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio_postgres::error::SqlState;
 use wiretap_protocol::ingest::*;
 
+use crate::catalogs::Catalogs;
 use crate::config::Config;
 use crate::db::{Databases, DbError};
 use crate::keys::KeyStore;
@@ -36,25 +40,50 @@ pub struct IngestSessionInfo {
     pub connected_at: DateTime<Utc>,
 }
 
+struct Live {
+    info: IngestSessionInfo,
+    daemon_id: String,
+    interfaces: Vec<String>,
+    reassigned: Arc<Notify>,
+}
+
 #[derive(Clone, Default)]
 pub struct Sessions {
-    inner: Arc<Mutex<HashMap<u64, IngestSessionInfo>>>,
+    inner: Arc<Mutex<HashMap<u64, Live>>>,
     next_id: Arc<AtomicU64>,
 }
 
 impl Sessions {
     pub async fn list(&self) -> Vec<IngestSessionInfo> {
-        self.inner.lock().await.values().cloned().collect()
+        let live = self.inner.lock().await;
+        live.values().map(|l| l.info.clone()).collect()
     }
 
-    async fn open(&self, info: IngestSessionInfo) -> u64 {
+    async fn open(&self, info: IngestSessionInfo, hello: &Hello, reassigned: Arc<Notify>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.inner.lock().await.insert(id, info);
+        let live = Live {
+            info,
+            daemon_id: hello.daemon_id.clone(),
+            interfaces: hello.devices.iter().map(|d| d.name.clone()).collect(),
+            reassigned,
+        };
+        self.inner.lock().await.insert(id, live);
         id
     }
 
     async fn close(&self, id: u64) {
         self.inner.lock().await.remove(&id);
+    }
+
+    /// Close each live session of `daemon_id` whose HELLO named `interface`,
+    /// once it has answered what it owes, so its reconnect reads the new
+    /// assignment. Returns how many were told.
+    pub async fn reassign(&self, daemon_id: &str, interface: &str) -> usize {
+        let live = self.inner.lock().await;
+        let affected = live
+            .values()
+            .filter(|l| l.daemon_id == daemon_id && l.interfaces.iter().any(|i| i == interface));
+        affected.map(|l| l.reassigned.notify_one()).count()
     }
 }
 
@@ -63,12 +92,132 @@ pub struct IngestServer {
     pub dbs: Databases,
     pub keys: KeyStore,
     pub sessions: Sessions,
+    pub catalogs: Catalogs,
 }
 
 /// What a HELLO established, held for the life of the connection.
 struct Session {
     pool: Pool,
     id: u64,
+}
+
+/// What the session loop asks of the gateway, so the loop runs without
+/// PostgreSQL in a test.
+trait Gateway {
+    /// The verdict, and the assignments a `HELLO_OK` carries.
+    async fn hello(&mut self, hello: &Hello) -> (u8, Vec<Assignment>);
+    async fn batch(&mut self, incoming: IncomingBatch) -> u8;
+    async fn blob(&mut self, sha: &[u8; 20]) -> Result<&[u8], u8>;
+}
+
+/// One client's connection to this gateway.
+struct Connection<'a> {
+    server: &'a IngestServer,
+    peer: &'a str,
+    authed: Option<Session>,
+    reassigned: Arc<Notify>,
+    /// The blob last served: a daemon pulls one a chunk at a time.
+    served: Option<([u8; 20], String)>,
+}
+
+impl Gateway for Connection<'_> {
+    async fn hello(&mut self, hello: &Hello) -> (u8, Vec<Assignment>) {
+        let reassigned = self.reassigned.clone();
+        match self.server.handle_hello(hello, self.peer, reassigned).await {
+            Ok((session, assignments)) => {
+                if let Some(previous) = self.authed.replace(session) {
+                    self.server.sessions.close(previous.id).await;
+                }
+                (HELLO_OK, assignments)
+            }
+            Err(status) => (status, Vec::new()),
+        }
+    }
+
+    async fn batch(&mut self, incoming: IncomingBatch) -> u8 {
+        let session = self
+            .authed
+            .as_ref()
+            .expect("a batch follows an accepted HELLO");
+        self.server.handle_batch(incoming, session).await
+    }
+
+    async fn blob(&mut self, sha: &[u8; 20]) -> Result<&[u8], u8> {
+        if self.served.as_ref().is_none_or(|(served, _)| served != sha) {
+            self.served = match self.server.catalogs.blob(sha).await {
+                Ok(Some(content)) => Some((*sha, content)),
+                Ok(None) => return Err(CATALOG_UNKNOWN),
+                Err(e) => {
+                    tracing::warn!("ingest client {}: {e}", self.peer);
+                    return Err(CATALOG_UNAVAILABLE);
+                }
+            };
+        }
+        Ok(self.served.as_ref().map_or(&[], |(_, c)| c.as_bytes()))
+    }
+}
+
+/// Answer one connection's messages in turn until it closes, or until
+/// `reassigned` says its catalogue assignment changed.
+async fn serve(
+    mut stream: TcpStream,
+    peer: &str,
+    mut machine: ServerSession,
+    gateway: &mut impl Gateway,
+    reassigned: &Notify,
+) -> Result<(), String> {
+    let idle_limit = machine.idle_limit().unwrap_or(Duration::MAX);
+    let mut read_buf = [0u8; 65536];
+
+    loop {
+        tokio::select! {
+            // Read with idle timeout (any traffic counts as keepalive)
+            read = tokio::time::timeout(idle_limit, stream.read(&mut read_buf)) => {
+                let n = match read {
+                    Ok(Ok(0)) => return Ok(()),
+                    Ok(Ok(n)) => n,
+                    Ok(Err(e)) => return Err(format!("read: {e}")),
+                    Err(_) => return Err("idle timeout".into()),
+                };
+                machine.receive(&read_buf[..n]);
+            }
+            () = reassigned.notified() => machine.close_reassigned(),
+        }
+
+        while let Some(action) = machine.poll() {
+            let reply = match action {
+                Action::Reply(bytes) => bytes,
+                Action::Hello(hello) => {
+                    let (status, assignments) = gateway.hello(&hello).await;
+                    machine
+                        .answer_hello(status, now_us(), &assignments)
+                        .expect("one assignment per device, and a HELLO names at most 255")
+                }
+                Action::HelloRefused(status) => machine
+                    .answer_hello(status, now_us(), &[])
+                    .expect("no assignments to overflow"),
+                Action::Batch(incoming) => {
+                    let seq = incoming.batch.seq;
+                    let status = gateway.batch(incoming).await;
+                    machine.ack(seq, status, 0)
+                }
+                Action::Nack { seq, status } => machine.ack(seq, status, 0),
+                Action::CatalogGet(get) => {
+                    machine.answer_catalog(gateway.blob(&get.blob_sha).await)
+                }
+                Action::Close(CloseReason::Refused(_)) => return Ok(()),
+                Action::Close(CloseReason::Reassigned) => {
+                    tracing::info!("ingest client {peer}: catalogue assignment changed; closing");
+                    return Ok(());
+                }
+                Action::Close(reason) => return Err(format!("closed: {reason:?}")),
+            };
+            stream
+                .write_all(&reply)
+                .await
+                .map_err(|e| format!("write: {e}"))?;
+        }
+    }
 }
 
 impl IngestServer {
@@ -96,21 +245,15 @@ impl IngestServer {
     }
 
     async fn handle_client(&self, stream: TcpStream, peer: &str) -> Result<(), String> {
-        let mut authed = None;
-        let result = self.serve(stream, peer, &mut authed).await;
-        if let Some(session) = authed {
-            self.sessions.close(session.id).await;
-        }
-        result
-    }
-
-    async fn serve(
-        &self,
-        mut stream: TcpStream,
-        peer: &str,
-        authed: &mut Option<Session>,
-    ) -> Result<(), String> {
-        let mut machine = ServerSession::new(ServerConfig {
+        let reassigned = Arc::new(Notify::new());
+        let mut conn = Connection {
+            server: self,
+            peer,
+            authed: None,
+            reassigned: reassigned.clone(),
+            served: None,
+        };
+        let machine = ServerSession::new(ServerConfig {
             versions: 2..=3,
             max_records: self.config.ingest_max_batch_frames,
             short_batch: ShortBatch::NackSeqZero,
@@ -118,60 +261,21 @@ impl IngestServer {
                 self.config.ingest_keepalive_secs * 3.0,
             )),
         });
-        let idle_limit = machine.idle_limit().unwrap_or(Duration::MAX);
-        let mut read_buf = [0u8; 65536];
-
-        loop {
-            // Read with idle timeout (any traffic counts as keepalive)
-            let n = match tokio::time::timeout(idle_limit, stream.read(&mut read_buf)).await {
-                Ok(Ok(0)) => return Ok(()),
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => return Err(format!("read: {e}")),
-                Err(_) => return Err("idle timeout".into()),
-            };
-            machine.receive(&read_buf[..n]);
-
-            while let Some(action) = machine.poll() {
-                let reply = match action {
-                    Action::Reply(bytes) => bytes,
-                    Action::Hello(hello) => {
-                        let status = match self.handle_hello(&hello, peer).await {
-                            Ok(session) => {
-                                if let Some(previous) = authed.replace(session) {
-                                    self.sessions.close(previous.id).await;
-                                }
-                                HELLO_OK
-                            }
-                            Err(status) => status,
-                        };
-                        machine
-                            .answer_hello(status, now_us(), &[])
-                            .expect("no assignments to overflow")
-                    }
-                    Action::HelloRefused(status) => machine
-                        .answer_hello(status, now_us(), &[])
-                        .expect("no assignments to overflow"),
-                    Action::Batch(incoming) => {
-                        let session = authed.as_ref().expect("a batch follows an accepted HELLO");
-                        let seq = incoming.batch.seq;
-                        let status = self.handle_batch(incoming, session).await;
-                        machine.ack(seq, status, 0)
-                    }
-                    Action::Nack { seq, status } => machine.ack(seq, status, 0),
-                    Action::CatalogGet(_) => machine.answer_catalog(Err(CATALOG_UNKNOWN)),
-                    Action::Close(CloseReason::Refused(_)) => return Ok(()),
-                    Action::Close(reason) => return Err(format!("closed: {reason:?}")),
-                };
-                stream
-                    .write_all(&reply)
-                    .await
-                    .map_err(|e| format!("write: {e}"))?;
-            }
+        let result = serve(stream, peer, machine, &mut conn, &reassigned).await;
+        if let Some(session) = conn.authed {
+            self.sessions.close(session.id).await;
         }
+        result
     }
 
-    /// The established session, or the status that refuses the HELLO.
-    async fn handle_hello(&self, hello: &Hello, peer: &str) -> Result<Session, u8> {
+    /// The established session and the assignments its HELLO_ACK carries, or
+    /// the status that refuses the HELLO.
+    async fn handle_hello(
+        &self,
+        hello: &Hello,
+        peer: &str,
+        reassigned: Arc<Notify>,
+    ) -> Result<(Session, Vec<Assignment>), u8> {
         let key = String::from_utf8_lossy(&hello.token).into_owned();
         let Some(info) = self.keys.validate(&key).await else {
             tracing::warn!("ingest client {peer} failed auth");
@@ -209,25 +313,54 @@ impl IngestServer {
             }
         };
 
+        let assignments = if hello.daemon_id.is_empty() {
+            Vec::new()
+        } else {
+            self.daemon_hello(hello, &database, peer).await
+        };
         let session_id = self
             .sessions
-            .open(IngestSessionInfo {
-                peer: peer.to_string(),
-                key_name: info.name,
-                database: database.clone(),
-                protocol_version: hello.version,
-                frames: 0,
-                batches: 0,
-                connected_at: Utc::now(),
-            })
+            .open(
+                IngestSessionInfo {
+                    peer: peer.to_string(),
+                    key_name: info.name,
+                    database: database.clone(),
+                    protocol_version: hello.version,
+                    frames: 0,
+                    batches: 0,
+                    connected_at: Utc::now(),
+                },
+                hello,
+                reassigned,
+            )
             .await;
         tracing::info!(
             "ingest client {peer} authenticated, database '{database}', protocol v{}",
             hello.version
         );
-        Ok(Session {
-            pool,
-            id: session_id,
+        Ok((
+            Session {
+                pool,
+                id: session_id,
+            },
+            assignments,
+        ))
+    }
+
+    /// Record a daemon's devices and read their assignments. The meta
+    /// database failing costs the daemon its assignments, not its session:
+    /// it keeps the catalogues it has and archives on.
+    async fn daemon_hello(&self, hello: &Hello, database: &str, peer: &str) -> Vec<Assignment> {
+        let id = &hello.daemon_id;
+        let read = async {
+            self.catalogs
+                .record_hello(id, database, &hello.devices)
+                .await?;
+            self.catalogs.assignments_for(id, &hello.devices).await
+        };
+        read.await.unwrap_or_else(|e| {
+            tracing::warn!("ingest client {peer} (daemon {id}): {e}; answering no assignments");
+            Vec::new()
         })
     }
 
@@ -243,8 +376,8 @@ impl IngestServer {
         match copy_rows(&session.pool, &rows).await {
             Ok(()) => {
                 if let Some(s) = self.sessions.inner.lock().await.get_mut(&session.id) {
-                    s.frames += count;
-                    s.batches += 1;
+                    s.info.frames += count;
+                    s.info.batches += 1;
                 }
                 ACK_OK
             }
@@ -287,6 +420,7 @@ mod tests {
         IngestServer {
             config: Arc::new(config_at(0, true)),
             keys: KeyStore::new(dbs.clone(), Some("bootstrap")),
+            catalogs: Catalogs::new(dbs.clone(), Sessions::default()),
             dbs,
             sessions: Sessions::default(),
         }
@@ -299,9 +433,25 @@ mod tests {
         }
     }
 
+    fn device(bus: u8, name: &str) -> Device {
+        Device {
+            bus,
+            name: name.into(),
+        }
+    }
+
+    fn daemon_hello(daemon_id: &str, devices: Vec<Device>) -> Hello {
+        Hello {
+            daemon_id: daemon_id.into(),
+            devices,
+            ..hello(3, "")
+        }
+    }
+
     async fn hello_status(dbs: Databases, database: &str) -> u8 {
         let hello = hello(PROTO_VERSION, database);
-        match server(dbs).handle_hello(&hello, "192.0.2.10:40000").await {
+        let peer = "192.0.2.10:40000";
+        match server(dbs).handle_hello(&hello, peer, Arc::default()).await {
             Ok(_) => HELLO_OK,
             Err(status) => status,
         }
@@ -317,20 +467,194 @@ mod tests {
         TcpStream::connect(addr).await.unwrap()
     }
 
-    async fn hello_ack(c: &mut TcpStream, hello: &Hello) -> HelloAck {
-        c.write_all(&encode_hello(hello).unwrap()).await.unwrap();
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 1024];
-        let frame = loop {
-            if let Some(frame) = take_frame(&mut buf).unwrap() {
-                break frame;
+    /// The next message, or `None` once the gateway has closed.
+    async fn reply(c: &mut TcpStream, buf: &mut Vec<u8>) -> Option<WireFrame> {
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(frame) = take_frame(buf).unwrap() {
+                return Some(frame);
             }
             let n = c.read(&mut chunk).await.unwrap();
-            assert!(n > 0, "closed without a HELLO_ACK");
+            if n == 0 {
+                return None;
+            }
             buf.extend_from_slice(&chunk[..n]);
-        };
+        }
+    }
+
+    async fn hello_ack(c: &mut TcpStream, hello: &Hello) -> HelloAck {
+        c.write_all(&encode_hello(hello).unwrap()).await.unwrap();
+        let frame = reply(c, &mut Vec::new())
+            .await
+            .expect("closed without a HELLO_ACK");
         assert_eq!(frame.mtype, MSG_HELLO_ACK);
         parse_hello_ack(&frame.body).unwrap()
+    }
+
+    /// Takes every HELLO and every batch, and holds blobs by their SHA-1.
+    #[derive(Default)]
+    struct Fake {
+        blobs: Vec<Vec<u8>>,
+        /// Fired while the batch is being written, as an assignment changing
+        /// mid-write would.
+        reassigned_mid_batch: Option<Arc<Notify>>,
+    }
+
+    impl Gateway for Fake {
+        async fn hello(&mut self, _: &Hello) -> (u8, Vec<Assignment>) {
+            (HELLO_OK, Vec::new())
+        }
+
+        async fn batch(&mut self, _: IncomingBatch) -> u8 {
+            if let Some(reassigned) = &self.reassigned_mid_batch {
+                reassigned.notify_one();
+            }
+            ACK_OK
+        }
+
+        async fn blob(&mut self, sha: &[u8; 20]) -> Result<&[u8], u8> {
+            let found = self
+                .blobs
+                .iter()
+                .find(|b| wiretap_model::blob_sha1(b) == *sha);
+            found.map(Vec::as_slice).ok_or(CATALOG_UNKNOWN)
+        }
+    }
+
+    /// A client connected to [`serve`] over `fake`, and what wakes it.
+    async fn serving(mut fake: Fake) -> (TcpStream, Arc<Notify>) {
+        let reassigned = fake.reassigned_mid_batch.clone().unwrap_or_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let notify = reassigned.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let machine = ServerSession::new(ServerConfig {
+                versions: 2..=3,
+                max_records: MAX_BATCH_RECORDS,
+                short_batch: ShortBatch::NackSeqZero,
+                idle_limit: None,
+            });
+            let _ = serve(stream, "test", machine, &mut fake, &notify).await;
+        });
+        (TcpStream::connect(addr).await.unwrap(), reassigned)
+    }
+
+    fn batch(seq: u32) -> Vec<u8> {
+        let mut records = Vec::new();
+        encode_record_into(&mut records, 0, 0, RecordKind::Can, 0, 0, 0x123, &[1]);
+        encode_batch(seq, 1_700_000_000_000_000, 1, &records)
+    }
+
+    #[tokio::test]
+    async fn a_reassignment_closes_the_session() {
+        let (mut c, reassigned) = serving(Fake::default()).await;
+        let hello = daemon_hello("bench", vec![device(0, "can0")]);
+        assert_eq!(hello_ack(&mut c, &hello).await.status, HELLO_OK);
+        reassigned.notify_one();
+        assert!(reply(&mut c, &mut Vec::new()).await.is_none(), "still open");
+    }
+
+    #[tokio::test]
+    async fn a_reassignment_mid_batch_is_closed_on_after_the_ack() {
+        let reassigned = Arc::new(Notify::new());
+        let (mut c, _) = serving(Fake {
+            reassigned_mid_batch: Some(reassigned),
+            ..Fake::default()
+        })
+        .await;
+        hello_ack(&mut c, &daemon_hello("bench", vec![device(0, "can0")])).await;
+        c.write_all(&batch(7)).await.unwrap();
+        let mut buf = Vec::new();
+        let ack = reply(&mut c, &mut buf).await.expect("the ACK it was owed");
+        assert_eq!(parse_ack(&ack.body).unwrap().seq, 7);
+        assert!(reply(&mut c, &mut buf).await.is_none(), "still open");
+    }
+
+    /// CRLF, and longer than one chunk.
+    #[tokio::test]
+    async fn a_blob_is_served_a_chunk_at_a_time_byte_for_byte() {
+        let blob = "[meta]\r\nname = \"crlf\"\r\n# padding\r\n".repeat(3_000);
+        assert!(blob.len() > MAX_CATALOG_CHUNK);
+        let sha = wiretap_model::blob_sha1(blob.as_bytes());
+        let (mut c, _) = serving(Fake {
+            blobs: vec![blob.clone().into_bytes()],
+            ..Fake::default()
+        })
+        .await;
+        hello_ack(&mut c, &daemon_hello("bench", vec![device(0, "can0")])).await;
+
+        let mut buf = Vec::new();
+        let mut got = Vec::new();
+        let mut next = Some(CatalogGet {
+            blob_sha: sha,
+            offset: 0,
+        });
+        while let Some(get) = next {
+            c.write_all(&encode_catalog_get(&get)).await.unwrap();
+            let frame = reply(&mut c, &mut buf).await.unwrap();
+            let chunk = parse_catalog(&frame.body).unwrap();
+            assert_eq!(chunk.status, CATALOG_OK);
+            got.extend_from_slice(&chunk.data);
+            next = chunk.next();
+        }
+        assert_eq!(got, blob.as_bytes());
+
+        let unknown = CatalogGet {
+            blob_sha: [0; 20],
+            offset: 0,
+        };
+        c.write_all(&encode_catalog_get(&unknown)).await.unwrap();
+        let frame = reply(&mut c, &mut buf).await.unwrap();
+        assert_eq!(parse_catalog(&frame.body).unwrap().status, CATALOG_UNKNOWN);
+    }
+
+    fn session_info() -> IngestSessionInfo {
+        IngestSessionInfo {
+            peer: "192.0.2.10:40000".into(),
+            key_name: "bench".into(),
+            database: "wiretap".into(),
+            protocol_version: 3,
+            frames: 0,
+            batches: 0,
+            connected_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reassignment_closes_only_the_sessions_that_carry_the_interface() {
+        let sessions = Sessions::default();
+        let (framed, raw, other) = (Arc::default(), Arc::default(), Arc::default());
+        let site = daemon_hello("bench", vec![device(0, "can0"), device(1, "/dev/ttyUSB0")]);
+        let rs485_raw = daemon_hello("bench", vec![device(1, "/dev/ttyUSB1")]);
+        let elsewhere = daemon_hello("other", vec![device(0, "can0")]);
+        for (hello, notify) in [(&site, &framed), (&rs485_raw, &raw), (&elsewhere, &other)] {
+            sessions
+                .open(session_info(), hello, Arc::clone(notify))
+                .await;
+        }
+
+        assert_eq!(sessions.reassign("bench", "can0").await, 1);
+        let woken = |n: &Arc<Notify>| {
+            let n = n.clone();
+            async move {
+                tokio::time::timeout(Duration::from_millis(50), n.notified())
+                    .await
+                    .is_ok()
+            }
+        };
+        assert!(woken(&framed).await);
+        assert!(!woken(&raw).await, "its HELLO did not name can0");
+        assert!(!woken(&other).await, "another daemon's can0");
+        assert_eq!(sessions.reassign("bench", "can9").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_meta_database_failure_at_hello_answers_no_assignments() {
+        let server = server(unreachable_databases(true));
+        let hello = daemon_hello("bench", vec![device(0, "can0")]);
+        let assignments = server.daemon_hello(&hello, "wiretap", "test").await;
+        assert!(assignments.is_empty());
     }
 
     #[tokio::test]
@@ -404,17 +728,11 @@ mod tests {
     #[tokio::test]
     async fn the_sessions_listing_names_each_sessions_protocol_version() {
         let sessions = Sessions::default();
-        sessions
-            .open(IngestSessionInfo {
-                peer: "192.0.2.10:40000".into(),
-                key_name: "bench".into(),
-                database: "wiretap".into(),
-                protocol_version: 2,
-                frames: 0,
-                batches: 0,
-                connected_at: Utc::now(),
-            })
-            .await;
+        let info = IngestSessionInfo {
+            protocol_version: 2,
+            ..session_info()
+        };
+        sessions.open(info, &hello(2, ""), Arc::default()).await;
         let listed = serde_json::to_value(sessions.list().await).unwrap();
         assert_eq!(listed[0]["protocol_version"], 2);
     }

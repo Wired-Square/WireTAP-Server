@@ -21,6 +21,9 @@ wiretap-model = { path = "../wiretap-model", default-features = false }
 # The ingest codec, and the DLC table: a CAN row's `dlc` column and the `len`
 # served from it.
 wiretap-protocol.workspace = true
+# What the daemon checks a catalogue with, so an assignment the gateway takes
+# is one every daemon can frame with.
+wiretap-catalog.workspace = true
 wiretap-gateway.workspace = true
 axum.workspace = true
 base64.workspace = true

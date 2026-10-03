@@ -5,6 +5,19 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **The gateway assigns catalogues.** Catalogue blobs, assignments by daemon
+  id and interface, their history, and the devices each daemon last named
+  live in `wiretap_meta` in the default database, created at startup. A named
+  v3 `HELLO` records its devices and is answered with their assignments, and
+  `CATALOG_GET` serves a blob exactly as assigned, named by its Git blob
+  SHA-1. A failure of the meta database at `HELLO` costs the daemon its
+  assignments, not its session. An assignment is checked as the daemon checks
+  a catalogue in `/etc`. Changing one closes that daemon's sessions whose
+  `HELLO` named the interface, so they reconnect to it. The admin API that
+  assigns comes later.
+
 ## [0.1.8] — 2026-10-03
 
 A serial line can be captured raw, framed, or both, and the raw stream can land
