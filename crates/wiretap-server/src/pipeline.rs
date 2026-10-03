@@ -470,7 +470,7 @@ async fn read_loop(
                 reopening = !matches!(error, CanError::Read(_));
                 lost = true;
             }
-            // `Bus` is gs_usb's alone, and this reads SocketCAN.
+            // `Bus` is gs_usb's and PEAK's alone, and this reads SocketCAN.
             _ => {}
         }
     }

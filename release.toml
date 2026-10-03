@@ -1,5 +1,5 @@
 # cargo-release config — the one canonical release path, mirroring
-# wiretap-lib-rs so the two repos are released the same way. Every crate here
+# wslib-wiretap-rs so the two repos are released the same way. Every crate here
 # inherits `[workspace.package] version`, so one command bumps all five and cuts
 # one tag.
 #
@@ -12,7 +12,7 @@
 # ## Releasing is two pushes, not one — and the order matters
 #
 # `push = false` below, which is the one deliberate difference from
-# wiretap-lib-rs. `.github/workflows/release.yml` refuses to build a draft for a
+# wslib-wiretap-rs. `.github/workflows/release.yml` refuses to build a draft for a
 # commit that has no successful `ci.yml` run, and `ci.yml` never runs on a tag
 # ref — so a tag pushed alongside its commit races CI and loses. The tag has to
 # follow a green run, which means:
