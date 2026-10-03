@@ -1,0 +1,35 @@
+# Chassis-owned. Names this board, once, before anything that depends on the
+# name is running.
+[Unit]
+Description=First-boot setup for wiretap-appliance
+# **Before the appliance**, because the appliance makes its TLS certificate on
+# its first start and reads the box's name to do it. A certificate made before
+# the rename carries a name the box no longer answers to, and the browser's
+# escape hatch of trusting it does not help — name verification still fails.
+Before=wiretap-appliance.service
+# And before anything advertises the name on the network.
+#
+# **Not `Before=network-pre.target`**, which is the documented hook for running
+# ahead of any networking at all: this unit takes the default dependencies and
+# so is ordered after `basic.target`, and whether that composes with
+# `network-pre.target` is a question nothing here has run on a board. Ordering
+# against the two units that actually read the name is enough and is checkable.
+Before=avahi-daemon.service
+# Its own marker rather than the hostname, so an operator who deliberately
+# renames the box does not get it renamed back on the next boot.
+#
+# **Its lifecycle is the image's, not the package's**, so it lives outside both
+# directories the package owns. `/etc/<name>` was the first choice and is wrong:
+# `postrm` removes it on purge, after which this condition passes again, the
+# marker cannot be written back, and `set -e` leaves the unit failing on every
+# boot from then on. The state directory is wrong for its own reason — systemd
+# chowns it on every start.
+ConditionPathExists=!/var/lib/misc/wiretap-appliance-firstboot.done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/wiretap-appliance-firstboot
+
+[Install]
+WantedBy=multi-user.target

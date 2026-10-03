@@ -1,0 +1,16 @@
+Package: wiretap-appliance
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Alex Ferrara <alex@wiredsquare.com>
+Section: admin
+Priority: optional
+Installed-Size: @INSTALLED_SIZE@
+Depends: init-system-helpers (>= 1.54), adduser, ca-certificates
+Suggests: wiretap-server, network-manager, bluez, avahi-daemon, libnss-mdns
+Description: administers a WireTAP capture appliance from a browser
+ Built on the Wired Square appliance chassis. Serves its interface over TLS.
+ .
+ It keeps a control socket for an operator in the wiretap-appliance group, which is the
+ way in when nobody can sign in:
+ .
+   /run/wiretap-appliance/wiretap-appliance.sock

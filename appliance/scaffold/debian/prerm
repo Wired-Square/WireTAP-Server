@@ -1,0 +1,50 @@
+#!/bin/sh
+# Chassis-owned. `appliance-xtask packaging render` rewrites this file
+# unconditionally, every time. Put product-specific steps in
+# /usr/share/wiretap-appliance/prerm.d/ instead — see hooks.README beside this file.
+set -e
+
+NAME='wiretap-appliance'
+HOOK_DIR='/usr/share/wiretap-appliance/prerm.d'
+
+case "$1" in
+remove)
+    # **The last window in which a product can talk to its own appliance.** The
+    # daemon is still running and every file the package shipped is still on
+    # disk; by the time postrm runs, dpkg has removed both. Hooks first, then
+    # the stop.
+    if [ -d "$HOOK_DIR" ]; then
+        run-parts --exit-on-error --arg="$1" --arg="$2" "$HOOK_DIR"
+    fi
+
+    if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+        deb-systemd-invoke stop "$NAME.service" >/dev/null || true
+    fi
+    ;;
+
+upgrade | deconfigure)
+    # **Neither of these stops the daemon**, and they are here together because
+    # the reason is the same in both: something else is going to start it again,
+    # and stopping it here means a window where the appliance is unreachable for
+    # no benefit.
+    #
+    #  - On an upgrade, postinst's try-restart picks the new binary up. One
+    #    restart rather than a stop, a gap and a start.
+    #  - On a deconfigure, dpkg re-runs `postinst configure` afterwards — where
+    #    `$2` is set, so it reaches `try-restart`, which is **a no-op on a
+    #    stopped unit**. Stopping here would leave the appliance down with
+    #    nothing that ever brings it back.
+    if [ -d "$HOOK_DIR" ]; then
+        run-parts --exit-on-error --arg="$1" --arg="$2" "$HOOK_DIR"
+    fi
+    ;;
+
+failed-upgrade) ;;
+
+*)
+    echo "prerm called with unknown argument \`$1'" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,22 @@
+# Chassis-owned. Enrols this board in wiretap-appliance's tailnet, retrying within a
+# boot and at every boot until it joins, which removes the key the condition
+# reads.
+[Unit]
+Description=Tailscale enrolment for wiretap-appliance
+Requires=tailscaled.service
+After=wiretap-appliance-firstboot.service tailscaled.service network-online.target time-sync.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/misc/wiretap-appliance-tailscale.key
+
+[Service]
+# Not oneshot: `tailscale up` waits until the box joins, and multi-user.target
+# would wait with it.
+Type=exec
+ExecStart=/usr/libexec/wiretap-appliance-tailscale-enrol
+# Five minutes apart, so the default start limit (five in ten seconds) never
+# ends the retries.
+Restart=on-failure
+RestartSec=5min
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,201 @@
+# Adding your own steps to wiretap-appliance's install
+
+**This file is chassis-owned and is rewritten by every `packaging render`.** So
+is every maintainer script beside it. Do not edit those — put your product's own
+steps in the hook directories described below, which nothing in the chassis ever
+writes.
+
+## The two directories
+
+`postinst` and `prerm` each run `run-parts` over one directory, if it exists.
+`make-deb.sh` ships your scripts there from the directory `hooks_dir` names in
+`appliance.toml` — `<hooks_dir>/postinst.d/*` and `<hooks_dir>/prerm.d/*`, each
+`0755`, checked before the build for the two ways a hook silently never runs
+(below). Anything else in that directory is refused, because nothing else there
+could ever run.
+
+| Script | Hook directory | Runs |
+| --- | --- | --- |
+| `postinst` | `/usr/share/wiretap-appliance/postinst.d/` | on `configure`, after the account and the configuration directory exist — and, with `journal = "persistent"`, after the journal has been flushed — and **before** the unit is started or restarted |
+| `prerm` | `/usr/share/wiretap-appliance/prerm.d/` | on `remove`, before the daemon is stopped; and on `upgrade` and `deconfigure`, where nothing is stopped at all |
+
+## What is not a hook
+
+Four things a product ships are files rather than steps, and `make-deb.sh`
+ships them without a hook:
+
+- **A unit drop-in.** Every `*.conf` in `scaffold/systemd/wiretap-appliance.service.d/`
+  goes to `/usr/lib/systemd/system/wiretap-appliance.service.d/`. The `.sample` beside
+  them does not — see it for what a drop-in can and cannot change.
+- **A file under `/etc` or `/usr/share/wiretap-appliance`**, named in `[package.files]`
+  as `"/destination" = "source/in/the/repo"`, shipped `0644`. One under `/etc` is
+  a conffile: dpkg keeps an operator's edit across an upgrade and asks before
+  replacing one the upgrade changed. `/etc/wiretap-appliance/config.toml` is refused
+  there — that file is the operator's; ship a `config.toml.example` beside it.
+- **The journal.** `journal = "persistent"` ships a journald drop-in under
+  `/usr/lib`, numbered above the distribution's, and flushes the running journal
+  into it from `postinst` before your hooks run. Raspberry Pi OS keeps the
+  journal in RAM otherwise, and what that loses at a reboot is the daemon's own
+  log — every refusal reaches only the journal.
+- **`scaffold/debian/copyright`**, a DEP-5 file you write, shipped to
+  `/usr/share/doc/wiretap-appliance/` beside a changelog the build makes from its version.
+
+## A hook that edits another daemon's configuration
+
+The shape, for a drop-in some other daemon reads: write it, ask that daemon
+whether the result parses, and take it back out with a warning rather than fail
+when it does not — a refused install is the wrong answer to a configuration
+problem an operator can fix. The chassis's own `postinst` does this for sshd,
+which has a check mode, so a `host-admin` appliance's SSH screen has its keys
+read; for a daemon of your own:
+
+```sh
+#!/bin/sh
+set -e
+case "$1" in
+configure)
+    DROPIN=/etc/otherd/conf.d/50-wiretap-appliance.conf
+    if command -v otherd >/dev/null 2>&1 && [ -d /etc/otherd/conf.d ]; then
+        # Written in place, because a check mode reads the live configuration
+        # and its include glob — a file under another name is not what it checks.
+        printf 'Setting value\n' > "$DROPIN"
+        # No running systemd means the pi-gen chroot, where a check that wants
+        # the box's own state cannot run: leave the file for the first real boot.
+        if [ -d /run/systemd/system ] && ! otherd --check 2>/dev/null; then
+            rm -f "$DROPIN"
+            echo "wiretap-appliance: warning: otherd refused $DROPIN, so it was removed" >&2
+        fi
+    fi
+    ;;
+esac
+```
+
+That file is *written* by the hook rather than shipped through `[package.files]`
+because its worth depends on a check only a running box can make. A file that is
+right unconditionally — a `config.toml.example` — is a shipped file, and the
+conffile handling comes free.
+
+**There is no `postrm` hook, and that is not an oversight.** Debian Policy 6.5
+has `postrm` run *after* the package's files have been removed — so a script
+shipped in `/usr/share/wiretap-appliance/postrm.d/` is already deleted by the time
+`postrm` could call it. `prerm` is the last window your code can run in. If you
+need to take data with you before a purge, take it there.
+
+`run-parts` runs the scripts in lexical order, so name them `10-`, `20-` and so
+on. Two ways a hook silently never runs, both worth knowing before you debug one:
+
+- **It must be executable.** `run-parts` skips anything without the bit set, and
+  says nothing.
+- **Its name must not contain a dot.** The default name rule is
+  `[A-Za-z0-9_-]` only, so the `.sh` suffix that feels natural is the usual way
+  a hook is ignored.
+
+## What a hook is given
+
+The maintainer script's first two arguments, passed through. So a `postinst`
+hook gets `configure` and, on an upgrade, the version being upgraded from —
+which is how it tells a first install from an upgrade, exactly as the chassis's
+own script does:
+
+```sh
+#!/bin/sh
+set -e
+case "$1" in
+configure)
+    if [ -z "$2" ]; then
+        echo "first install"
+    else
+        echo "upgrading from $2"
+    fi
+    ;;
+esac
+```
+
+dpkg passes more than two in some forms (`prerm remove in-favour <pkg> <ver>`).
+Those are not forwarded; if you need them, the argument you have is enough to
+know you are in that case.
+
+## A failing hook fails the operation
+
+Every site passes `--exit-on-error`, and the maintainer scripts run under
+`set -e`. So a hook that exits non-zero stops the run there and leaves dpkg
+reporting the operation as failed — a failed configure for a `postinst` hook, a
+failed removal for a `prerm` one.
+
+That is deliberate. Without it `run-parts` carries on, which for a schema
+migration means the second script running against what the first did not finish.
+**A refused upgrade is recoverable; a half-migrated appliance in the field is
+somebody driving to it.**
+
+The consequence to design for: a hook must be safe to run again, because the
+operator's next move after fixing the cause is `dpkg --configure wiretap-appliance`.
+
+## Do not migrate the database from a hook
+
+The obvious use for a `postinst` hook is a schema migration, and it is the wrong
+one. `prerm` deliberately does not stop the daemon on an upgrade — so a
+`postinst` hook runs while the **old** binary still has the database open, and
+`postinst` runs the hooks before it restarts anything.
+
+Your schema belongs in your own `sqlx` migration chain, which `Store::open`
+composes with the platform's and runs inside the daemon at startup. That is the
+one place where nothing else has the file open. Hooks are for what lives outside
+the database: a directory to create, a file from an older deployment to convert,
+a service to poke.
+
+## What the chassis already does, so you do not
+
+- Creates `wiretap-appliance` and the `wiretap-appliance` group.
+- Creates `/etc/wiretap-appliance` and sets it to `root:wiretap-appliance` mode `0751`. systemd
+  creates the directory too and applies that mode — what it will **not** do is
+  set the group, and without that an unprivileged daemon cannot read its own
+  configuration. The last bit is traversal for sshd and timesyncd, below.
+- For `privilege = "host-admin"`, tells sshd to read `/etc/wiretap-appliance/ssh/<user>`,
+  where the SSH screen's authorised keys go, through
+  `/etc/ssh/sshd_config.d/50-wiretap-appliance.conf` — checked with `sshd -t` where that
+  check passes on its own, and taken back out on purge. An unprivileged daemon
+  cannot keep a file under a directory root owns, so nothing is written and its
+  SSH screen says so.
+- For `privilege = "host-admin"`, links
+  `/etc/systemd/timesyncd.conf.d/90-wiretap-appliance.conf` to
+  `/etc/wiretap-appliance/timesyncd.conf`, where the Clock screen's NTP servers go, and
+  takes the link back out on purge.
+- Enables and starts the unit, and restarts rather than stops-and-starts on an
+  upgrade.
+- On purge only, removes `/var/lib/wiretap-appliance` and `/etc/wiretap-appliance` and the account.
+
+It does **not** write a `config.toml`. Every bootstrap setting has a default and
+an absent file is supported, so that file is never a conffile and never an
+upgrade prompt. An operator who needs an override creates
+`/etc/wiretap-appliance/config.toml` themselves.
+
+It does **not** generate a TLS certificate, and it must not: the package is
+installed into a pi-gen chroot while the image is assembled, so a certificate
+made here would be one private key shared by every card written from that image,
+named after the build host.
+
+**The daemon makes its own instead**, at first start, when it finds neither
+`cert.pem` nor `key.pem`. Those default to `/var/lib/wiretap-appliance/` rather than
+`/etc/wiretap-appliance/`, because this directory is `root:wiretap-appliance` mode `0751` — an
+unprivileged daemon can read it and cannot write it, and widening that would let
+everyone in the `wiretap-appliance` group rewrite the daemon's configuration.
+
+To supply your own instead, name it in `/etc/wiretap-appliance/config.toml`:
+
+```toml
+[tls]
+cert = "/etc/wiretap-appliance/cert.pem"
+key = "/etc/wiretap-appliance/key.pem"
+```
+
+Put both files there, owned `root:wiretap-appliance` with the key `0640`. With both
+present nothing is generated. **The directory lets every account traverse it**
+— sshd opens the SSH screen's authorised keys, kept under it, as the account
+logging in — so a file in here is as private as its own mode: `0640` for the
+key, and for a `config.toml` whose `[app]` table holds anything a local account
+should not read; the daemon warns at start when that file is readable by
+everyone. **Supply both or neither** — a pair you named that
+is missing a half, or will not load, refuses to start rather than being moved
+aside and replaced, which is what the daemon does to a pair of its own. The
+other way to a real certificate needs no file at all: Settings → Certificate
+installs one from the browser, into the daemon's own directory.

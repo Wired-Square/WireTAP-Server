@@ -1,0 +1,58 @@
+# A developer's card, never a shipped one — and where the build box goes.
+#
+# Chassis-owned and rewritten by every render; `config.local` beside it is
+# yours and git-ignored. Unless `[image]` in appliance.toml names a key, the
+# rendered `config` ships no shell account and no SSH, so the only way to
+# reach the control socket — and so to make the first administrator — is from
+# a console nobody can log in to. Copy this to
+# `config.local`, which `build-image.sh` appends after `config`, put your own
+# public key in it, and the card you write can be signed into over SSH as root.
+#
+# A key and never a password: root has no password to guess, and sshd's
+# default lets root in by key and no other way.
+
+ENABLE_SSH=1
+PUBKEY_SSH_ROOT='ssh-ed25519 AAAA… you@host'
+
+# A key here names the image `<name>-dev`, which also keys pi-gen's work
+# directory: a developer's build and a release build keep two rootfs trees.
+
+# The unprivileged alternative, which the stage also supports: a first user
+# with a key, a login shell, and passwordless sudo for the socket. Not
+# `operator`, `staff` or `users` — Debian base groups, which `adduser` refuses
+# as user names.
+#
+# FIRST_USER_NAME='dev'
+# PUBKEY_SSH_FIRST_USER='ssh-ed25519 AAAA… you@host'
+# PUBKEY_ONLY_SSH=1
+# PASSWORDLESS_SUDO=1
+
+# The product's Tailscale auth key: with `[image.tailscale]` in appliance.toml,
+# every card written from the image tries to join the product's tailnet at
+# every boot, and every five minutes within one, until it does, then deletes
+# the key. **A secret**, and so is every image built with it. It does not name
+# the image `<name>-dev`: a release carries it.
+#
+# Make the key for the image, not for one card: reusable, tagged, and expiring
+# after the last card written from the image has first booted. Tailscale's
+# admin console caps an auth key at 90 days; once the key expires, the image
+# must be rebuilt with a new one. Log upload to Tailscale stays off either way.
+#
+# build-remote.sh also takes it from its environment, where it wins over this
+# file, as in `op run --env-file=.env -- scaffold/image/build-remote.sh`; a
+# local build-image.sh refuses one from the environment.
+#
+# TAILSCALE_AUTH_KEY=''
+
+# The Linux box `build-remote.sh` and `clean.sh --remote` reach over ssh.
+# pi-gen wants Debian, root, git and loop devices, and `build-remote.sh` wants
+# sudo, rsync and pgrep there; an x86_64 host builds the arm64 image under
+# qemu-user-static, a spare Pi 5 builds it natively and faster. Tens of
+# gigabytes free. `BUILD_DIR` is an absolute path other than `/`, of letters,
+# digits, `.`, `_`, `/` and `-`, with no `.`, `..` or empty component; an IPv6
+# box wants a Host alias in ~/.ssh/config. All three may come from the
+# environment instead, where they win over this file.
+#
+# BUILD_HOST=10.0.0.56
+# BUILD_USER=root
+# BUILD_DIR=/root/wiretap-appliance

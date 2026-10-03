@@ -1,0 +1,63 @@
+# The WireTAP appliance's system identity, rendered into `scaffold/` by
+# `appliance-xtask packaging render`. The reasoning behind each field is in the
+# chassis's `scaffold/appliance.toml.example`; this file is the values.
+#
+# `name` and `env_prefix` must match `NAME` and `ENV_PREFIX` in
+# `crates/wiretap-appliance/src/main.rs`; nothing checks that they do.
+
+name = "wiretap-appliance"
+binary = "wiretap-appliance"
+user = "wiretap-appliance"
+group = "wiretap-appliance"
+
+config_dir = "/etc/wiretap-appliance"
+state_dir = "/var/lib/wiretap-appliance"
+runtime_dir = "/run/wiretap-appliance"
+socket = "/run/wiretap-appliance/wiretap-appliance.sock"
+env_prefix = "WIRETAP_APPLIANCE"
+
+# The Host, Network and SSH screens talk to hostnamed, NetworkManager and
+# sshd's key file.
+privilege = "host-admin"
+
+address_families = []
+capabilities = []
+
+bind_address = "0.0.0.0"
+https_port = 443
+redirect_port = 80
+
+[package]
+section = "admin"
+maintainer = "Alex Ferrara <alex@wiredsquare.com>"
+description = "administers a WireTAP capture appliance from a browser"
+depends = ["init-system-helpers (>= 1.54)", "adduser", "ca-certificates"]
+# What the Network, SSH and mDNS screens need on the host, and the capture
+# daemon this box exists for; the image installs them all.
+suggests = ["wiretap-server", "network-manager", "bluez", "avahi-daemon", "libnss-mdns"]
+ui_dist = "frontend/dist"
+journal = "persistent"
+# Just under a known-good static build; raise it when the real size moves.
+min_binary_bytes = 14_000_000
+
+[image]
+pi_gen_ref = "arm64"
+release = "trixie"
+hostname_prefix = "wiretap"
+locale = "en_AU.UTF-8"
+timezone = "Australia/Sydney"
+wpa_country = "AU"
+link_local = true
+# Both radios off until somebody turns one on from the Network screen. Soft,
+# as the chassis does it: never a disable-wifi or disable-bt overlay.
+wifi = false
+bluetooth = false
+
+# No account and no SSH on a shipped card. A developer's card gets a root key
+# through the git-ignored `scaffold/image/config.local`; see the example beside
+# it.
+
+# Tailscale on the image, unenrolled, against Tailscale's own control server.
+# Cards join by themselves once `TAILSCALE_AUTH_KEY` is in `config.local`, or
+# when an administrator enrols one from the Network screen.
+[image.tailscale]

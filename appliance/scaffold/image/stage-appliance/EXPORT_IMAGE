@@ -1,0 +1,7 @@
+# Chassis-owned. Its presence is what makes pi-gen write an image after this
+# stage rather than only leaving a root filesystem behind.
+#
+# `IMG_SUFFIX` is empty on purpose: this stage is the only one exporting, so the
+# image is named for the product and its build rather than for a stage nobody
+# outside pi-gen has heard of.
+IMG_SUFFIX=""

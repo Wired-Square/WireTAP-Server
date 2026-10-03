@@ -30,10 +30,10 @@ __pycache__/
 # Appliance image build. pi-gen clones itself here and writes multi-gigabyte
 # work trees; config.local carries the operator's SSH public key, which is the
 # half of the image config that must not be tracked.
-packaging/image/pi-gen/
-packaging/image/work/
-packaging/image/deploy/
-packaging/image/config.local
+appliance/scaffold/image/pi-gen/
+appliance/scaffold/image/work/
+appliance/scaffold/image/deploy/
+appliance/scaffold/image/config.local
 
 # Release artefacts
 *.deb

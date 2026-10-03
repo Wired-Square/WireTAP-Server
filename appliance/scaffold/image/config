@@ -1,0 +1,64 @@
+# pi-gen's own configuration for wiretap-appliance.
+#
+# Chassis-owned and rewritten by every render. Put a deploy target or a shell
+# account in `config.local` beside this file, which is gitignored and appended
+# after this one, so it wins.
+
+IMG_NAME='wiretap-appliance'
+RELEASE='trixie'
+
+# **stage2 and no further.** stage3 upward is a desktop, and an appliance that
+# ships a window manager it never draws on is a bigger card, a longer build and
+# more to patch. The chassis's own stage is last, and `build-image.sh` puts a
+# `SKIP_IMAGES` marker in stage2 — it carries an `EXPORT_IMAGE` of its own, so
+# without that pi-gen writes two images and only one of them is the appliance.
+STAGE_LIST='stage0 stage1 stage2 stage-appliance'
+
+# The name every card gets before it renames itself. **This is not the name the
+# box answers to**: `00-appliance` installs a first-boot unit that appends the
+# board's serial, because a fleet whose members are all called
+# `wiretap` cannot be told apart on one network.
+TARGET_HOSTNAME='wiretap'
+
+LOCALE_DEFAULT='en_AU.UTF-8'
+TIMEZONE_DEFAULT='Australia/Sydney'
+WPA_COUNTRY='AU'
+KEYBOARD_KEYMAP='us'
+KEYBOARD_LAYOUT='English (US)'
+
+# ---------------------------------------------------------------------------
+# The shell account, which is pi-gen's decision more than ours
+# ---------------------------------------------------------------------------
+# **pi-gen always creates a first user**, defaulting to `pi`; there is no
+# setting that means "no account at all". What is controllable is whether it has
+# a password, and this ships none: `stage1` always creates the account with
+# `--disabled-login`, and only runs `chpasswd` afterwards when `FIRST_USER_PASS`
+# is set. Leaving it unset is what stops a card leaving with a credential every
+# other card also has.
+#
+# **`DISABLE_FIRST_BOOT_USER_RENAME` is deliberately not set here.** Setting it
+# to 1 makes `build.sh` refuse to start unless `FIRST_USER_PASS` is also set —
+# it says so and exits 1 — so the two are one decision and both belong to the
+# consumer. Left unset, the account-setup wizard it controls would be installed
+# by `export-image`; `build-image.sh` skips that substage instead, and says why.
+#
+# ---------------------------------------------------------------------------
+# The way in, if there is one
+# ---------------------------------------------------------------------------
+# Rendered from `[image]` in `appliance.toml` — `root_ssh_key`, `first_user`,
+# `first_user_ssh_key`, `passwordless_sudo` — and a key and never a password.
+# With none of them set this is `ENABLE_SSH=0` and a card has no way in but a
+# console, which is the shape a shipped appliance wants. A developer's own key
+# goes in `config.local`, spelled the same way, and wins because it is sourced
+# last.
+#
+# `PUBKEY_SSH_ROOT` is `00-appliance`'s rather than pi-gen's: sshd's Debian
+# default admits root by key and nothing else, so it needs no account, no shell
+# and no sudo. It is declared for export because pi-gen runs each stage script
+# as a child process, and a name `config.local` merely assigned would never
+# reach it. The first-user form is pi-gen's own, except that `00-appliance`
+# gives that user the login shell pi-gen grants only alongside a password.
+ENABLE_SSH=0
+export PUBKEY_SSH_ROOT
+
+DEPLOY_COMPRESSION='xz'

@@ -1,0 +1,108 @@
+# How to change the wiretap-appliance unit without editing it.
+#
+# **This file is chassis-owned and is rewritten by every `packaging render`.**
+# It is also a `.sample` rather than a `.conf`, so systemd ignores it even if
+# the whole directory is installed — copy it to a file named for what it does,
+# `10-serial-device.conf` say, and edit that. Not `10-local.conf`: that is the
+# name an operator reaches for under /etc/systemd/system/, where their file
+# would mask a shipped one of the same name wholesale. Files you add here are
+# never written by the chassis, which is
+# the whole arrangement: the unit beside this directory is regenerated, and
+# everything a product wants to say about it lives in here instead. **Every
+# `*.conf` in this directory ships**: `make-deb.sh` stages them into
+# `/usr/lib/systemd/system/wiretap-appliance.service.d/`, and this sample stays behind.
+#
+# Drop-ins are read in lexical order after the unit itself, so `10-` before
+# `20-`, and the last word wins for the directives where winning is the model.
+#
+# ---------------------------------------------------------------------------
+# Three kinds of directive, and they do not behave the same way
+# ---------------------------------------------------------------------------
+# This is the part that catches people, because a drop-in looks like an
+# override and is only sometimes one.
+#
+# **1. A scalar is last-wins.** `Restart=`, `User=`, `PrivateDevices=` and the
+# rest of the booleans. Assigning it again is all there is to it:
+#
+#     [Service]
+#     PrivateDevices=no
+#
+# **2. A list accumulates.** `Environment=`, `ReadWritePaths=`, `DeviceAllow=`,
+# `RestrictAddressFamilies=`, `CapabilityBoundingSet=`. A second assignment adds
+# to the first rather than replacing it, so this *widens* the unit:
+#
+#     [Service]
+#     ReadWritePaths=/var/lib/wiretap-appliance-spool
+#
+# **3. A list you want to replace has to be reset first**, with one empty
+# assignment, and then set. Without the reset you get the union of both, which
+# for an address-family or capability list means the sandbox you were trying to
+# narrow is still as wide as it was:
+#
+#     [Service]
+#     RestrictAddressFamilies=
+#     RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+#
+# **`ExecStart=` is the one where getting this wrong stops the unit.** It is a
+# list, and unless `Type=` is `oneshot` systemd refuses more than one entry —
+# which this unit's `Type=exec` is not. So a drop-in that assigns it without the
+# reset is a unit that fails to start rather than one that quietly does the
+# wrong thing. That failure is the good case.
+#
+#     [Service]
+#     ExecStart=
+#     ExecStart=/usr/bin/wiretap-appliance --some-flag
+#
+# Prefer not to. `ExecStart` is a bare binary on purpose — every path it could
+# name is already resolved from the unit's own directories — and a flag added
+# here is a flag `config.toml` should be answering.
+#
+# ---------------------------------------------------------------------------
+# What a drop-in cannot do
+# ---------------------------------------------------------------------------
+# **Remove a dependency.** systemd.unit(5) is explicit that `After=`, `Wants=`
+# and the rest cannot be reset to an empty list — so this unit's
+# `network-online.target` can be added to and never taken off. Dropping one
+# means overriding the whole unit, which is the thing this arrangement exists
+# to avoid.
+#
+# That is the real limit, and it is worth separating from one that looks like
+# it and is not: a boolean the chassis sets, such as `ProtectClock=yes`, *can*
+# be undone — `ProtectClock=no` is the default and puts it back exactly. So
+# "the chassis set this and I cannot unset it" applies to dependencies, not to
+# the sandbox.
+#
+# If a product genuinely needs the chassis to stop emitting something, that is
+# a knob missing from `appliance.toml` and a change to this repository, not a
+# workaround here.
+#
+# ---------------------------------------------------------------------------
+# A worked example: an appliance with a serial-attached device
+# ---------------------------------------------------------------------------
+# Copy to `10-serial-device.conf`, keeping only the lines you need.
+#
+#     [Service]
+#     # A scalar: last-wins, no reset.
+#     PrivateDevices=no
+#     # A list: accumulates, so this adds to whatever the unit already allows.
+#     DeviceAllow=/dev/ttyUSB0 rw
+#     # A list being narrowed rather than widened, so it is reset first.
+#     RestrictAddressFamilies=
+#     RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+#
+# ---------------------------------------------------------------------------
+# One caveat, stated rather than glossed
+# ---------------------------------------------------------------------------
+# **systemd.syntax(7) is explicit that whether a setting accumulates is
+# per-setting, and is documented on the setting or not at all.** Of the ones
+# named above, systemd.exec(5) documents the merge for `CapabilityBoundingSet=`
+# ("the bounding sets are merged by OR"), `AmbientCapabilities=`,
+# `Environment=` and `ReadWritePaths=`. For `RestrictAddressFamilies=` it
+# documents only the empty-string reset — so the accumulate half of that one is
+# observed behaviour rather than a promise. `DeviceAllow=` is
+# systemd.resource-control(5), not systemd.exec(5).
+#
+# None of it has been verified on a real board by anyone working on this
+# chassis. Check the unit you actually get with `systemctl cat
+# wiretap-appliance.service`, and the sandbox you actually get with `systemd-analyze
+# security wiretap-appliance.service`, before hanging a security property off a drop-in.

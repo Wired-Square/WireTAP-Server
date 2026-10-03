@@ -1,0 +1,88 @@
+#!/bin/sh
+# Chassis-owned. `appliance-xtask packaging render` rewrites this file
+# unconditionally, every time.
+#
+# **There is no postrm hook directory, and that is not an oversight.** Debian
+# Policy 6.5 has postrm run *after* the package's files have been removed — so
+# anything shipped under /usr/share/wiretap-appliance/postrm.d/ is already deleted by the
+# time this script could call it, and the directory with it. `prerm` is the last
+# window a product's own code can run in. See hooks.README.
+set -e
+
+NAME='wiretap-appliance'
+USER='wiretap-appliance'
+GROUP='wiretap-appliance'
+CONFIG_DIR='/etc/wiretap-appliance'
+STATE_DIR='/var/lib/wiretap-appliance'
+
+# The two directories this script deletes are spelled from appliance.toml rather
+# than assembled here, and single-quoted. A postrm that builds a path by
+# concatenation is one `rm -rf` away from deleting the wrong thing on a box
+# whose configuration it half-understood.
+
+case "$1" in
+purge)
+    # **Purge, and only purge.** `remove` leaves the database and the
+    # certificate alone, because reinstalling an appliance is something an
+    # operator does to fix it and losing every account in the process is not
+    # what they asked for. dpkg's own distinction, kept rather than blurred.
+    rm -rf "$STATE_DIR"
+    rm -rf "$CONFIG_DIR"
+
+    # With the key directory gone, the line telling sshd to read it goes too.
+    # Purge and not remove, for the reason above: until the purge the keys are
+    # still there, and somebody who authorised one expects it to keep working.
+    if [ -f "/etc/ssh/sshd_config.d/50-$NAME.conf" ]; then
+        rm -f "/etc/ssh/sshd_config.d/50-$NAME.conf"
+        if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+            deb-systemd-invoke reload ssh.service >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # And the link telling timesyncd to read the NTP servers, for the same
+    # reason; a running timesyncd is restarted onto the image's own.
+    if [ -L "/etc/systemd/timesyncd.conf.d/90-$NAME.conf" ]; then
+        rm -f "/etc/systemd/timesyncd.conf.d/90-$NAME.conf"
+        if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+            deb-systemd-invoke try-restart systemd-timesyncd.service >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # The account goes last, after the files it owned. Guarded twice: `adduser`
+    # is not Essential, and Policy allows a postrm to assume only Essential
+    # packages — so a box without it must still purge cleanly rather than
+    # leaving the package half-removed.
+    if command -v deluser >/dev/null && getent passwd "$USER" >/dev/null; then
+        deluser --system "$USER" >/dev/null || true
+    fi
+    if command -v delgroup >/dev/null && getent group "$GROUP" >/dev/null; then
+        delgroup --system "$GROUP" >/dev/null || true
+    fi
+
+    if [ -z "${DPKG_ROOT:-}" ] && [ -x /usr/bin/deb-systemd-helper ]; then
+        deb-systemd-helper purge "$NAME.service" >/dev/null || true
+        deb-systemd-helper unmask "$NAME.service" >/dev/null || true
+    fi
+    ;;
+
+remove)
+    # **Nothing is masked here.** debhelper stopped masking units on removal in
+    # 13.10: it existed for SysV init scripts shipped as conffiles that survived
+    # a `remove`, and this package ships none. Masking would leave
+    # /etc/systemd/system/<name>.service pointing at /dev/null after `apt
+    # remove`, until a purge that may never come.
+    ;;
+
+upgrade | failed-upgrade | abort-install | abort-upgrade | disappear) ;;
+
+*)
+    echo "postrm called with unknown argument \`$1'" >&2
+    exit 1
+    ;;
+esac
+
+if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+
+exit 0

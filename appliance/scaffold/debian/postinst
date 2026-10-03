@@ -1,0 +1,247 @@
+#!/bin/sh
+# Chassis-owned. `appliance-xtask packaging render` rewrites this file
+# unconditionally, every time. Put product-specific steps in
+# /usr/share/wiretap-appliance/postinst.d/ instead — see hooks.README beside this file.
+set -e
+
+NAME='wiretap-appliance'
+USER='wiretap-appliance'
+GROUP='wiretap-appliance'
+CONFIG_DIR='/etc/wiretap-appliance'
+HOOK_DIR='/usr/share/wiretap-appliance/postinst.d'
+
+# Every value above is single-quoted, and `appliance-xtask` holds the path
+# components to a character set with no shell metacharacters in it. Both halves
+# are needed: this file is run as root, and an unquoted `CONFIG_DIR=/etc/my
+# appliance` is a script that runs the command `appliance`.
+
+case "$1" in
+configure)
+    # ---------------------------------------------------------------------
+    # The account and the group
+    # ---------------------------------------------------------------------
+    # **The group is created for both privilege shapes**, including the one
+    # whose daemon runs as root. It is not the daemon's identity, it is the
+    # control socket's authority: the socket is 0660 owned by this group, and
+    # adding an operator to it is the whole grant. A root daemon changes who the
+    # process is, not who may open the socket.
+    #
+    # `adduser` is in Depends because of these two lines: it is Priority
+    # important rather than Essential, so a minbase or container rootfs may not
+    # have it, and these calls are unguarded.
+    if ! getent group "$GROUP" >/dev/null; then
+        addgroup --system "$GROUP"
+    fi
+    if ! getent passwd "$USER" >/dev/null; then
+        adduser --system --ingroup "$GROUP" --no-create-home \
+            --home /nonexistent --shell /usr/sbin/nologin "$USER"
+    fi
+
+    # ---------------------------------------------------------------------
+    # The configuration directory, which systemd will NOT do for us
+    # ---------------------------------------------------------------------
+    # systemd chowns StateDirectory= and RuntimeDirectory= to the unit's User=
+    # and Group=. systemd.exec(5) documents, in one subordinate clause, that it
+    # deliberately does **not** do this for ConfigurationDirectory= — it creates
+    # the directory as root and, if it already exists, only logs that the mode
+    # differs.
+    #
+    # So this is the only place the ownership can be set, and without it an
+    # unprivileged daemon cannot read its own config.toml — it would be "other"
+    # against the directory and unable even to traverse it. The unit renders
+    # ConfigurationDirectoryMode=0751 to match, so systemd has nothing to
+    # complain about on every start.
+    #
+    # 0751 and not 0750: sshd opens an authorised-keys file *as the account
+    # logging in*, and timesyncd the NTP servers as its own user, and both
+    # are under this directory, so every account has to be able to traverse
+    # it. Traverse, not list or read — what
+    # is readable in here is what its owner made readable.
+    #
+    # It is re-asserted on every configure, deliberately — the reason it exists
+    # is that nothing else maintains it. An operator who wants different
+    # ownership should use dpkg-statoverride, which is the mechanism for exactly
+    # that and which this deliberately does not fight.
+    install -d -o root -g "$GROUP" -m 0751 "$CONFIG_DIR"
+
+    # **No certificate is generated here, and that is a decision rather than an
+    # omission.** The obvious thing — generate a self-signed pair when none is
+    # present — is wrong for the deployment path this chassis is built for: the
+    # package is installed into a pi-gen chroot while the image is assembled, so
+    # postinst runs once, on the build host, and every card written from that
+    # image ships the same private key. It would also name the builder's
+    # hostname, which is not the name the box answers to after it renames itself
+    # at first boot.
+    #
+    # **The daemon makes its own instead**, at first start, when it finds
+    # neither half. It is the only actor certain to run on the real box, after
+    # it has renamed itself. The pair defaults under the state directory rather
+    # than the configuration one, because that is the directory every daemon
+    # can write — see hooks.README beside this file.
+
+    # **No config.toml is shipped or written.** Every bootstrap setting has a
+    # default and an absent file is a supported state, so that file is never a
+    # conffile and never a dpkg prompt. An operator who needs to override
+    # something creates $CONFIG_DIR/config.toml themselves. What a product ships
+    # under /etc through `[package.files]` is a conffile in the ordinary way.
+
+    # The state directory is deliberately not created here: StateDirectory= in
+    # the unit makes it, 0700, owned by the daemon. Two authorities for one
+    # directory is how the modes drift.
+
+    # ---------------------------------------------------------------------
+    # The keys the SSH screen authorises, which sshd has to be told to read
+    # ---------------------------------------------------------------------
+    # Written here rather than shipped, because its worth depends on a check
+    # only a running box can make. The two defaults are re-listed:
+    # AuthorizedKeysFile replaces rather than appends, so named alone every key
+    # anybody added by hand would stop working. %u and never one file, or every
+    # key here would log in as every account that authenticates by key. A box
+    # with no sshd has no keys to manage, which is not a failed install.
+    #
+    # sshd -t is asked before the write as well as after, and only a
+    # configuration that passed before and fails after is this file's doing: the
+    # check fails on its own in the pi-gen chroot, which has no host keys, and
+    # on a box whose sshd is stopped, which has no /run/sshd. In both the file
+    # is left for the image's own check or the next start to read.
+    DROPIN="/etc/ssh/sshd_config.d/50-$NAME.conf"
+    if command -v sshd >/dev/null 2>&1 && [ -d /etc/ssh/sshd_config.d ]; then
+        WANTED="# Written by $NAME's postinst. Keys authorised from its SSH screen are in
+# $CONFIG_DIR/ssh/<user>; the first two entries are sshd's own defaults and
+# must stay, or keys added by hand stop working.
+AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2 $CONFIG_DIR/ssh/%u"
+        if ! printf '%s\n' "$WANTED" | cmp -s - "$DROPIN"; then
+            CHECKABLE=
+            if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ] && sshd -t 2>/dev/null; then
+                CHECKABLE=yes
+            fi
+            printf '%s\n' "$WANTED" > "$DROPIN.tmp" && mv "$DROPIN.tmp" "$DROPIN"
+            if [ -n "$CHECKABLE" ]; then
+                if sshd -t 2>/dev/null; then
+                    deb-systemd-invoke try-reload-or-restart ssh.service >/dev/null 2>&1 || true
+                else
+                    rm -f "$DROPIN"
+                    echo "$NAME: warning: sshd -t refused $DROPIN, so it was removed; keys authorised from the SSH screen will not log in until it is" >&2
+                fi
+            fi
+            # Accepted is not in force: an earlier-sorting drop-in that names
+            # AuthorizedKeysFile wins, and sshd -t would not say. sshd -G prints
+            # what applies, with no host keys and no /run/sshd needed; a
+            # warning, because that other file is its owner's to change.
+            if [ -f "$DROPIN" ] && EFFECTIVE=$(sshd -G 2>/dev/null); then
+                printf '%s\n' "$EFFECTIVE" | grep -qxF "authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2 $CONFIG_DIR/ssh/%u" ||
+                    echo "$NAME: warning: another sshd drop-in sets AuthorizedKeysFile ahead of $DROPIN, so keys authorised from the SSH screen will not log in — check: sshd -G | grep authorizedkeysfile" >&2
+            fi
+        fi
+    fi
+
+    # ---------------------------------------------------------------------
+    # The NTP servers the Clock screen sets, which timesyncd has to be told to read
+    # ---------------------------------------------------------------------
+    # A link, because the daemon rewrites the file and cannot write
+    # /etc/systemd. 90 so the file's reset of NTP= follows the image's own
+    # drop-ins. Made whether or not timesyncd is installed yet, since a later
+    # stage may add it; the daemon checks for its unit file before offering
+    # the servers.
+    [ -e "$CONFIG_DIR/timesyncd.conf" ] || install -m 0644 /dev/null "$CONFIG_DIR/timesyncd.conf"
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    ln -sfn "$CONFIG_DIR/timesyncd.conf" "/etc/systemd/timesyncd.conf.d/90-$NAME.conf"
+
+    # ---------------------------------------------------------------------
+    # A journal that survives the thing it records
+    # ---------------------------------------------------------------------
+    # The shipped drop-in sets Storage=persistent above the distribution's own
+    # files. journald reads it at its next start, and will not move to /var
+    # until the flush flag exists — so both are done here, and before the
+    # daemon is restarted below, so its own start-up lines land in the journal
+    # that survives. journald makes /var/log/journal itself.
+    #
+    # Nothing here runs in the pi-gen chroot: there is no journald to restart,
+    # and the drop-in is in the image for the first real boot to read.
+    # deb-systemd-invoke rather than systemctl, so policy-rc.d can veto it.
+    if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+        deb-systemd-invoke restart systemd-journald.service >/dev/null 2>&1 || true
+        journalctl --flush >/dev/null 2>&1 || true
+
+        # Verified rather than assumed, and a warning rather than a failure: a
+        # drop-in sorting after this one may win, and that is its owner's to
+        # do. The *last* Storage= is the effective one; the main journald.conf
+        # is read first and cannot be it.
+        if command -v systemd-analyze >/dev/null 2>&1; then
+            EFFECTIVE=$(systemd-analyze cat-config systemd/journald.conf 2>/dev/null |
+                sed -nE 's/^[[:space:]]*Storage[[:space:]]*=[[:space:]]*([a-z]+).*/\1/p' | tail -n 1)
+            if [ "$EFFECTIVE" != "persistent" ]; then
+                echo "$NAME: warning: journald's effective Storage= is ${EFFECTIVE:-unset}, not persistent, so the daemon's log may not survive a restart — check: systemd-analyze cat-config systemd/journald.conf" >&2
+            fi
+        fi
+    fi
+
+    # ---------------------------------------------------------------------
+    # Hooks
+    # ---------------------------------------------------------------------
+    # A product's own steps go in $HOOK_DIR as numbered executables. Nothing in
+    # the chassis writes that directory, so nothing there is lost when this file
+    # is regenerated.
+    #
+    # **--exit-on-error, and a failing hook fails the install.** run-parts
+    # otherwise runs every script and reports afterwards, which for a migration
+    # means the second one running against what the first did not finish. A
+    # refused upgrade is recoverable; a half-migrated appliance in the field is
+    # somebody driving to it. `set -e` above turns that non-zero into a failed
+    # configure, which is what leaves dpkg saying so.
+    #
+    # **These run while the old daemon is still up**, because prerm does not
+    # stop it on an upgrade. A hook must not touch the database — see
+    # hooks.README.
+    if [ -d "$HOOK_DIR" ]; then
+        run-parts --exit-on-error --arg="$1" --arg="$2" "$HOOK_DIR"
+    fi
+    ;;
+
+abort-upgrade | abort-remove | abort-deconfigure) ;;
+
+*)
+    # dpkg calls a postinst with `triggered <name>` once a package declares a
+    # triggers file. Nothing here does, so this arm is unreachable — but a
+    # product that adds one must extend this case rather than discover it as a
+    # failed configure.
+    echo "postinst called with unknown argument \`$1'" >&2
+    exit 1
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# The unit
+# ---------------------------------------------------------------------------
+# **Outside the case, and on purpose.** debhelper runs the enable and restart
+# blocks for `configure` *and* for all three abort arguments, because an aborted
+# removal is a package that is staying — and if this only ran under `configure`,
+# a conflicting package whose unpack failed would leave the appliance stopped
+# with nothing to start it again.
+#
+# `DPKG_ROOT` is set when dpkg is operating on a filesystem that is not this
+# one, which is exactly what the pi-gen stage does. Enabling a unit in the
+# builder's own systemd would be the wrong machine entirely.
+if [ -z "${DPKG_ROOT:-}" ] && [ -x /usr/bin/deb-systemd-helper ]; then
+    # An appliance is installed to run, so it is enabled rather than left for
+    # somebody to notice. update-state on an upgrade preserves a deliberate
+    # `systemctl disable`.
+    deb-systemd-helper unmask "$NAME.service" >/dev/null || true
+    if deb-systemd-helper --quiet was-enabled "$NAME.service"; then
+        deb-systemd-helper enable "$NAME.service" >/dev/null || true
+    else
+        deb-systemd-helper update-state "$NAME.service" >/dev/null || true
+    fi
+fi
+
+if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+    if [ -n "$2" ]; then
+        # An upgrade. try-restart leaves a stopped appliance stopped.
+        deb-systemd-invoke try-restart "$NAME.service" >/dev/null || true
+    else
+        deb-systemd-invoke start "$NAME.service" >/dev/null || true
+    fi
+fi
+
+exit 0

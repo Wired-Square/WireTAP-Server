@@ -463,3 +463,113 @@ jobs:
             --build-arg "WIRETAP_BUILD_ID=g${GITHUB_SHA:0:12}" \
             --output type=cacheonly \
             .
+
+  # The Raspberry Pi appliance: a workspace of its own on the private chassis,
+  # fetched with the organisation's read-only deploy key, so these three jobs
+  # fail on a fork and nothing above needs the key. The chassis's own gates.yml
+  # runs cargo at the repository root and has no input for a subdirectory,
+  # which is why its gates are written out here.
+  appliance:
+    name: Appliance gates
+    runs-on: ubuntu-latest
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    defaults:
+      run:
+        working-directory: appliance
+    steps:
+      - uses: actions/checkout@v7
+
+      - &reach
+        name: Reach the chassis
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.WSLIB_APPLIANCE_DEPLOYMENT_KEY }}
+
+      # cargo then shells out to git, whose ssh the agent answers.
+      - &fetch
+        name: Fetch the chassis over SSH
+        run: git config --global url."ssh://git@github.com/Wired-Square/appliance-rpi-bootstrap".insteadOf "https://github.com/Wired-Square/appliance-rpi-bootstrap"
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustup target add aarch64-unknown-linux-musl
+          echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
+
+      # The root's .cargo/config.toml points the musl CC at packaging/zigcc.
+      - name: Install zig, the musl C cross-compiler
+        uses: ./.github/actions/zig-toolchain
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            appliance/target
+          key: ${{ runner.os }}-cargo-appliance-${{ env.RUSTC_VERSION }}-${{ hashFiles('appliance/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-appliance-${{ env.RUSTC_VERSION }}-
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo clippy (aarch64 musl)
+        run: cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  appliance-browser:
+    name: Appliance browser half
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: appliance/frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      # The lockfile resolves the chassis's package over git+ssh.
+      - *reach
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: appliance/frontend/package-lock.json
+
+      - name: Install exactly the lockfile
+        run: npm ci
+
+      - name: Typecheck and build
+        run: npm run ci
+
+  appliance-packaging:
+    name: Appliance packaging
+    runs-on: ubuntu-latest
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    defaults:
+      run:
+        working-directory: appliance
+    steps:
+      - uses: actions/checkout@v7
+      - *reach
+      - *fetch
+
+      # The rev is the lockfile's, so the pin lives in one place fewer.
+      - name: Install appliance-xtask at the pinned chassis
+        run: |
+          rev="$(grep -om1 'appliance-rpi-bootstrap\.git?[^#"]*#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)"
+          cargo install --locked --git https://github.com/Wired-Square/appliance-rpi-bootstrap.git --rev "$rev" appliance-xtask
+
+      # A hand-edit to a chassis-owned file is a bug report about a knob.
+      - name: Scaffold is what the chassis renders
+        run: appliance-xtask packaging diff
+
+      - name: Image verify checks
+        run: scaffold/image/tests/run-verify-tests.sh
