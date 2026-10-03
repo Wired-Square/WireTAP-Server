@@ -32,8 +32,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-
 # `bundled` compiles SQLite in, so the .deb depends on no libsqlite3 and the
 # musl cross-build has nothing to find on the host.
 rusqlite = { workspace = true, features = ["bundled"] }
+# `assignments.json`. wiretap-catalog links it already.
+serde_json.workspace = true
 subtle.workspace = true
-# Only for naming the errno an open failed with.
+# For naming the errno an open failed with, and the host's own name.
 libc = "0.2"
 tracing.workspace = true
 # No `env-filter`: the level comes from the config file, and RUST_LOG would

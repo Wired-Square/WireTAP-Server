@@ -4,13 +4,49 @@
 use std::io;
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tracing::{error, info};
+use wiretap_catalog::LineSettings;
 use wiretap_io::serial::{self, Access, SerialError, SerialEvent, SerialOptions, SerialTask};
-use wiretap_model::Sample;
+use wiretap_model::{Sample, SourceId};
 
 use super::modbus::RtuTap;
 use super::raw::RawTap;
+use crate::catalogues::Rules;
 use crate::settings::SerialSettings;
+
+/// A line's framer, and the catalogue rules it follows.
+pub struct Framed {
+    tap: RtuTap,
+    rules: watch::Receiver<Rules>,
+    current: Rules,
+}
+
+impl Framed {
+    pub fn new(bus: SourceId, line: LineSettings, mut rules: watch::Receiver<Rules>) -> Self {
+        let current = rules.borrow_and_update().clone();
+        Self {
+            tap: RtuTap::new(bus, line, current.catalogue()),
+            rules,
+            current,
+        }
+    }
+
+    /// Rebuilt with the line's latest rules, if they changed.
+    fn follow(&mut self, interface: &str) {
+        if !self.rules.has_changed().unwrap_or(false) {
+            return;
+        }
+        let new = self.rules.borrow_and_update().clone();
+        info!(
+            "{interface}: catalogue {} → {}",
+            self.current.source(),
+            new.source()
+        );
+        self.tap.reframe(new.catalogue());
+        self.current = new;
+    }
+}
 
 pub fn open(path: &str, line: &SerialSettings) -> io::Result<SerialTask> {
     let options = SerialOptions {
@@ -33,7 +69,7 @@ pub fn open(path: &str, line: &SerialSettings) -> io::Result<SerialTask> {
 pub async fn drain(
     interface: String,
     mut task: SerialTask,
-    mut framed: Option<RtuTap>,
+    mut framed: Option<Framed>,
     mut raw: Option<RawTap>,
     mut publish: impl FnMut(Sample),
 ) {
@@ -55,8 +91,11 @@ pub async fn drain(
                         .map(Sample::Serial)
                         .for_each(&mut publish);
                 }
-                if let Some(tap) = &mut framed {
-                    tap.push(&bytes, at)
+                if let Some(framed) = &mut framed {
+                    framed.follow(&interface);
+                    framed
+                        .tap
+                        .push(&bytes, at)
                         .into_iter()
                         .map(Sample::Modbus)
                         .for_each(&mut publish);
@@ -68,8 +107,8 @@ pub async fn drain(
                 if consecutive == 1 {
                     error!("{interface}: {error}; reopening");
                 }
-                if let Some(tap) = &mut framed {
-                    tap.reset();
+                if let Some(framed) = &mut framed {
+                    framed.tap.reset();
                 }
                 lost = true;
             }
@@ -147,12 +186,22 @@ mod tests {
 
     /// The server's path, from the open to what the taps publish.
     fn taps(path: &str, bus: SourceId, framed: bool, raw: bool) -> mpsc::UnboundedReceiver<Sample> {
+        let rules = framed.then(|| watch::channel(Rules::None).1);
+        taps_following(path, bus, rules, raw)
+    }
+
+    fn taps_following(
+        path: &str,
+        bus: SourceId,
+        rules: Option<watch::Receiver<Rules>>,
+        raw: bool,
+    ) -> mpsc::UnboundedReceiver<Sample> {
         let task = open(path, &LINE).expect("open");
         let (samples, received) = mpsc::unbounded_channel();
         tokio::spawn(drain(
             path.to_owned(),
             task,
-            framed.then(|| RtuTap::new(bus, &LINE)),
+            rules.map(|rules| Framed::new(bus, LINE.line, rules)),
             raw.then(|| RawTap::new(bus, LINE.line)),
             move |s| samples.send(s).expect("the test is listening"),
         ));
@@ -251,6 +300,40 @@ mod tests {
             assert_eq!(m.raw, raw);
             assert!(m.crc_valid);
         }
+    }
+
+    /// A dispatch whose first 18 bytes pass CRC too: the search frames 18,
+    /// and the example catalogue's declared length 19.
+    fn dispatch() -> Vec<u8> {
+        let body = [
+            0x00, 0x60, 0x00, 0x00, 0x00, 0x05, 0x0A, 0x00, 0x04, 0x01, 0xBB, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xE5,
+        ];
+        let crc = wiretap_checksum::algorithms::crc16_modbus_checksum(&body);
+        [&body[..], &crc.to_le_bytes()].concat()
+    }
+
+    #[tokio::test]
+    async fn a_new_catalogue_frames_the_reads_after_it() {
+        let mut pty = Pty::new();
+        let (rules, following) = watch::channel(Rules::None);
+        let mut received = taps_following(&pty.slave, SourceId(0), Some(following), false);
+
+        pty.master.write_all(&dispatch()).expect("write");
+        assert_eq!(next(&mut received).await.raw.len(), 18, "the old rules");
+        // The 19th byte read too, so it is the old tap's to drop.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let example = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/examples/sungrow-rs485.catalog.toml"
+        );
+        let catalogue = crate::settings::LineCatalogue::read(example).expect("the example");
+        rules
+            .send(Rules::Etc(catalogue))
+            .expect("the drain follows");
+        pty.master.write_all(&dispatch()).expect("write");
+        assert_eq!(next(&mut received).await.raw, dispatch(), "the new rules");
     }
 
     /// macOS has no termios constant above 230 400 baud.

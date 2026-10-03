@@ -92,8 +92,8 @@ catalog = "/etc/wiretap-server/sungrow-rs485.catalog.toml"
 is one, and the package installs it under
 `/usr/share/doc/wiretap-server/examples/`. The path must be absolute and
 readable by the unit, so keep it in `/etc/wiretap-server/`: a home directory
-or `/tmp` is refused. The catalogue is read once, at startup; restart the
-service after editing it. A catalogue that fails validation stops the server
+or `/tmp` is refused. The file is read once, at startup; restart the service
+after editing it. A catalogue that fails validation stops the server
 from starting, naming the key, and `--check-config` lists each device's
 catalogue with its name and vendor codes.
 
@@ -110,8 +110,26 @@ raw_database = "rs485_raw"
 
 `framing` is not needed for `capture = "raw"`, and a catalogue there is refused.
 Raw chunks reach the gateway over ingest protocol v3, so upgrade the gateway
-first. Only a database that takes raw chunks is forwarded with v3; the rest stay
-on v2.
+first.
+
+Every forward speaks ingest v3 and names this server to the gateway by its
+`daemon_id`, the host's short name unless `[forward]` sets one:
+
+```toml
+[forward]
+daemon_id = "pi-bench"
+```
+
+A gateway that predates v3 is spoken to with v2 instead, except by a database
+that takes raw chunks, which waits for the gateway to be upgraded.
+
+The gateway can assign a catalogue to a serial line, by daemon id and
+interface. The server fetches it, keeps it under its state directory, and
+frames the line with it from the next read, without a restart. A line frames
+with the gateway's catalogue first, then the `catalog` in `/etc`, then none;
+clearing the assignment falls back the same way. The gateway's assignment is
+remembered, so a restart with the gateway down frames as before.
+`--check-config` shows each line's catalogue and where it came from.
 
 Port 23 is the GVRET default and needs `CAP_NET_BIND_SERVICE`; the packaged unit
 grants it.

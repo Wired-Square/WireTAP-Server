@@ -35,6 +35,7 @@ use wiretap_model::{Direction, Sample, SourceId};
 #[cfg(target_os = "linux")]
 use crate::archive::Archive;
 use crate::archive::Archives;
+use crate::catalogues::Catalogues;
 #[cfg(target_os = "linux")]
 use crate::console;
 #[cfg(target_os = "linux")]
@@ -44,9 +45,7 @@ use crate::ingest;
 use crate::settings::Device;
 use crate::settings::{Mode, Settings, TestPattern};
 #[cfg(target_os = "linux")]
-use crate::source::{
-    bus_count, index_for_bus, modbus::RtuTap, raw::RawTap, serial_tap, socketcan, Transmit,
-};
+use crate::source::{bus_count, index_for_bus, raw::RawTap, serial_tap, socketcan, Transmit};
 #[cfg(target_os = "linux")]
 use crate::testpattern;
 
@@ -168,19 +167,19 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
     // and none should start before there is somewhere for frames to go. Their
     // absence is warned about at startup and is a legitimate deployment — a
     // GVRET bridge that archives nothing.
-    let archives = Archives::start_all(&settings.forwards(), settings.stats_interval).map_err(
-        |(path, err)| RunError::Cache {
+    let catalogues = Catalogues::open(settings);
+    let archives = Archives::start_all(&settings.forwards(), settings.stats_interval, &catalogues)
+        .map_err(|(path, err)| RunError::Cache {
             path: path.display().to_string(),
             err: err.to_string(),
-        },
-    )?;
+        })?;
 
     let mut readers = JoinSet::new();
     if settings.devices.is_empty() {
         // No local hardware, so no sockets, no lines and no GVRET listener.
         info!("No devices configured; running ingest-only");
     } else {
-        start_devices(settings, &archives, &mut readers).await?;
+        start_devices(settings, &archives, &catalogues, &mut readers).await?;
     }
 
     if let Some(ingest) = &settings.ingest {
@@ -213,6 +212,7 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
 async fn start_devices(
     settings: &Settings,
     archives: &Archives,
+    catalogues: &Catalogues,
     readers: &mut JoinSet<()>,
 ) -> Result<(), RunError> {
     let (frames, _) = broadcast::channel(FRAME_BACKLOG);
@@ -224,10 +224,9 @@ async fn start_devices(
             path: d.interface.clone(),
             err,
         })?;
-        let catalogue = s
-            .catalogue
-            .as_ref()
-            .map(|c| format!(", catalogue {c}"))
+        let catalogue = catalogues
+            .effective(&d.interface)
+            .map(|r| format!(", catalogue {r}"))
             .unwrap_or_default();
         info!(
             "Tapping {}[{}]  {s}  read-only{catalogue}",
@@ -239,7 +238,9 @@ async fn start_devices(
         readers.spawn(serial_tap::drain(
             d.interface.clone(),
             task,
-            s.framing.map(|_| RtuTap::new(d.bus, s)),
+            catalogues
+                .subscribe(&d.interface)
+                .map(|rules| serial_tap::Framed::new(d.bus, s.line, rules)),
             s.raw_database.as_ref().map(|_| RawTap::new(d.bus, s.line)),
             move |sample| {
                 let archive = match sample {
@@ -262,6 +263,7 @@ async fn start_devices(
 async fn start_devices(
     _settings: &Settings,
     _archives: &Archives,
+    _catalogues: &Catalogues,
     _readers: &mut JoinSet<()>,
 ) -> Result<(), RunError> {
     Err(RunError::NoDeviceCapture)

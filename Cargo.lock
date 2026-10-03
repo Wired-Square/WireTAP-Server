@@ -2681,6 +2681,7 @@ dependencies = [
  "clap",
  "libc",
  "rusqlite",
+ "serde_json",
  "socketcan",
  "subtle",
  "tokio",

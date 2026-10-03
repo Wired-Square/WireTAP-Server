@@ -72,6 +72,12 @@ enable = false
 # its own on first connect.
 # database = ""
 
+# What the gateway calls this server, and keys its catalogue assignments by.
+# The default is the host's short name, lowercased; a name the gateway would
+# refuse stops the server from starting. A lowercase letter or digit, then
+# lowercase letters, digits, ., _ or -, at most 63.
+# daemon_id = "pi-bench"
+
 # --- batching, and the cache that carries a gateway outage ---------------
 # These configure the batcher, not the connection. They are spelled --pg-* on
 # the command line because the Python's forward sink inherited them from its
@@ -171,6 +177,11 @@ enable = false
 # path the unit can read: /etc/wiretap-server/, never a home directory or
 # /tmp. /usr/share/doc/wiretap-server/examples/sungrow-rs485.catalog.toml is
 # one to copy.
+#
+# A catalogue the gateway assigns to the line comes first: it is fetched into
+# the state directory and framed with from the next read, and kept for a
+# restart with the gateway down. Without one the line frames with `catalog`,
+# and without that with none.
 #
 # `capture` chooses what is stored: framed messages, the raw bytes each read
 # returned in chunks of up to 256, or both. Raw chunks go to `raw_database`.

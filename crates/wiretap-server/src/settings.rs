@@ -17,8 +17,9 @@ use std::path::{Path, PathBuf};
 use wiretap_catalog::{rtu_rules, LineSettings, ModbusRtuOptions, Parity};
 use wiretap_model::config::{DeviceSection, FileConfig};
 use wiretap_model::{parse_ifaces, Direction, Secret, SourceId};
-use wiretap_protocol::ingest::valid_database_name;
+use wiretap_protocol::ingest::{self as proto, valid_daemon_id, valid_database_name};
 
+use crate::catalogues::Catalogues;
 use crate::cli::Cli;
 use crate::source::bus_for_index;
 
@@ -38,8 +39,14 @@ pub struct Forward {
     /// Empty means the gateway's default capture database.
     pub database: String,
     pub batching: Batching,
-    /// Whether raw serial can reach this database, which needs protocol v3.
-    /// Otherwise v2, so a gateway older than v3 still takes this server.
+    /// What the gateway knows this daemon by: `[forward] daemon_id`, or the
+    /// host's short name.
+    pub daemon_id: String,
+    /// The devices whose records this database carries, as its HELLO names
+    /// them.
+    pub devices: Vec<proto::Device>,
+    /// Whether raw serial can reach this database. Raw records need protocol
+    /// v3, so such a link never falls back to v2 for an older gateway.
     pub raw_serial: bool,
 }
 
@@ -54,6 +61,15 @@ impl Forward {
             "<default>"
         } else {
             database
+        }
+    }
+
+    /// Where the disk cache lives, which also holds the catalogues the gateway
+    /// assigned.
+    pub fn state_dir(&self) -> PathBuf {
+        match self.batching.cache_path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.to_owned(),
+            _ => PathBuf::from("."),
         }
     }
 
@@ -175,7 +191,12 @@ impl LineCatalogue {
     pub(crate) fn read(path: &str) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read catalog {path}: {e}"))?;
-        let r = rtu_rules(&text).map_err(|e| format!("catalog {path}: {e}"))?;
+        Self::parse(path, &text)
+    }
+
+    /// `text` as [`Self::read`] takes it, from wherever it came.
+    pub(crate) fn parse(path: &str, text: &str) -> Result<Self, String> {
+        let r = rtu_rules(text).map_err(|e| format!("catalog {path}: {e}"))?;
         if r.name.is_empty() {
             return Err(format!(
                 "catalog {path}: meta.name: Catalog name must not be empty"
@@ -626,6 +647,8 @@ impl Forward {
             api_key: Secret::new(cli.forward_api_key.clone().unwrap_or_default()),
             database: cli.forward_database.clone(),
             batching: Batching::from_cli(cli, env),
+            daemon_id: env.hostname.as_deref().map(short_name).unwrap_or_default(),
+            devices: Vec::new(),
             raw_serial: false,
         }
     }
@@ -708,6 +731,7 @@ pub enum SettingsError {
         what: String,
     },
     BadDatabase(String),
+    BadDaemonId(String),
 }
 
 impl fmt::Display for SettingsError {
@@ -736,6 +760,17 @@ impl fmt::Display for SettingsError {
                 f,
                 "database name {d:?} is not what the gateway accepts: \
                  a lowercase letter, then lowercase letters, digits or _, at most 63"
+            ),
+            Self::BadDaemonId(id) if id.is_empty() => write!(
+                f,
+                "[forward] daemon_id defaults to the host's short name, and this host has \
+                 none; set daemon_id"
+            ),
+            Self::BadDaemonId(id) => write!(
+                f,
+                "[forward] daemon_id {id:?} is not what the gateway accepts: a lowercase \
+                 letter or digit, then lowercase letters, digits, ., _ or -, at most 63. \
+                 It defaults to the host's short name; set daemon_id to name this daemon"
             ),
         }
     }
@@ -822,6 +857,7 @@ pub struct Env {
     /// `StateDirectory=` in the unit; `/var/lib/wiretap-server` in the package.
     pub state_dir: Option<String>,
     pub home: Option<String>,
+    pub hostname: Option<String>,
 }
 
 impl Env {
@@ -833,8 +869,25 @@ impl Env {
             cache_path: get("PG_CACHE_PATH"),
             state_dir: get("STATE_DIRECTORY"),
             home: get("HOME"),
+            hostname: hostname(),
         }
     }
+}
+
+fn hostname() -> Option<String> {
+    let mut name = [0u8; 256];
+    // SAFETY: the length passed is the buffer's.
+    if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } != 0 {
+        return None;
+    }
+    let name = std::ffi::CStr::from_bytes_until_nul(&name).ok()?;
+    name.to_str().ok().map(str::to_owned)
+}
+
+/// `Pi-Bench.local` → `pi-bench`.
+fn short_name(hostname: &str) -> String {
+    let label = hostname.split('.').next().unwrap_or_default();
+    label.to_ascii_lowercase()
 }
 
 /// Read and parse a config file.
@@ -926,6 +979,9 @@ impl Settings {
             if !valid_database(&fwd.database) {
                 return Err(SettingsError::BadDatabase(fwd.database.clone()));
             }
+            if !valid_daemon_id(&fwd.daemon_id) {
+                return Err(SettingsError::BadDaemonId(fwd.daemon_id.clone()));
+            }
         }
 
         // Devices last: their defaults — `can_fd`, the database, the bus
@@ -1006,6 +1062,7 @@ impl Settings {
             over(&mut fwd.port, f.forward.port);
             over(&mut fwd.api_key, f.forward.api_key.clone().map(Secret::new));
             over(&mut fwd.database, f.forward.database.clone());
+            over(&mut fwd.daemon_id, f.forward.daemon_id.clone());
 
             let b = &mut fwd.batching;
             over(&mut b.size, f.forward.batch_size);
@@ -1125,15 +1182,28 @@ impl Settings {
         self.databases()
             .iter()
             .map(|db| Forward {
+                devices: self.devices_in(db),
                 raw_serial: self.carries_raw_serial(db),
                 ..forward.for_database(db)
             })
             .collect()
     }
 
-    /// Whether a device's raw stream lands in `database`. Only then is it
-    /// forwarded with v3: turning the ingest listener on must not change the
-    /// protocol a gateway is spoken to with.
+    /// The devices with a stream landing in `database`: a serial line whose
+    /// framed and raw streams land apart is in two.
+    fn devices_in(&self, database: &str) -> Vec<proto::Device> {
+        self.devices
+            .iter()
+            .filter(|d| d.databases().contains(&database))
+            .map(|d| proto::Device {
+                bus: d.bus.0,
+                name: d.interface.clone(),
+            })
+            .collect()
+    }
+
+    /// Whether a device's raw stream lands in `database`, which only protocol
+    /// v3 carries.
     pub fn carries_raw_serial(&self, database: &str) -> bool {
         self.serial_devices()
             .any(|(_, s)| s.raw_database.as_deref() == Some(database))
@@ -1163,18 +1233,15 @@ impl Settings {
 
     /// Label/value pairs for `--check-config`. Env render through
     /// [`Secret`]'s redacting `Display`, so this cannot echo one.
-    fn rows(&self) -> Vec<(&'static str, String)> {
+    fn rows(&self, catalogues: &Catalogues) -> Vec<(&'static str, String)> {
         let mut r = Vec::new();
         if self.devices.is_empty() {
             r.push(("devices", "(none)".to_string()));
         }
         for d in &self.devices {
             r.push(("device", d.to_string()));
-            if let DeviceKind::Serial(SerialSettings {
-                catalogue: Some(c), ..
-            }) = &d.kind
-            {
-                r.push(("  catalogue", format!("{}, {c}", c.path)));
+            if let Some(rules) = catalogues.effective(&d.interface) {
+                r.push(("  catalogue", rules.to_string()));
             }
         }
         r.extend([
@@ -1245,6 +1312,7 @@ impl Settings {
             Some(f) => {
                 r.push(("forward to", format!("{}:{}", f.host, f.port)));
                 r.push(("forward db", database_label(&f.database).to_owned()));
+                r.push(("daemon id", f.daemon_id.clone()));
                 r.push((
                     "forward auth",
                     if f.api_key.is_empty() {
@@ -1286,14 +1354,14 @@ impl Settings {
         }
         r
     }
-}
 
-impl fmt::Display for Settings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (label, value) in self.rows() {
-            writeln!(f, "{label:<16}{value}")?;
-        }
-        Ok(())
+    /// What `--check-config` prints, with each framed line's catalogue as
+    /// `catalogues` has it.
+    pub fn report(&self, catalogues: &Catalogues) -> String {
+        self.rows(catalogues)
+            .iter()
+            .map(|(label, value)| format!("{label:<16}{value}\n"))
+            .collect()
     }
 }
 
@@ -1318,9 +1386,17 @@ mod tests {
         Cli::parse_from(v)
     }
 
+    /// A host called `bench`, and nothing else set.
+    fn env() -> Env {
+        Env {
+            hostname: Some("bench".into()),
+            ..Env::default()
+        }
+    }
+
     fn resolve(args: &[&str], toml: Option<&str>) -> Result<Resolved, SettingsError> {
         let parsed = toml.map(|t| FileConfig::parse(t).expect("test config parses"));
-        Settings::resolve(&cli(args), parsed.as_ref(), &Env::default())
+        Settings::resolve(&cli(args), parsed.as_ref(), &env())
     }
 
     /// The CAN interfaces, in bus order.
@@ -1495,7 +1571,7 @@ mod tests {
     fn secrets_come_from_the_environment_only_when_not_configured() {
         let env = Env {
             forward_api_key: Some(Secret::new("from-env")),
-            ..Env::default()
+            ..env()
         };
         let r = Settings::resolve(&cli(&["--forward-enable"]), None, &env).unwrap();
         assert_eq!(r.settings.forward.unwrap().api_key.expose(), "from-env");
@@ -1554,11 +1630,11 @@ mod tests {
         let systemd = Env {
             state_dir: Some("/var/lib/wiretap-server".into()),
             home: Some("/home/pi".into()),
-            ..Env::default()
+            ..env()
         };
         let by_hand = Env {
             home: Some("/home/pi".into()),
-            ..Env::default()
+            ..env()
         };
 
         // A unit with StateDirectory= writes somewhere ProtectHome allows.
@@ -1609,7 +1685,7 @@ mod tests {
         let env = Env {
             state_dir: Some(state.display().to_string()),
             home: Some(home.display().to_string()),
-            ..Env::default()
+            ..env()
         };
         let in_use = state.join("cache.db");
 
@@ -1644,7 +1720,7 @@ mod tests {
     fn the_cache_path_is_configurable_from_either_source() {
         let env = Env {
             state_dir: Some("/var/lib/wiretap-server".into()),
-            ..Env::default()
+            ..env()
         };
         let file = FileConfig::parse("[forward]\nenable = true\ncache_path = \"/from/file.db\"\n")
             .unwrap();
@@ -1847,7 +1923,7 @@ mod tests {
             resolve(args, toml)
                 .unwrap()
                 .settings
-                .rows()
+                .rows(&Catalogues::default())
                 .into_iter()
                 .find(|(label, _)| *label == "test pattern")
                 .expect("a test pattern row, armed or not")
@@ -1911,9 +1987,9 @@ mod tests {
              [ingest]\nenable = true\ntoken = \"also-secret\"\n",
         )
         .unwrap();
-        let r = Settings::resolve(&cli(&[]), Some(&f), &Env::default()).unwrap();
+        let r = Settings::resolve(&cli(&[]), Some(&f), &env()).unwrap();
 
-        let shown = r.settings.to_string();
+        let shown = r.settings.report(&Catalogues::default());
         assert!(!shown.contains("super-secret"), "{shown}");
         assert!(!shown.contains("also-secret"), "{shown}");
 
@@ -2165,7 +2241,7 @@ mod tests {
         };
         line.catalogue = Some(LineCatalogue::read(&path).unwrap());
         std::fs::remove_file(&path).unwrap();
-        let rows = r.settings.rows();
+        let rows = r.settings.rows(&Catalogues::open(&r.settings));
         let at = rows.iter().position(|(l, _)| *l == "device").unwrap();
         assert_eq!(
             rows[at + 1],
@@ -2341,7 +2417,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_database_raw_serial_can_reach_is_forwarded_with_v3() {
+    fn only_a_database_raw_serial_can_reach_is_kept_from_falling_back_to_v2() {
         let forwards = |args: &[&str], toml: &str| -> Vec<(String, bool)> {
             resolve(args, Some(toml))
                 .unwrap()
@@ -2361,7 +2437,7 @@ mod tests {
         assert_eq!(
             forwards(&["--ingest-enable"], both),
             [("site".into(), false), ("rs485_raw".into(), true)],
-            "the listener alone does not change the protocol"
+            "the listener alone does not pin v3"
         );
         assert_eq!(
             forwards(
@@ -2369,7 +2445,7 @@ mod tests {
                 "[forward]\nenable = true\ndatabase = \"site\"\n"
             ),
             [("site".into(), false)],
-            "ingest on with no raw device stays on v2"
+            "ingest on with no raw device may fall back"
         );
         assert_eq!(
             forwards(&[], &format!("[forward]\nenable = true\n{RAW}")),
@@ -2381,6 +2457,97 @@ mod tests {
             [(String::new(), false)]
         );
         assert!(forwards(&[], SERIAL).is_empty(), "no [forward]");
+    }
+
+    #[test]
+    fn each_database_names_the_devices_whose_records_it_carries() {
+        let toml = "[server]\niface = \"can0\"\n[forward]\nenable = true\ndatabase = \"site\"\n\
+                    [[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB0\"\nbaud = 9600\n\
+                    framing = \"modbus-rtu\"\ncapture = \"both\"\nraw_database = \"rs485_raw\"\n\
+                    [[device]]\nkind = \"serial\"\ninterface = \"/dev/ttyUSB1\"\nbaud = 9600\n\
+                    capture = \"raw\"\ndatabase = \"rs485_raw\"\n";
+        let maps: Vec<(String, Vec<(u8, String)>)> = resolve(&[], Some(toml))
+            .unwrap()
+            .settings
+            .forwards()
+            .into_iter()
+            .map(|f| {
+                let devices = f.devices.into_iter().map(|d| (d.bus, d.name)).collect();
+                (f.database, devices)
+            })
+            .collect();
+        assert_eq!(
+            maps,
+            [
+                (
+                    "site".into(),
+                    vec![(0, "can0".into()), (1, "/dev/ttyUSB0".into())]
+                ),
+                (
+                    "rs485_raw".into(),
+                    vec![(1, "/dev/ttyUSB0".into()), (2, "/dev/ttyUSB1".into())]
+                ),
+            ],
+            "a line whose framed and raw streams land apart is in both"
+        );
+    }
+
+    fn daemon_id(hostname: Option<&str>, toml: &str) -> Result<String, String> {
+        let env = Env {
+            hostname: hostname.map(str::to_owned),
+            ..Env::default()
+        };
+        let file = FileConfig::parse(toml).unwrap();
+        let resolved = Settings::resolve(&cli(&[]), Some(&file), &env);
+        let forward = resolved.map_err(|e| e.to_string())?.settings.forward;
+        Ok(forward.expect("[forward]").daemon_id)
+    }
+
+    #[test]
+    fn the_daemon_id_defaults_to_the_short_hostname() {
+        let forward = "[forward]\nenable = true\n";
+        assert_eq!(
+            daemon_id(Some("Pi-Bench.example.net"), forward),
+            Ok("pi-bench".into())
+        );
+        assert_eq!(
+            daemon_id(
+                Some("Pi-Bench"),
+                &format!("{forward}daemon_id = \"rack-2\"\n")
+            ),
+            Ok("rack-2".into()),
+            "the file names it"
+        );
+    }
+
+    #[test]
+    fn a_daemon_id_the_gateway_would_refuse_names_the_key() {
+        let forward = "[forward]\nenable = true\n";
+        for (hostname, toml) in [
+            (Some("bench"), format!("{forward}daemon_id = \"Rack 2\"\n")),
+            (Some("_bench"), forward.to_owned()),
+            (Some("bench"), format!("{forward}daemon_id = \"\"\n")),
+            (None, forward.to_owned()),
+        ] {
+            let err = daemon_id(hostname, &toml).unwrap_err();
+            assert!(err.starts_with("[forward] daemon_id"), "{err}");
+            assert!(err.contains("set daemon_id"), "{err}");
+        }
+        let unforwarded = Env::default();
+        assert!(
+            Settings::resolve(&cli(&[]), None, &unforwarded).is_ok(),
+            "nothing to name without [forward]"
+        );
+    }
+
+    #[test]
+    fn check_config_names_the_daemon() {
+        let toml = "[forward]\nenable = true\n";
+        let rows = resolve(&[], Some(toml))
+            .unwrap()
+            .settings
+            .rows(&Catalogues::default());
+        assert!(rows.contains(&("daemon id", "bench".into())), "{rows:?}");
     }
 
     /// The gateway's rule, applied where `--check-config` can report it.
@@ -2402,7 +2569,7 @@ mod tests {
     fn a_second_database_gets_a_sibling_cache_and_adopts_nothing() {
         let env = Env {
             state_dir: Some("/var/lib/wiretap-server".into()),
-            ..Env::default()
+            ..env()
         };
         let cfg = FileConfig::parse("[forward]\nenable = true\ndatabase = \"site\"\n").unwrap();
         let f = Settings::resolve(&cli(&[]), Some(&cfg), &env)
@@ -2439,7 +2606,10 @@ mod tests {
             "[server]\niface = \"can0\"\n[forward]\nenable = true\ndatabase = \"site\"\n\
              {SERIAL}database = \"rs485\"\n"
         );
-        let rows = resolve(&[], Some(&toml)).unwrap().settings.rows();
+        let rows = resolve(&[], Some(&toml))
+            .unwrap()
+            .settings
+            .rows(&Catalogues::default());
         let of = |label: &str| -> Vec<String> {
             rows.iter()
                 .filter(|(l, _)| *l == label)
@@ -2461,7 +2631,10 @@ mod tests {
             "{caches:?}"
         );
 
-        let rows = resolve(&["-i", ""], None).unwrap().settings.rows();
+        let rows = resolve(&["-i", ""], None)
+            .unwrap()
+            .settings
+            .rows(&Catalogues::default());
         assert!(rows.contains(&("devices", "(none)".to_string())));
     }
 }

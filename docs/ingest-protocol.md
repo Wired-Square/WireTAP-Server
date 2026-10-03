@@ -20,12 +20,37 @@ Requires `[forward]`; `[server].iface = ""` for ingest-only. The token is sent
 in clear text — deploy on a trusted network or wrap the connection in a VPN /
 stunnel if it crosses untrusted segments.
 
-The gateway and the capture daemon's listener both take versions 2 and 3. The
-daemon's `[forward]` sink sends version 3 only to a database some serial
-device's raw chunks land in, and version 2 to the rest, so a gateway that
-predates v3 still takes a daemon that captures no raw serial, ingest listener
-or not. Catalogue assignment is not built yet, so a v3 `HELLO_ACK` carries no
-assignments and every `CATALOG_GET` is answered `status = 1` (unknown).
+The gateway and the capture daemon's listener both take versions 2 and 3.
+
+The daemon's `[forward]` sink sends every database a v3 `HELLO` naming its
+`daemon_id` and the devices whose records that database carries. A serial
+line whose framed and raw streams land in different databases is named in
+both. A gateway that predates v3 refuses it naming version 2; a database that
+takes no raw chunks then reconnects with v2 and stays on v2 until the daemon
+restarts, saying so once in the log. A database that takes raw chunks cannot
+fall back, so its sink keeps failing, naming both versions, and caches to disk
+until the gateway is upgraded.
+
+The gateway records the devices of a named v3 `HELLO` in
+`wiretap_meta.daemon_devices` and answers with each one's catalogue
+assignment, keyed by daemon id and interface and sent on the bus this `HELLO`
+named it on. It serves a `CATALOG_GET` from `wiretap_meta.catalog_blobs`
+exactly as the catalogue was assigned, CRLF and all: `status = 1` (unknown)
+for a SHA-1 it has no blob for, and `status = 2` (unavailable) when the
+database cannot be read. When the meta database fails at a `HELLO`, the
+gateway logs a warning and answers with no assignments rather than refusing
+the session. An anonymous v3 `HELLO`, or a v2 one, records nothing and gets
+no assignments. When a daemon's assignment changes, the gateway closes that
+daemon's sessions whose `HELLO` named the interface, after any reply it owes,
+and the reconnect reads the new assignment.
+
+Before its first batch, a sink fetches any assigned catalogue it does not
+have, checks the blob against its SHA-1, and parses it as it would a `catalog`
+in `/etc`. It keeps the blob in `<state dir>/catalogs/<sha>.toml` and the
+assignments in `<state dir>/assignments.json`, beside the disk cache. A
+catalogue that cannot be fetched, checked or parsed is logged and the line
+keeps what it frames with. The daemon's own listener has no assignments: it
+answers a v3 `HELLO` with none and every `CATALOG_GET` with `status = 1`.
 
 The daemon's listener feeds the default database, so it relays a raw serial
 record only when that database takes a device's raw chunks and is forwarded

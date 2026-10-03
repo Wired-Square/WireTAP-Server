@@ -41,6 +41,7 @@ use tracing::{debug, error, info, warn};
 use wiretap_model::Sample;
 
 use crate::cache::{CacheError, FrameCache, SqliteCache};
+use crate::catalogues::Catalogues;
 use crate::forward::ForwardSink;
 use crate::settings::Forward;
 
@@ -342,7 +343,12 @@ impl Running {
 /// lives here rather than in `pipeline` because it touches no CAN socket, and
 /// `pipeline` is Linux-only — which had left the one assembly worth drilling
 /// unreachable from a test, and the drill rebuilding it by hand.
-pub fn start(forward: &Forward, stats_interval: f64, tagged: bool) -> Result<Running, CacheError> {
+pub fn start(
+    forward: &Forward,
+    stats_interval: f64,
+    tagged: bool,
+    catalogues: &Arc<Catalogues>,
+) -> Result<Running, CacheError> {
     let batching = &forward.batching;
     let label = tagged.then(|| forward.label());
     let tag = label.map_or(String::new(), |l| format!(" db={l}"));
@@ -366,7 +372,7 @@ pub fn start(forward: &Forward, stats_interval: f64, tagged: bool) -> Result<Run
     }
 
     let (frames, batcher, stop) = channel(
-        ForwardSink::new(forward),
+        ForwardSink::new(forward, Arc::clone(catalogues)),
         cache,
         batching,
         stats_interval,
@@ -389,11 +395,12 @@ impl Archives {
     pub fn start_all(
         forwards: &[Forward],
         stats_interval: f64,
+        catalogues: &Arc<Catalogues>,
     ) -> Result<Self, (PathBuf, CacheError)> {
         let tagged = forwards.len() > 1;
         let mut running = Vec::with_capacity(forwards.len());
         for fwd in forwards {
-            let r = start(fwd, stats_interval, tagged)
+            let r = start(fwd, stats_interval, tagged, catalogues)
                 .map_err(|e| (fwd.batching.cache_path.clone(), e))?;
             running.push((fwd.database.clone(), r));
         }

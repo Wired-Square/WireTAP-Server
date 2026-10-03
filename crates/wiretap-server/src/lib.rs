@@ -18,6 +18,7 @@ pub const VERSION: &str = wiretap_build_id::build_version!();
 
 pub mod archive;
 pub mod cache;
+pub mod catalogues;
 pub mod cli;
 pub mod console;
 pub mod forward;

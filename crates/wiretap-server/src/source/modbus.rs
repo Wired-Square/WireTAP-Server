@@ -9,14 +9,14 @@
 
 use std::time::SystemTime;
 
-use wiretap_catalog::{ModbusRtuOptions, TappedMessage};
+use wiretap_catalog::{LineSettings, ModbusRtuOptions, TappedMessage};
 use wiretap_model::{ModbusSample, SourceId};
 
 use super::system_time_to_us;
-use crate::settings::SerialSettings;
+use crate::settings::LineCatalogue;
 
-fn options(line: &SerialSettings) -> ModbusRtuOptions {
-    match &line.catalogue {
+fn options(catalogue: Option<&LineCatalogue>) -> ModbusRtuOptions {
+    match catalogue {
         Some(c) => c.rtu.clone().allow_broadcast().frame_any_function(),
         None => ModbusRtuOptions::tapped(),
     }
@@ -26,14 +26,22 @@ fn options(line: &SerialSettings) -> ModbusRtuOptions {
 pub struct RtuTap {
     tap: wiretap_catalog::RtuTap,
     bus: SourceId,
+    line: LineSettings,
 }
 
 impl RtuTap {
-    pub fn new(bus: SourceId, line: &SerialSettings) -> Self {
+    pub fn new(bus: SourceId, line: LineSettings, catalogue: Option<&LineCatalogue>) -> Self {
         Self {
-            tap: wiretap_catalog::RtuTap::new(&options(line), line.line),
+            tap: wiretap_catalog::RtuTap::new(&options(catalogue), line),
             bus,
+            line,
         }
+    }
+
+    /// Frame with `catalogue` from here on. What is held of a message is
+    /// dropped with the old rules.
+    pub fn reframe(&mut self, catalogue: Option<&LineCatalogue>) {
+        *self = Self::new(self.bus, self.line, catalogue);
     }
 
     /// One read's bytes, and the wall clock when that read returned.
@@ -66,7 +74,7 @@ mod tests {
     use wiretap_checksum::algorithms::crc16_modbus_checksum;
 
     use super::*;
-    use crate::settings::{Framing, LineCatalogue};
+    use crate::settings::{Framing, LineCatalogue, SerialSettings};
     use crate::source::raw::RawTap;
     use wiretap_protocol::ingest::RecordKind;
 
@@ -98,7 +106,11 @@ mod tests {
     }
 
     fn tap_on_9600_8n1(bus: SourceId) -> RtuTap {
-        RtuTap::new(bus, &line_9600_8n1())
+        RtuTap::new(bus, line_9600_8n1().line, None)
+    }
+
+    fn tap_for(line: &SerialSettings) -> RtuTap {
+        RtuTap::new(SourceId(0), line.line, line.catalogue.as_ref())
     }
 
     fn sungrow_line() -> SerialSettings {
@@ -141,7 +153,7 @@ mod tests {
 
     #[test]
     fn the_example_catalogue_declares_the_sungrow_codes() {
-        let options = options(&sungrow_line());
+        let options = options(sungrow_line().catalogue.as_ref());
         assert_eq!(options.vendor_functions, [0x20, 0x60, 0x65]);
         assert_eq!(options.vendor_lengths.len(), 5);
     }
@@ -159,7 +171,7 @@ mod tests {
             }),
             ..line_9600_8n1()
         };
-        assert_eq!(options(&line), ModbusRtuOptions::tapped());
+        assert_eq!(options(line.catalogue.as_ref()), ModbusRtuOptions::tapped());
     }
 
     /// A message whose first 18 bytes also pass CRC: the search stops there,
@@ -173,8 +185,7 @@ mod tests {
         assert_eq!(dispatch.len(), 19);
         assert_eq!(with_crc(&dispatch[..16]), dispatch[..18]);
 
-        let framed =
-            |line: &SerialSettings| keys(&RtuTap::new(SourceId(0), line).push(&dispatch, at(0)));
+        let framed = |line: &SerialSettings| keys(&tap_for(line).push(&dispatch, at(0)));
         assert_eq!(framed(&line_9600_8n1()), [(0, 0x60, 18)]);
         assert_eq!(framed(&sungrow_line()), [(0, 0x60, 19)]);
     }
@@ -210,7 +221,7 @@ mod tests {
         let wire = line.line;
         let mut first: Option<(Vec<Vec<u8>>, f64)> = None;
         for chunk in [64usize, 4096] {
-            let mut tap = RtuTap::new(SourceId(0), line);
+            let mut tap = tap_for(line);
             let mut samples = Vec::new();
             let mut burst = 0;
             for (i, c) in bytes.chunks(chunk).enumerate() {
@@ -300,7 +311,7 @@ mod tests {
         let line = line_9600_8n1();
         let bytes = capture();
         for chunk in [64usize, 4096] {
-            let mut live = RtuTap::new(SourceId(0), &line);
+            let mut live = tap_for(&line);
             let mut raw = RawTap::new(SourceId(0), line.line);
             let (mut framed, mut chunks) = (Vec::new(), Vec::new());
             for (i, c) in bytes.chunks(chunk).enumerate() {
@@ -310,7 +321,7 @@ mod tests {
             }
             chunks.sort_by_key(|c| c.ts_us);
 
-            let mut again = RtuTap::new(SourceId(0), &line);
+            let mut again = tap_for(&line);
             let reframed: Vec<ModbusSample> = chunks
                 .iter()
                 .flat_map(|c| again.push(&c.data, at(c.ts_us as u64)))

@@ -7,6 +7,15 @@ All notable changes to this project are documented here. Entries go under
 
 ### Added
 
+- **The daemon names itself to the gateway.** `[forward] daemon_id`, the
+  host's short name lowercased when absent, is sent in a v3 `HELLO` on every
+  forward, with the devices whose records that database carries. An id the
+  gateway would refuse stops the server from starting, naming the key, and
+  `--check-config` shows it. A gateway that refuses v3 naming v2 is spoken to
+  with v2 from then on, logged once, except by a database that takes raw
+  chunks, which keeps failing until the gateway is upgraded. The forwarder no
+  longer chooses v2 or v3 by whether raw serial is forwarded.
+
 - **The gateway assigns catalogues.** Catalogue blobs, assignments by daemon
   id and interface, their history, and the devices each daemon last named
   live in `wiretap_meta` in the default database, created at startup. A named
@@ -17,6 +26,17 @@ All notable changes to this project are documented here. Entries go under
   a catalogue in `/etc`. Changing one closes that daemon's sessions whose
   `HELLO` named the interface, so they reconnect to it. The admin API that
   assigns comes later.
+
+- **The daemon frames with the gateway's catalogue.** Before a forward's first
+  batch, it fetches each catalogue assigned to the serial lines that database
+  frames, checks the blob against its SHA-1, and keeps it in
+  `<state dir>/catalogs/`, with the assignments in
+  `<state dir>/assignments.json`. The line's tap switches to it at the next
+  read, logging the change. A line frames with the gateway's catalogue, else
+  the `catalog` in `/etc`, else none, and a restart with the gateway down
+  frames from what was kept. A catalogue that cannot be fetched, checked or
+  parsed is logged and the line keeps what it had. `--check-config` shows each
+  line's catalogue and where it came from.
 
 ## [0.1.8] — 2026-10-03
 

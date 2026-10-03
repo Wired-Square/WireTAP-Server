@@ -11,6 +11,7 @@ use clap::Parser;
 use tracing::{error, info, warn};
 use tracing_subscriber::filter::LevelFilter;
 use wiretap_server::{
+    catalogues::Catalogues,
     cli::Cli,
     settings::{self, Env, LogLevel, Settings},
 };
@@ -45,7 +46,8 @@ fn main() -> ExitCode {
     }
 
     if cli.check_config {
-        print!("{}", resolved.settings);
+        let settings = &resolved.settings;
+        print!("{}", settings.report(&Catalogues::open(settings)));
         return ExitCode::SUCCESS;
     }
 

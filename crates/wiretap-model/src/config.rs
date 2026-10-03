@@ -106,6 +106,9 @@ pub struct ForwardSection {
     pub port: Option<u16>,
     pub api_key: Option<String>,
     pub database: Option<String>,
+    /// What this daemon is called to the gateway, which keys its catalogue
+    /// assignments by it. Absent means the host's short name.
+    pub daemon_id: Option<String>,
     /// Frames per batch sent to the gateway.
     pub batch_size: Option<usize>,
     /// Seconds to wait for a batch to fill before sending it short.
