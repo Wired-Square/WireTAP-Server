@@ -384,6 +384,11 @@ case_run VERIFY-18 "the ordering commented out" \
 case_run VERIFY-18 "the ordering moved to [Install], where it orders nothing" \
 	"resed '/^After=time-sync/d' $UNIT && printf 'After=time-sync.target\n' >> $UNIT"
 
+case_run VERIFY-23 "apt marks the package automatically installed" \
+	"mkdir -p var/lib/apt && printf 'Package: libfoo\nAuto-Installed: 0\n\nPackage: $PACKAGE\nArchitecture: arm64\nAuto-Installed: 1\n' > var/lib/apt/extended_states"
+case_pass "VERIFY-23 lets apt mark other packages, and this one manual" \
+	"mkdir -p var/lib/apt && printf 'Package: $PACKAGE-dbg\nAuto-Installed: 1\n\nPackage: $PACKAGE\nArchitecture: arm64\nAuto-Installed: 0\n' > var/lib/apt/extended_states"
+
 case_run VERIFY-15 "a Tailscale node was made on the build host" \
 	"mkdir -p var/lib/tailscale && printf '{}\n' > var/lib/tailscale/tailscaled.state"
 

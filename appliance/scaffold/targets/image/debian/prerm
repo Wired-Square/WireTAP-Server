@@ -6,6 +6,7 @@ set -e
 
 NAME='wiretap-appliance'
 HOOK_DIR='/usr/share/wiretap-appliance/prerm.d'
+REMOVED_WHILE_RUNNING='/var/lib/wiretap-appliance.removed-while-running'
 
 case "$1" in
 remove)
@@ -18,6 +19,12 @@ remove)
     fi
 
     if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+        # Whichever package of this appliance configures next starts the daemon
+        # on this mark, after a reboot too. Beside the state directory, not in
+        # it: the daemon owns that one, and root must not write through it.
+        case "$(systemctl is-active "$NAME.service" || true)" in
+        active | activating | reloading) : > "$REMOVED_WHILE_RUNNING" ;;
+        esac
         deb-systemd-invoke stop "$NAME.service" >/dev/null || true
     fi
     ;;

@@ -9,6 +9,7 @@ USER='wiretap-appliance'
 GROUP='wiretap-appliance'
 CONFIG_DIR='/etc/wiretap-appliance'
 HOOK_DIR='/usr/share/wiretap-appliance/postinst.d'
+REMOVED_WHILE_RUNNING='/var/lib/wiretap-appliance.removed-while-running'
 
 # Every value above is single-quoted, and `appliance-xtask` holds the path
 # components to a character set with no shell metacharacters in it. Both halves
@@ -237,12 +238,14 @@ fi
 
 if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
     systemctl --system daemon-reload >/dev/null || true
-    if [ -n "$2" ]; then
+    if [ -n "$2" ] && [ ! -e "$REMOVED_WHILE_RUNNING" ]; then
         # An upgrade. try-restart leaves a stopped appliance stopped.
         deb-systemd-invoke try-restart "$NAME.service" >/dev/null || true
     else
+        # A first install, or one after a remove that stopped the daemon.
         deb-systemd-invoke start "$NAME.service" >/dev/null || true
     fi
+    rm -f "$REMOVED_WHILE_RUNNING"
 fi
 
 exit 0

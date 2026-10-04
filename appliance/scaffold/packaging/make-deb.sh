@@ -110,6 +110,11 @@ case "$MAINTAINER" in
 *example.invalid*) die "package.maintainer in appliance.toml is still the example's placeholder — name this product's own maintainer" ;;
 esac
 
+# The target's package name. Only the .deb, its changelog and /usr/share/doc
+# take it; every other shipped path keeps the system name.
+DEB_PACKAGE=$(sed -n 's/^Package: //p' "$CONTROL_IN")
+[ -n "$DEB_PACKAGE" ] || die "$CONTROL_IN has no Package: line"
+
 # The bundle, checked here for the reason the unit is: a cross-build is minutes, and
 # finding out afterwards that there was nothing to package is finding out slowly.
 UI_DIST='frontend/dist'
@@ -220,7 +225,7 @@ done
 # there. A package without one installs; lintian objects, and a licence nobody
 # can find is its own kind of problem.
 [ -f "$SCAFFOLD/debian/copyright" ] ||
-    warn "no $SCAFFOLD/debian/copyright — write a DEP-5 one and the next build ships it as /usr/share/doc/$NAME/copyright"
+    warn "no $SCAFFOLD/debian/copyright — write a DEP-5 one and the next build ships it as /usr/share/doc/$DEB_PACKAGE/copyright"
 
 # The chassis maps the targets it has actually built for, each to its Debian
 # architecture and to the ELF e_machine that proves the target took. Every one
@@ -411,7 +416,7 @@ esac
 # a hand-kept one and a snapshot version disagree from the second build on. It
 # is `changelog.gz` rather than `changelog.Debian.gz`: a version with no Debian
 # revision is a native package, and Policy 12.7 names a native one's that way.
-DOC="$STAGE/usr/share/doc/$NAME"
+DOC="$STAGE/usr/share/doc/$DEB_PACKAGE"
 install -d -m 0755 "$DOC"
 if [ -f "$SCAFFOLD/debian/copyright" ]; then
     install -m 0644 "$SCAFFOLD/debian/copyright" "$DOC/copyright"
@@ -420,7 +425,7 @@ fi
 # maintainer was read and checked before the build. `-n`, so the archive
 # carries no name or timestamp of its own.
 printf '%s (%s) unstable; urgency=medium\n\n  * Snapshot build %s.\n\n -- %s  %s\n' \
-    "$NAME" "$VERSION" "$VERSION" "$MAINTAINER" "$(date -R)" > "$DOC/changelog"
+    "$DEB_PACKAGE" "$VERSION" "$VERSION" "$MAINTAINER" "$(date -R)" > "$DOC/changelog"
 gzip -9n "$DOC/changelog"
 chmod 0644 "$DOC/changelog.gz"
 
@@ -498,7 +503,7 @@ LISTED=$(wc -l < "$STAGE/DEBIAN/md5sums" | tr -d '[:space:]')
 # The package
 # ---------------------------------------------------------------------------
 mkdir -p "$OUT"
-DEB="$OUT/${NAME}_${VERSION}_${ARCH}.deb"
+DEB="$OUT/${DEB_PACKAGE}_${VERSION}_${ARCH}.deb"
 
 # **`--root-owner-group`**, or every path in the package is owned by whichever
 # uid the build host happened to run as — which arrives on the board as a

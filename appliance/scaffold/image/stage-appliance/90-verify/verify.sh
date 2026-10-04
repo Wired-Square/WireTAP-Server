@@ -545,6 +545,19 @@ else
 	ok VERIFY-22 "$NAME.service sets the deployment appliance.toml decides"
 fi
 
+# --- VERIFY-23: apt keeps the package -------------------------------------------
+# export-image runs `apt-get dist-upgrade --auto-remove --purge` after this
+# stage, which removes a package apt has marked automatically installed.
+if awk -v p="Package: $PACKAGE" 'BEGIN { RS = "" }
+	{ n = split($0, line, "\n"); named = auto = 0
+	  for (i = 1; i <= n; i++) { named = named || line[i] == p; auto = auto || line[i] ~ /^Auto-Installed:[[:space:]]*1[[:space:]]*$/ }
+	  if (named && auto) found = 1 }
+	END { exit !found }' "$R/var/lib/apt/extended_states" 2>/dev/null; then
+	fail VERIFY-23 "$PACKAGE is marked automatically installed in /var/lib/apt/extended_states - export-image's --auto-remove would purge it from the image"
+else
+	ok VERIFY-23 "$PACKAGE is not marked automatically installed"
+fi
+
 # --- A product's own checks ------------------------------------------------------
 # Each file in a subshell, its failures counted from its fd 9 tally, so nothing
 # it assigns — `fails` included — reaches this shell. The tally is a file, not

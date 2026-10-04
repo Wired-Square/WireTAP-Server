@@ -10,23 +10,51 @@
 set -e
 
 NAME='wiretap-appliance'
+PACKAGE='wiretap-appliance'
+PACKAGES='wiretap-appliance'
 USER='wiretap-appliance'
 GROUP='wiretap-appliance'
 CONFIG_DIR='/etc/wiretap-appliance'
 STATE_DIR='/var/lib/wiretap-appliance'
+REMOVED_WHILE_RUNNING='/var/lib/wiretap-appliance.removed-while-running'
 
 # The two directories this script deletes are spelled from appliance.toml rather
 # than assembled here, and single-quoted. A postrm that builds a path by
 # concatenation is one `rm -rf` away from deleting the wrong thing on a box
 # whose configuration it half-understood.
 
+# Every package of this appliance but this one that has files on disk. dpkg
+# may be part-way through installing one in this same run, so any state but
+# not-installed and config-files counts. Fails when dpkg-query does.
+other_packages_of_this_appliance() {
+    listed=$(dpkg-query -W -f='${db:Status-Status} ${Package}\n' 2>/dev/null) || return 1
+    printf '%s\n' "$listed" |
+        while read -r status package; do
+            case "$status" in not-installed | config-files) continue ;; esac
+            [ "$package" != "$PACKAGE" ] || continue
+            case " $PACKAGES " in *" $package "*) printf ' %s' "$package" ;; esac
+        done
+}
+
 case "$1" in
 purge)
+    # Everything below is the appliance's, and another package of it keeps it.
+    # Not knowing whether one is on the box fails the purge, which can be retried.
+    if ! OTHERS=$(other_packages_of_this_appliance); then
+        echo "$PACKAGE: dpkg-query failed, so nothing of $NAME's was removed; purge again" >&2
+        exit 1
+    fi
+    if [ -n "$OTHERS" ]; then
+        echo "$PACKAGE: purged; $NAME's configuration, state, account and unit are left to$OTHERS" >&2
+        exit 0
+    fi
+
     # **Purge, and only purge.** `remove` leaves the database and the
     # certificate alone, because reinstalling an appliance is something an
     # operator does to fix it and losing every account in the process is not
     # what they asked for. dpkg's own distinction, kept rather than blurred.
     rm -rf "$STATE_DIR"
+    rm -f "$REMOVED_WHILE_RUNNING"
     rm -rf "$CONFIG_DIR"
 
     # With the key directory gone, the line telling sshd to read it goes too.

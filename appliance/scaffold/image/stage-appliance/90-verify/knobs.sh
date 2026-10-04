@@ -2,6 +2,7 @@
 # of, as the values verify.sh and tests/run-verify-tests.sh both read —
 # rendered once so a knob cannot reach one and not the other.
 NAME='wiretap-appliance'
+PACKAGE='wiretap-appliance'
 BINARY='wiretap-appliance'
 ENV_PREFIX='WIRETAP_APPLIANCE'
 GROUP='wiretap-appliance'

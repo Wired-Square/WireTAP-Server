@@ -7,6 +7,7 @@
 set -eu
 
 NAME='wiretap-appliance'
+DEB_PACKAGE='wiretap-appliance'
 PI_GEN_REF='arm64'
 TAILSCALE=1
 # `config.local` is sourced below, and a reassignment there must abort the
@@ -42,7 +43,7 @@ command -v git >/dev/null || die "git is not on PATH"
 
 # A pipeline's status is `head`'s, which always succeeds, so the emptiness test
 # below is the guard rather than a `|| die` on the assignment.
-DEB=$(ls -t target/debian/image/"${NAME}"_*_arm64.deb 2>/dev/null | head -1)
+DEB=$(ls -t target/debian/image/"${DEB_PACKAGE}"_*_arm64.deb 2>/dev/null | head -1)
 [ -n "$DEB" ] ||
     die "no arm64 package in target/debian/image — run scaffold/packaging/make-deb.sh --target image first"
 

@@ -3,8 +3,8 @@
 The Raspberry Pi appliance: `wiretap-appliance`, a web daemon that administers
 the box from a browser, beside `wiretap-server`, which captures as it does on
 any Debian host. It is built on the Wired Square appliance chassis
-([`appliance-rpi-bootstrap`](https://github.com/Wired-Square/appliance-rpi-bootstrap),
-pinned at `v0.16.1`), which supplies HTTPS, accounts, the host, network, SSH,
+([`wslib-appliance-rs`](https://github.com/Wired-Square/wslib-appliance-rs),
+pinned at `v0.1.0`), which supplies HTTPS, accounts, the host, network, SSH,
 certificate, backup and log screens, the package and the card image.
 
 This is a cargo workspace of its own, not a member of the root one, because
@@ -32,8 +32,8 @@ again; CI fails on a hand-edit to a chassis-owned file. Install the tool at
 the lockfile's chassis:
 
 ```sh
-rev="$(grep -om1 'appliance-rpi-bootstrap\.git?[^#"]*#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)"
-cargo install --locked --git https://github.com/Wired-Square/appliance-rpi-bootstrap.git --rev "$rev" appliance-xtask
+rev="$(grep -om1 'wslib-appliance-rs\.git?[^#"]*#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)"
+cargo install --locked --git https://github.com/Wired-Square/wslib-appliance-rs.git --rev "$rev" appliance-xtask
 ```
 
 ## Running it on a development machine

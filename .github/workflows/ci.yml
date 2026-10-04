@@ -489,7 +489,7 @@ jobs:
       # cargo then shells out to git, whose ssh the agent answers.
       - &fetch
         name: Fetch the chassis over SSH
-        run: git config --global url."ssh://git@github.com/Wired-Square/appliance-rpi-bootstrap".insteadOf "https://github.com/Wired-Square/appliance-rpi-bootstrap"
+        run: git config --global url."ssh://git@github.com/Wired-Square/wslib-appliance-rs".insteadOf "https://github.com/Wired-Square/wslib-appliance-rs"
 
       - name: Install the toolchain
         run: |
@@ -564,8 +564,8 @@ jobs:
       # The rev is the lockfile's, so the pin lives in one place fewer.
       - name: Install appliance-xtask at the pinned chassis
         run: |
-          rev="$(grep -om1 'appliance-rpi-bootstrap\.git?[^#"]*#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)"
-          cargo install --locked --git https://github.com/Wired-Square/appliance-rpi-bootstrap.git --rev "$rev" appliance-xtask
+          rev="$(grep -om1 'wslib-appliance-rs\.git?[^#"]*#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)"
+          cargo install --locked --git https://github.com/Wired-Square/wslib-appliance-rs.git --rev "$rev" appliance-xtask
 
       # A hand-edit to a chassis-owned file is a bug report about a knob.
       - name: Scaffold is what the chassis renders

@@ -20,6 +20,7 @@ ENV_KEY=${TAILSCALE_AUTH_KEY:-}
 unset TAILSCALE_AUTH_KEY
 
 NAME='wiretap-appliance'
+DEB_PACKAGE='wiretap-appliance'
 TAILSCALE=1
 
 die() {
@@ -146,8 +147,8 @@ fi
 
 # The same package `build-image.sh` will look for, checked here so the refusal
 # is a second and not a round trip.
-DEB=$(ls -t target/debian/image/"${NAME}"_*_arm64.deb 2>/dev/null | head -1)
-[ -n "$DEB" ] || die "no target/debian/image/${NAME}_*_arm64.deb — run scaffold/packaging/make-deb.sh --target image first"
+DEB=$(ls -t target/debian/image/"${DEB_PACKAGE}"_*_arm64.deb 2>/dev/null | head -1)
+[ -n "$DEB" ] || die "no target/debian/image/${DEB_PACKAGE}_*_arm64.deb — run scaffold/packaging/make-deb.sh --target image first"
 
 connect
 box "$TARGET" 'command -v git >/dev/null && command -v sudo >/dev/null && command -v pgrep >/dev/null' ||
@@ -164,7 +165,7 @@ box -n "$TARGET" "! pgrep -f '[b]uild-image.sh' >/dev/null" ||
 # package goes first: `build-image.sh` takes the newest by mtime, which
 # `rsync -a` preserves, so a stale one could outrank this.
 say "sending scaffold/ and $(basename "$DEB")"
-box "$TARGET" "mkdir -p '$BUILD_DIR/target/debian/image' && rm -f '$BUILD_DIR'/target/debian/image/${NAME}_*_arm64.deb"
+box "$TARGET" "mkdir -p '$BUILD_DIR/target/debian/image' && rm -f '$BUILD_DIR'/target/debian/image/${DEB_PACKAGE}_*_arm64.deb"
 rsync -az --delete -e "$RSH" \
     --exclude 'image/pi-gen/' --exclude 'image/deploy/' --exclude 'image/config.local' \
     --exclude 'image/stage-appliance/00-appliance/files/appliance.deb' \

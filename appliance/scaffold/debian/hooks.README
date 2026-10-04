@@ -40,7 +40,8 @@ ships them without a hook:
   journal in RAM otherwise, and what that loses at a reboot is the daemon's own
   log — every refusal reaches only the journal.
 - **`scaffold/debian/copyright`**, a DEP-5 file you write, shipped to
-  `/usr/share/doc/wiretap-appliance/` beside a changelog the build makes from its version.
+  `/usr/share/doc/<package>/` (the target's `package`, or `name`) beside a
+  changelog the build makes from its version.
 
 ## A hook that edits another daemon's configuration
 
@@ -95,9 +96,7 @@ on. Two ways a hook silently never runs, both worth knowing before you debug one
 ## What a hook is given
 
 The maintainer script's first two arguments, passed through. So a `postinst`
-hook gets `configure` and, on an upgrade, the version being upgraded from —
-which is how it tells a first install from an upgrade, exactly as the chassis's
-own script does:
+hook gets `configure` and, on an upgrade, the version being upgraded from:
 
 ```sh
 #!/bin/sh
@@ -105,7 +104,7 @@ set -e
 case "$1" in
 configure)
     if [ -z "$2" ]; then
-        echo "first install"
+        echo "no earlier version of this package"
     else
         echo "upgrading from $2"
     fi
@@ -113,9 +112,14 @@ configure)
 esac
 ```
 
+**An empty `$2` does not mean nothing came before.** A switch between this
+appliance's packages configures the incoming one with an empty `$2` over the
+configuration and state the other one left, so a hook that sets something up
+once tests what is on disk. Likewise a `prerm` hook's `remove` may be one
+package of this appliance making way for another.
+
 dpkg passes more than two in some forms (`prerm remove in-favour <pkg> <ver>`).
-Those are not forwarded; if you need them, the argument you have is enough to
-know you are in that case.
+Those are not forwarded.
 
 ## A failing hook fails the operation
 
@@ -130,7 +134,7 @@ migration means the second script running against what the first did not finish.
 somebody driving to it.**
 
 The consequence to design for: a hook must be safe to run again, because the
-operator's next move after fixing the cause is `dpkg --configure wiretap-appliance`.
+operator's next move after fixing the cause is `dpkg --configure -a`.
 
 ## Do not migrate the database from a hook
 
@@ -157,8 +161,8 @@ a service to poke.
   `/etc/ssh/sshd_config.d/50-wiretap-appliance.conf` — checked with `sshd -t` where that
   check passes on its own, and taken back out on purge. An unprivileged daemon
   cannot keep a file under a directory root owns, so its SSH screen says so,
-  nothing is written, and what a host-admin package of this name wrote is
-  removed.
+  nothing is written, and what a host-admin package of this appliance,
+  whatever it is called, wrote is removed.
 - For `privilege = "host-admin"`, links
   `/etc/systemd/timesyncd.conf.d/90-wiretap-appliance.conf` to
   `/etc/wiretap-appliance/timesyncd.conf`, where the Clock screen's NTP servers go, and
@@ -166,6 +170,9 @@ a service to poke.
 - Enables and starts the unit, and restarts rather than stops-and-starts on an
   upgrade.
 - On purge only, removes `/var/lib/wiretap-appliance` and `/etc/wiretap-appliance` and the account.
+  A purge, here and above, removes nothing while another package of this
+  appliance is on the box, and fails, to be run again, when `dpkg-query` cannot
+  say whether one is.
 
 It does **not** write a `config.toml`. Every bootstrap setting has a default and
 an absent file is supported, so that file is never a conffile and never an
