@@ -313,6 +313,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub(crate) const CATALOGUE: &str =
         "[meta]\nname = \"gateway\"\n[meta.modbus.function_code.0x60]\n\
@@ -326,8 +327,12 @@ pub(crate) mod tests {
 
     impl TempDir {
         pub(crate) fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("wiretap-catalogues-{name}-{}", std::process::id()));
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "wiretap-catalogues-{name}-{}-{n}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("a writable temp directory");
             Self(dir)
