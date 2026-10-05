@@ -11,7 +11,7 @@
     "ci": "npm run check && npm run build"
   },
   "dependencies": {
-    "@wired-square/appliance-ui": "github:Wired-Square/wslib-appliance-rs#v0.1.0",
+    "@wired-square/appliance-ui": "github:Wired-Square/wslib-appliance-rs#v0.1.1",
     "solid-js": "^1.9.14"
   },
   "devDependencies": {

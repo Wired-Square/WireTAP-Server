@@ -4,7 +4,7 @@ The Raspberry Pi appliance: `wiretap-appliance`, a web daemon that administers
 the box from a browser, beside `wiretap-server`, which captures as it does on
 any Debian host. It is built on the Wired Square appliance chassis
 ([`wslib-appliance-rs`](https://github.com/Wired-Square/wslib-appliance-rs),
-pinned at `v0.1.0`), which supplies HTTPS, accounts, the host, network, SSH,
+pinned at `v0.1.1`), which supplies HTTPS, accounts, the host, network, SSH,
 certificate, backup and log screens, the package and the card image.
 
 This is a cargo workspace of its own, not a member of the root one, because

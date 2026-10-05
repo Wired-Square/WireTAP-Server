@@ -43,9 +43,11 @@ All notable changes to this project are documented here. Entries go under
 - **Clearing an unassigned interface answers 204, not 404.** `DELETE
   /v1/admin/assignments` is idempotent; a clear whose `expected` no longer
   matches still answers 409 with `current` null.
-- **`wiretap-appliance` is built on chassis `v0.1.0`**, from its new home
-  `wslib-appliance-rs` (the old `v0.16.1` and the next patch). `appliance.toml`
-  declares the card's package as `[targets.image]`, the package builds with
+- **`wiretap-appliance` is built on chassis `v0.1.1`**, from its new home
+  `wslib-appliance-rs` (the old `v0.16.1`, then a patch: a refused radio
+  switch puts its tickbox back, and the fallback errors no longer say "the
+  appliance"). `appliance.toml` declares the card's package as
+  `[targets.image]`, the package builds with
   `make-deb.sh --target image` into `target/debian/image/`, and a daemon run
   by hand needs `WIRETAP_APPLIANCE_PRIVILEGE=host-admin` and
   `WIRETAP_APPLIANCE_ONBOARDING=browser` for the host screens and the
