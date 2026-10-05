@@ -57,6 +57,11 @@ All notable changes to this project are documented here. Entries go under
 
 ### Fixed
 
+- **`--check-config` run without `STATE_DIRECTORY` says where it looked for
+  the gateway's catalogue assignments.** It read them from a directory the
+  packaged unit never uses and reported the `/etc` catalogue without saying
+  so; each line's catalogue row now names the directory and that the unit
+  sets `STATE_DIRECTORY` instead, as the disk cache row already did.
 - **A CAN interface or serial device missing at startup is waited for.** The
   daemon logs one WARN, "waiting for can0", runs its other devices, and opens
   the missing one when it appears, telling GVRET clients its bitrate. It used

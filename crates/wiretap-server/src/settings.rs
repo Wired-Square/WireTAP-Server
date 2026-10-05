@@ -1241,10 +1241,18 @@ impl Settings {
         if self.devices.is_empty() {
             r.push(("devices", "(none)".to_string()));
         }
+        // Assignments sit beside the cache, so the cache row's caveat holds for them too.
+        let state_dir_caveat = match &self.forward {
+            Some(f) if f.batching.cache_origin.is_some() => format!(
+                ", assignments looked for in {}; the packaged unit sets STATE_DIRECTORY instead",
+                f.state_dir().display()
+            ),
+            _ => String::new(),
+        };
         for d in &self.devices {
             r.push(("device", d.to_string()));
             if let Some(rules) = catalogues.effective(&d.interface) {
-                r.push(("  catalogue", rules.to_string()));
+                r.push(("  catalogue", format!("{rules}{state_dir_caveat}")));
             }
         }
         r.extend([
@@ -2249,6 +2257,34 @@ mod tests {
         assert_eq!(
             rows[at + 1],
             ("  catalogue", format!("{path}, test (0x60)"))
+        );
+    }
+
+    #[test]
+    fn a_catalogue_read_without_the_state_directory_says_so() {
+        let by_hand = Env {
+            home: Some("/home/pi".into()),
+            ..env()
+        };
+        let file = FileConfig::parse(&format!("{SERIAL}[forward]\nenable = true\n")).unwrap();
+        let mut r = Settings::resolve(&cli(&[]), Some(&file), &by_hand).unwrap();
+        let path = catalogue_file("by-hand", DECLARES_0X60);
+        let DeviceKind::Serial(line) = &mut r.settings.devices[0].kind else {
+            panic!("a serial device");
+        };
+        line.catalogue = Some(LineCatalogue::read(&path).unwrap());
+        std::fs::remove_file(&path).unwrap();
+        let rows = r.settings.rows(&Catalogues::open(&r.settings));
+        let at = rows.iter().position(|(l, _)| *l == "device").unwrap();
+        assert_eq!(
+            rows[at + 1],
+            (
+                "  catalogue",
+                format!(
+                    "{path}, test (0x60), assignments looked for in /home/pi; \
+                     the packaged unit sets STATE_DIRECTORY instead"
+                )
+            )
         );
     }
 
