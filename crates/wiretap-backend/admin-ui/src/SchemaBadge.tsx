@@ -31,12 +31,17 @@ export function SchemaBadge({ db, target }: { db: DatabaseEntry; target: number 
           v{version} → v{target}
         </span>
       );
-    case "migrating":
+    case "migrating": {
+      const eta = db.migration?.phase === "backfill" ? migrationEta(db.migration) : null;
       return (
-        <span className="badge migrating" title="Reads are refused, and ingest buffered, until this finishes">
-          Migrating{busy !== null && ` ${formatElapsed(busy)}`}
+        <span className="badges">
+          <span className="badge migrating" title="Reads are refused, and ingest buffered, until this finishes">
+            Migrating{busy !== null && ` ${formatElapsed(busy)}`}
+          </span>
+          {eta !== null && <> <span className="badge">about {formatSpan(eta)} left</span></>}
         </span>
       );
+    }
     case "failed":
       return (
         <span className="badge revoked" title={db.schema_error ?? undefined}>
@@ -65,9 +70,8 @@ export function canMigrate(db: DatabaseEntry): boolean {
 }
 
 /**
- * How far a migration has got: chunks, rows, the chunk it is on, the time it
- * has taken and is likely to take, and the ingest buffered meanwhile. For a run
- * that failed, the error and the chunk it stopped at.
+ * How far a migration has got: chunks, rows, the chunk it is on, and the ingest
+ * buffered meanwhile. For a run that failed, the error and the chunk it stopped at.
  */
 export function MigrationProgressView({ db }: { db: DatabaseEntry }) {
   const m = db.migration;
@@ -78,18 +82,13 @@ export function MigrationProgressView({ db }: { db: DatabaseEntry }) {
     return buffered ? <div className="migration muted">{buffered}</div> : null;
   }
   const error = db.schema_error ?? m.last_error;
-  const phase = PHASES[m.phase] ?? m.phase;
-  const day = m.current_chunk_start && new Date(m.current_chunk_start).toLocaleDateString();
   const total = m.chunks_total ?? 0;
   const done = m.chunks_done ?? 0;
-  const eta = running && m.phase === "backfill" ? migrationEta(m) : null;
+  const phase = (PHASES[m.phase] ?? m.phase) + (total > 0 ? ` (${done} of ${total})` : "");
+  const day = m.current_chunk_start && new Date(m.current_chunk_start).toLocaleDateString();
   const facts = [
-    total > 0 && `${done} of ${total} chunks`,
     m.rows_done !== null && `${m.rows_done.toLocaleString()} rows converted`,
     day && (error ? `stopped at ${day}` : `on ${day}`),
-    running && db.busy_secs !== null && `${formatSpan(db.busy_secs)} so far`,
-    eta !== null && `about ${formatSpan(eta)} left`,
-    buffered,
   ].filter(Boolean);
   return (
     <div className="migration">
@@ -101,7 +100,8 @@ export function MigrationProgressView({ db }: { db: DatabaseEntry }) {
           <div style={{ width: `${(100 * done) / total}%` }} />
         </div>
       )}
-      <div className="muted">{facts.join(" · ")}</div>
+      {facts.length > 0 && <div className="muted">{facts.join(" · ")}</div>}
+      {buffered && <div className="muted">{buffered}</div>}
       {!running && error && <div className="error">{error}</div>}
     </div>
   );

@@ -120,8 +120,9 @@ input:focus, select:focus { outline: 1px solid var(--accent); }
 .badge.migrating,
 .badge.behind { color: var(--brand); border-color: var(--brand); }
 
+.badges { white-space: nowrap; }
+
 .banner { border-color: var(--brand); }
-.banner .btn { margin-right: 0.3rem; }
 
 .migration { margin-top: 0.35rem; font-size: 0.8rem; max-width: 22rem; }
 .migration .error { margin: 0.25rem 0 0; }

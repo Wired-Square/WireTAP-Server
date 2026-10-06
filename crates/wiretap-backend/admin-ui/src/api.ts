@@ -170,9 +170,13 @@ export interface DatabaseList {
   auto_migrate: boolean;
 }
 
-/** Seconds as `2m14s` — long enough to matter, short enough to read. */
+/** Seconds as `2h 33m 20s`, without leading zero units. */
 export function formatElapsed(secs: number): string {
-  return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m${secs % 60}s`;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 export interface IngestSession {

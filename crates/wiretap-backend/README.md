@@ -316,7 +316,7 @@ versions until autovacuum reclaims them, about 2 GB on such a chunk. Time it on
 a copy of the archive first.
 
 **A gateway does not migrate on start.** After an upgrade, each database
-behind waits, refusing reads and buffering ingest, and the admin UI names it in
+behind waits, refusing reads and buffering ingest, and the admin UI counts it in
 a banner. Migrate each one when you choose, from the Databases page (**Migrate
 now**) or with `POST /v1/databases/{db}/migrate` (see
 [Migration API](#migration-api)). It runs in the background, the other

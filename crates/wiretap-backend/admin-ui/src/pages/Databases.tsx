@@ -102,7 +102,7 @@ export default function Databases() {
         </thead>
         <tbody>
           {databases.map((d) => (
-            <tr key={d.name} id={`db-${d.name}`}>
+            <tr key={d.name}>
               <td className="mono">{d.name}</td>
               <td>{formatBytes(d.size_bytes)}</td>
               <td>

@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Changed
+
+- **A migration's progress is easier to read.** Time taken shows as `2h 33m
+  20s`, the time left as a badge beside it, and the chunk count beside the
+  phase. The banner counts the databases waiting and offers one Fix button.
+
 ## [0.1.10] — 2026-10-06
 
 CAN remote frames, BRS and ESI are archived and served, in schema v4, which
