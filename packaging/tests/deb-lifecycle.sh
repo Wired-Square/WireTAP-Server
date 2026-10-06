@@ -135,6 +135,29 @@ PATH="$scratch/bin:$PATH" BITRATE=250000 DBITRATE=2000000 "$CAN_UP" can9 \
 link set can9 type can bitrate 250000 restart-ms 100 dbitrate 2000000 fd on
 link set can9 txqueuelen 65536
 link set can9 up" ] || die "can-up ran: $(cat "$scratch/calls")"
+
+# A device that cannot restart from bus-off still comes up. gs_usb refuses a
+# nonzero restart-ms like this.
+cat > "$scratch/bin/ip" <<EOF
+#!/bin/sh
+echo "\$*" >> "$scratch/calls"
+case "\$*" in
+*" type can "*" restart-ms "[1-9]*)
+	echo "Error: Device doesn't support restart from Bus Off." >&2; exit 2 ;;
+esac
+EOF
+rm "$scratch/calls"
+PATH="$scratch/bin:$PATH" BITRATE=500000 "$CAN_UP" can9 2>/dev/null \
+	|| die "can-up failed on a device that cannot restart from bus-off"
+[ "$(cat "$scratch/calls")" = "link set can9 down
+link set can9 type can bitrate 500000 restart-ms 100 fd off
+link set can9 type can bitrate 500000 fd off
+link set can9 txqueuelen 65536
+link set can9 up" ] || die "can-up ran: $(cat "$scratch/calls")"
+
+printf '#!/bin/sh\ncase "$*" in *" type can "*) exit 2 ;; esac\n' > "$scratch/bin/ip"
+! PATH="$scratch/bin:$PATH" BITRATE=500000 "$CAN_UP" can9 2>/dev/null \
+	|| die "can-up came up although every type can call was refused"
 ! env -u BITRATE PATH="$scratch/bin:$PATH" "$CAN_UP" can9 2>/dev/null \
 	|| die "can-up ran with no BITRATE"
 rm -rf "$scratch"

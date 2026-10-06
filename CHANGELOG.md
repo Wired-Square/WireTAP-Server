@@ -58,6 +58,9 @@ All notable changes to this project are documented here. Entries go under
 - **A daemon whose CAN interface or serial device is missing restarts once a
   minute, not every five seconds.** The unit backs off from 5 s to a 60 s cap.
   Waiting for the device without exiting needs a `wslib-wiretap-rs` release.
+- **`wiretap-can@` brings up a gs_usb adapter**, such as a candleLight
+  CANable, that cannot restart from bus-off. When the kernel refuses
+  `restart-ms`, `can-up` says so and sets the interface up without it.
 
 ## [0.1.9] — 2026-10-03
 

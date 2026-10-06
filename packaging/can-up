@@ -5,15 +5,23 @@ set -eu
 
 iface="${1:?usage: can-up <interface>}"
 : "${BITRATE:?is not set in /etc/wiretap-server/can.d/$iface.conf}"
+restart_ms="${RESTART_MS:-100}"
 
-set -- bitrate "$BITRATE" restart-ms "${RESTART_MS:-100}"
-if [ -n "${DBITRATE:-}" ]; then
-    set -- "$@" dbitrate "$DBITRATE" fd on
-else
-    set -- "$@" fd off
-fi
+type_can() {
+    if [ -n "${DBITRATE:-}" ]; then
+        set -- "$@" dbitrate "$DBITRATE" fd on
+    else
+        set -- "$@" fd off
+    fi
+    ip link set "$iface" type can bitrate "$BITRATE" "$@"
+}
 
 ip link set "$iface" down
-ip link set "$iface" type can "$@"
+if [ "$restart_ms" = 0 ]; then
+    type_can restart-ms 0
+elif ! type_can restart-ms "$restart_ms"; then
+    echo "can-up: $iface refused restart-ms $restart_ms, retrying without it" >&2
+    type_can
+fi
 ip link set "$iface" txqueuelen "${TXQUEUELEN:-65536}"
 ip link set "$iface" up
