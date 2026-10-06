@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-10-06
+
+CAN remote frames, BRS and ESI are archived and served, in schema v4, which
+packs a frame's flags into one column. **A gateway no longer migrates on
+start**: each archive waits, buffering its capture servers' ingest and refusing
+reads, until it is migrated from the Databases page, with progress. On a large
+archive that takes hours. The Raspberry Pi appliance arrives, and the package
+brings CAN adapters up and waits for a missing device. **Upgrade every gateway
+before any desktop that sends the new import body.**
+
 ### Added
 
 - **The card image carries a local gateway, switched off.** Docker, and

@@ -1,3 +1,25 @@
+wiretap-server (0.1.10) UNRELEASED; urgency=medium
+
+  * The package brings CAN interfaces up: wiretap-can@<interface>.service
+    configures one from /etc/wiretap-server/can.d/<interface>.conf, and a
+    gs_usb adapter with a conf comes up when plugged in. Nothing comes up
+    without a conf. An adapter that cannot restart from bus-off, such as a
+    candleLight CANable, comes up without restart-ms instead of failing.
+  * A CAN interface or serial device missing at startup is waited for: one
+    warning, the other devices keep running, and it opens when it appears.
+    A start that still fails is restarted once a minute.
+  * CAN remote frames are forwarded, with the length they request, and a CAN
+    FD frame's BRS and ESI with it. GVRET clients and the Test Pattern
+    responder still never see a remote frame.
+  * A catalogue reassignment closes the gateway session with a message the
+    daemon logs at INFO; it reconnects at once instead of logging an outage.
+  * --check-config run without STATE_DIRECTORY says where it looked for
+    the gateway's catalogue assignments.
+  * No configuration change is needed; install and restart. A gateway that
+    is migrating a database buffers this daemon's batches meanwhile.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Tue, 06 Oct 2026 21:16:06 +1100
+
 wiretap-server (0.1.9) bookworm; urgency=medium
 
   * The daemon names itself to the gateway: [forward] daemon_id, the host's
