@@ -1,4 +1,4 @@
-wiretap-server (0.1.10) UNRELEASED; urgency=medium
+wiretap-server (0.1.10) bookworm; urgency=medium
 
   * The package brings CAN interfaces up: wiretap-can@<interface>.service
     configures one from /etc/wiretap-server/can.d/<interface>.conf, and a
