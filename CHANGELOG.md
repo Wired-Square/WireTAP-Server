@@ -38,8 +38,10 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
-- **Built on `wslib-wiretap-rs` v0.1.0**, the WireTAP libraries' new home,
-  restarted from `wiretap-lib-rs` v0.25.1. Nothing here changes.
+- **Built on `wslib-wiretap-rs` v0.1.1**, the WireTAP libraries' new home
+  (`v0.1.0`, restarted from `wiretap-lib-rs` v0.25.1, then the ingest
+  protocol's server close, waiting for a missing device, and CAN's RTR, BRS
+  and ESI flags, which nothing here stores yet).
 - **Clearing an unassigned interface answers 204, not 404.** `DELETE
   /v1/admin/assignments` is idempotent; a clear whose `expected` no longer
   matches still answers 409 with `current` null.

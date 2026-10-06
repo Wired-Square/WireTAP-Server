@@ -22,6 +22,10 @@ fn parts(s: &Sample) -> (proto::RecordFields, &[u8]) {
                 arb_id: c.arb_id,
                 extended: c.extended,
                 fd: c.is_fd,
+                rtr: false,
+                brs: false,
+                esi: false,
+                rtr_len: 0,
                 transmitted: c.dir == Direction::Tx,
             },
             &c.data,
@@ -76,6 +80,7 @@ pub fn decode(ts_us: i64, r: proto::Record) -> Sample {
             extended,
             fd,
             transmitted,
+            ..
         } => Sample::Can(CanSample {
             ts_us,
             arb_id,

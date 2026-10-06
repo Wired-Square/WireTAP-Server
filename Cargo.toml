@@ -39,16 +39,16 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 # codecs' golden-byte tests failed. Those tests do not run in this repo's CI,
 # and that guarantee is why they do not need to. It holds only for tags cut
 # that way; a hand-cut tag has no gate behind it.
-wiretap-protocol = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.0" }
+wiretap-protocol = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.1" }
 # The Modbus RTU tap. Same tag as above: the workspace releases as one, and
 # two tags of one repository would be two checkouts.
-wiretap-catalog = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.0" }
+wiretap-catalog = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.1" }
 # The SocketCAN reader and writer, and the serial port. Same tag again.
-wiretap-io = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.0" }
+wiretap-io = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.1" }
 # The Modbus CRC, for the server's tests alone. Same tag again.
-wiretap-checksum = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.0" }
+wiretap-checksum = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.1" }
 # The gateway's HTTP types, shared with the desktop. Same tag again.
-wiretap-gateway = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.0" }
+wiretap-gateway = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.1.1" }
 
 # --- CLI ---
 clap = { version = "4", default-features = false }

@@ -53,6 +53,7 @@ impl FrameRow {
                 extended,
                 fd,
                 transmitted,
+                ..
             } => Self {
                 ts_us,
                 protocol: Protocol::Can,

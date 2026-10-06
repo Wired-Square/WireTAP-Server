@@ -574,13 +574,21 @@ mod tests {
         encode_batch(seq, 1_700_000_000_000_000, 1, &records)
     }
 
+    /// A `CLOSE` naming the reassignment, and then the end of the stream.
+    async fn closed_as_reassigned(c: &mut TcpStream, buf: &mut Vec<u8>) {
+        let close = reply(c, buf).await.expect("a CLOSE before the end");
+        assert_eq!(close.mtype, MSG_CLOSE);
+        assert_eq!(parse_close(&close.body).unwrap().reason, CLOSE_REASSIGNED);
+        assert!(reply(c, buf).await.is_none(), "still open");
+    }
+
     #[tokio::test]
     async fn a_reassignment_closes_the_session() {
         let (mut c, reassigned) = serving(Fake::default()).await;
         let hello = daemon_hello("bench", vec![device(0, "can0")]);
         assert_eq!(hello_ack(&mut c, &hello).await.status, HELLO_OK);
         reassigned.notify_one();
-        assert!(reply(&mut c, &mut Vec::new()).await.is_none(), "still open");
+        closed_as_reassigned(&mut c, &mut Vec::new()).await;
     }
 
     #[tokio::test]
@@ -596,7 +604,7 @@ mod tests {
         let mut buf = Vec::new();
         let ack = reply(&mut c, &mut buf).await.expect("the ACK it was owed");
         assert_eq!(parse_ack(&ack.body).unwrap().seq, 7);
-        assert!(reply(&mut c, &mut buf).await.is_none(), "still open");
+        closed_as_reassigned(&mut c, &mut buf).await;
     }
 
     /// CRLF, and longer than one chunk.
