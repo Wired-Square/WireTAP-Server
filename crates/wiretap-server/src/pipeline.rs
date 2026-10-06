@@ -465,9 +465,7 @@ async fn read_loop(
                     // would echo to every GVRET client, and a Test Pattern
                     // responder would hear its own replies.
                     let own = read.direction == can::Direction::Tx;
-                    let Some(sample) = socketcan::sample(read, bus, dir) else {
-                        continue;
-                    };
+                    let sample = socketcan::sample(read, bus, dir);
                     if !own {
                         publish(Sample::Can(sample), archive.as_ref(), &frames);
                     } else if let Some(archive) = &archive {

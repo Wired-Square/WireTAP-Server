@@ -99,11 +99,12 @@ impl std::str::FromStr for Protocol {
 
 /// One CAN or CAN FD frame.
 ///
-/// The data length code is **not** stored: it is derivable from `data.len()`
-/// and `is_fd` via `wiretap_protocol::payload_dlc`, and carrying both invites
-/// the two to disagree. The one case that is not derivable — a classic frame
-/// declaring a code of 9–15 while carrying 8 bytes — has no producer or
-/// consumer here, and the Python this replaces did not preserve it either.
+/// A data frame's length code is **not** stored: it is derivable from
+/// `data.len()` and `is_fd` via `wiretap_protocol::payload_dlc`, and carrying
+/// both invites the two to disagree. The one case that is not derivable — a
+/// classic frame declaring a code of 9–15 while carrying 8 bytes — has no
+/// producer or consumer here, and the Python this replaces did not preserve it
+/// either. A remote frame's is `rtr`, because it has no data to derive it from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanSample {
     /// Capture time in microseconds since the Unix epoch.
@@ -112,6 +113,15 @@ pub struct CanSample {
     pub arb_id: u32,
     pub extended: bool,
     pub is_fd: bool,
+    /// A remote frame's requested length code; its `data` is empty.
+    #[serde(default)]
+    pub rtr: Option<u8>,
+    /// Only with `is_fd`.
+    #[serde(default)]
+    pub brs: bool,
+    /// Only with `is_fd`.
+    #[serde(default)]
+    pub esi: bool,
     pub data: Vec<u8>,
     pub bus: SourceId,
     pub dir: Direction,
@@ -234,6 +244,9 @@ mod tests {
             arb_id: 0x123,
             extended: false,
             is_fd: false,
+            rtr: None,
+            brs: false,
+            esi: false,
             data: vec![1],
             bus: SourceId(0),
             dir: Direction::Rx,

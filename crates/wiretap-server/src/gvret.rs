@@ -284,8 +284,10 @@ async fn drain(
     Some(lagged)
 }
 
+/// A remote frame is left out: GVRET has no bit for one, and it would arrive
+/// as a data frame with no data.
 fn encode_can(out: &mut Vec<u8>, s: &Sample, t0: Instant) {
-    if let Sample::Can(c) = s {
+    if let Sample::Can(c @ CanSample { rtr: None, .. }) = s {
         encode(out, c, t0);
     }
 }
@@ -314,6 +316,9 @@ mod tests {
             arb_id,
             extended: false,
             is_fd: false,
+            rtr: None,
+            brs: false,
+            esi: false,
             data: vec![0xAA, 0xBB],
             bus: SourceId(bus),
             dir: Direction::Rx,
@@ -432,6 +437,20 @@ mod tests {
         );
         assert!(out.is_empty(), "nothing encoded");
         assert!(rx.is_empty(), "and nothing left to lag on");
+    }
+
+    #[tokio::test]
+    async fn a_remote_frame_is_not_sent_as_an_empty_data_frame() {
+        let (frames, mut rx) = broadcast::channel(4);
+        let Sample::Can(mut remote) = (*sample(0, 0x111)).clone() else {
+            unreachable!()
+        };
+        (remote.rtr, remote.data) = (Some(8), Vec::new());
+        frames.send(Arc::new(Sample::Can(remote))).unwrap();
+
+        let mut out = Vec::new();
+        drain(&mut rx, &mut out, Instant::now(), true).await;
+        assert!(out.is_empty(), "{out:02X?}");
     }
 
     /// A burst leaves as one write, which is the point of the coalescing.

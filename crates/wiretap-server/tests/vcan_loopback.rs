@@ -226,7 +226,7 @@ async fn a_frame_on_the_bus_becomes_a_sample() {
         .await
         .try_into()
         .expect("one read");
-    let sample = server_can::sample(read, SourceId(3), Direction::Rx).expect("a data frame");
+    let sample = server_can::sample(read, SourceId(3), Direction::Rx);
 
     assert_eq!(sample.data, [0xDE, 0xAD, 0xBE, 0xEF]);
     assert!(!sample.extended);
@@ -246,11 +246,9 @@ async fn a_frame_on_the_bus_becomes_a_sample() {
     );
 }
 
-/// The one deliberate difference from the Python on this path: it passed
-/// remote frames through as zero-length data frames, and this drops them.
 #[tokio::test]
 #[ignore = "needs a vcan interface; see the module docs"]
-async fn a_remote_frame_is_skipped_and_does_not_stall_the_reader() {
+async fn a_remote_frame_is_a_sample_with_the_code_it_requests() {
     let bus = Bus::open();
     let mut task = server_can::open(&iface(), false, false)
         .await
@@ -265,12 +263,10 @@ async fn a_remote_frame_is_skipped_and_does_not_stall_the_reader() {
         .await
         .try_into()
         .expect("two reads");
-    assert!(
-        server_can::sample(remote, SourceId(0), Direction::Rx).is_none(),
-        "a remote frame reached the archive"
-    );
-    let sample = server_can::sample(data, SourceId(0), Direction::Rx).expect("a data frame");
-    assert_eq!(sample.data, [0x55]);
+    let remote = server_can::sample(remote, SourceId(0), Direction::Rx);
+    assert_eq!((remote.rtr, remote.data.len()), (Some(8), 0));
+    let sample = server_can::sample(data, SourceId(0), Direction::Rx);
+    assert_eq!((sample.rtr, sample.data), (None, vec![0x55]));
 }
 
 /// A vcan interface has no bit timing to report, which is exactly the fallback

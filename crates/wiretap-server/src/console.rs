@@ -45,16 +45,20 @@ pub fn format_line(out: &mut String, s: &CanSample, colour: bool, rel_us: u64) {
     } else {
         let _ = write!(out, "{:03X} S", s.arb_id);
     }
-    if s.is_fd {
-        out.push('F');
+    // No `!` can follow: error frames are never delivered.
+    for (on, tag) in [
+        (s.is_fd, 'F'),
+        (s.rtr.is_some(), 'R'),
+        (s.brs, 'B'),
+        (s.esi, 'E'),
+    ] {
+        if on {
+            out.push(tag);
+        }
     }
-    // No R, ! , B or E flag can ever follow. Remote frames are dropped by the
-    // reader and error frames are never delivered; the
-    // bit rate switch and error state indicator are the real loss, and a
-    // `CanSample` does not carry them because nothing else in the pipeline —
-    // the archive included — has anywhere to put them.
 
-    let _ = write!(out, " [{}] ", payload_dlc(s.data.len(), s.is_fd));
+    let dlc = s.rtr.unwrap_or_else(|| payload_dlc(s.data.len(), s.is_fd));
+    let _ = write!(out, " [{dlc}] ");
 
     // Padding is measured over what was written, escape sequences included,
     // exactly as the Python's `ljust` over an already-coloured string: with
@@ -150,6 +154,9 @@ mod tests {
             arb_id,
             extended,
             is_fd,
+            rtr: None,
+            brs: false,
+            esi: false,
             data: data.to_vec(),
             bus: SourceId(bus),
             dir: Direction::Rx,
@@ -251,6 +258,23 @@ mod tests {
             line(&s, false),
             "B2 (1.234_567) 200 SF [9] 40 41 42 43 44 45 46 47 48 49 4A 4B | @ABCDEFGHIJK\n"
         );
+    }
+
+    #[test]
+    fn a_remote_frame_is_tagged_r_with_the_code_it_requests() {
+        let mut s = sample(0, 0x7DF, false, false, &[]);
+        s.rtr = Some(8);
+        assert_eq!(
+            line(&s, false),
+            format!("B0 (1.234_567) 7DF SR [8] {:23} | \n", "")
+        );
+    }
+
+    #[test]
+    fn brs_and_esi_follow_the_fd_tag() {
+        let mut s = sample(2, 0x200, false, true, &[0; 12]);
+        (s.brs, s.esi) = (true, true);
+        assert!(line(&s, false).starts_with("B2 (1.234_567) 200 SFBE [9] 00"));
     }
 
     /// Colour wraps each printable byte individually, in both columns, and the

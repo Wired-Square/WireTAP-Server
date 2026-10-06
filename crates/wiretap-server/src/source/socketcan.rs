@@ -35,25 +35,13 @@ pub async fn open(interface: &str, fd: bool, listen_only: bool) -> io::Result<Ca
 }
 
 /// A read as the archive stores it: `dir` for what the bus carried, and `tx`
-/// for what this socket sent.
-///
-/// Remote-transmission frames are `None`: they carry no data, and archiving
-/// one as a zero-length frame would be noise. **This differs from the
-/// Python**, which passed them through.
-pub fn sample(read: CanRead, bus: SourceId, dir: Direction) -> Option<CanSample> {
-    let frame = read.frame;
-    (!frame.rtr).then(|| CanSample {
-        ts_us: system_time_to_us(read.at),
-        arb_id: frame.arb_id,
-        extended: frame.extended,
-        is_fd: frame.fd,
-        data: frame.data,
-        bus,
-        dir: match read.direction {
-            can::Direction::Rx => dir,
-            can::Direction::Tx => Direction::Tx,
-        },
-    })
+/// for what this socket sent. A remote frame keeps the length code it requests.
+pub fn sample(read: CanRead, bus: SourceId, dir: Direction) -> CanSample {
+    let dir = match read.direction {
+        can::Direction::Rx => dir,
+        can::Direction::Tx => Direction::Tx,
+    };
+    crate::wire::can_sample(read.frame, system_time_to_us(read.at), bus, dir)
 }
 
 /// Ask the kernel what an interface is configured for, falling back as
@@ -79,7 +67,9 @@ pub fn loss(error: &CanError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use wiretap_io::can::CanEvent;
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+    use wiretap_io::can::{CanEvent, CanFrame};
 
     #[tokio::test]
     async fn an_interface_missing_at_startup_is_waited_for() {
@@ -97,6 +87,17 @@ mod tests {
                 })
             ),
             "{first:?}"
+        );
+    }
+
+    #[test]
+    fn a_remote_frame_is_a_sample_with_the_code_it_requests() {
+        let at = UNIX_EPOCH + Duration::from_micros(1_700_000_000_000_001);
+        let read = CanRead::new(CanFrame::remote(0, 0x7DF, false, 8), can::Direction::Rx, at);
+        let s = sample(read, SourceId(2), Direction::Rx);
+        assert_eq!(
+            (s.arb_id, s.rtr, s.data.len(), s.ts_us, s.bus),
+            (0x7DF, Some(8), 0, 1_700_000_000_000_001, SourceId(2))
         );
     }
 }

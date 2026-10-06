@@ -44,6 +44,9 @@ fn sample(seq: u32, base_us: i64) -> Arc<Sample> {
         arb_id: 0x700 + (seq % 4),
         extended: false,
         is_fd: false,
+        rtr: None,
+        brs: false,
+        esi: false,
         // The sequence number in the payload, so a row can be traced back to
         // the frame that produced it.
         data: seq.to_le_bytes().to_vec(),

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use rusqlite::{params_from_iter, Connection};
 use wiretap_model::{CanSample, Direction, ModbusSample, Protocol, Sample, SerialSample, SourceId};
+use wiretap_protocol::can::CanFlags;
 use wiretap_protocol::ingest::{modbus_id, modbus_unit_func};
-use wiretap_protocol::payload_dlc;
 
 /// Why a cache operation failed.
 ///
@@ -262,22 +262,30 @@ impl SqliteCache {
                 bus INTEGER NOT NULL,
                 dir TEXT NOT NULL,
                 protocol TEXT NOT NULL DEFAULT 'can',
-                crc_valid INTEGER
+                crc_valid INTEGER,
+                flags INTEGER
             )",
         )?;
         // Every path that opens a file comes through here — `reset` and the
         // adoption rename included — so this is the one place the widening
-        // can live. A Python-written cache has neither column; its rows read
-        // back as CAN through the default. Constant defaults are metadata in
-        // SQLite, so this rewrites nothing however full the file is.
-        let widened = conn
-            .prepare("SELECT 1 FROM pragma_table_info('frames') WHERE name = 'protocol'")?
-            .exists([])?;
-        if !widened {
-            conn.execute_batch(
+        // can live. A Python-written cache has none of these columns; its rows
+        // read back as CAN through the default, and a NULL `flags` as no
+        // flags. Constant defaults are metadata in SQLite, so this rewrites
+        // nothing however full the file is.
+        for (column, widen) in [
+            (
+                "protocol",
                 "ALTER TABLE frames ADD COLUMN protocol TEXT NOT NULL DEFAULT 'can';
                  ALTER TABLE frames ADD COLUMN crc_valid INTEGER",
-            )?;
+            ),
+            ("flags", "ALTER TABLE frames ADD COLUMN flags INTEGER"),
+        ] {
+            let widened = conn
+                .prepare("SELECT 1 FROM pragma_table_info('frames') WHERE name = ?1")?
+                .exists([column])?;
+            if !widened {
+                conn.execute_batch(widen)?;
+            }
         }
         Ok(conn)
     }
@@ -343,27 +351,31 @@ impl FrameCache for SqliteCache {
         let tx = self.conn.transaction()?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO frames (ts, extended, is_fd, arb_id, dlc, data, bus, dir, protocol, crc_valid)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO frames (ts, extended, is_fd, arb_id, dlc, data, bus, dir, protocol, crc_valid, flags)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
             for f in frames {
                 match &**f {
-                    // `dlc` is written for the Python's benefit, not ours: it
-                    // is derivable from the payload and this store's reader
-                    // derives it, but a Python still reading this file expects
-                    // a column.
-                    Sample::Can(c) => stmt.execute(rusqlite::params![
-                        to_secs(c.ts_us),
-                        c.extended,
-                        c.is_fd,
-                        c.arb_id,
-                        payload_dlc(c.data.len(), c.is_fd),
-                        c.data,
-                        c.bus.0,
-                        c.dir.as_str(),
-                        f.protocol().as_str(),
-                        Option::<bool>::None,
-                    ])?,
+                    // A data frame's `dlc` is written for the Python's benefit,
+                    // not ours: it is derivable from the payload and this
+                    // store's reader derives it, but a Python still reading
+                    // this file expects a column. A remote frame's is read back.
+                    Sample::Can(c) => {
+                        let frame = crate::wire::can_frame(c);
+                        stmt.execute(rusqlite::params![
+                            to_secs(c.ts_us),
+                            c.extended,
+                            c.is_fd,
+                            c.arb_id,
+                            frame.dlc(),
+                            c.data,
+                            c.bus.0,
+                            c.dir.as_str(),
+                            f.protocol().as_str(),
+                            Option::<bool>::None,
+                            CanFlags::of(&frame, false).0,
+                        ])?
+                    }
                     // The CAN columns take what the wire record and the
                     // archive give them: the id is the unit and function code
                     // packed, `dlc` is the message length, and a tap sends
@@ -379,6 +391,7 @@ impl FrameCache for SqliteCache {
                         Direction::Rx.as_str(),
                         f.protocol().as_str(),
                         Some(m.crc_valid),
+                        Option::<u8>::None,
                     ])?,
                     // As Modbus, with the read sequence for the id.
                     Sample::Serial(r) => stmt.execute(rusqlite::params![
@@ -392,6 +405,7 @@ impl FrameCache for SqliteCache {
                         Direction::Rx.as_str(),
                         f.protocol().as_str(),
                         Option::<bool>::None,
+                        Option::<u8>::None,
                     ])?,
                 };
             }
@@ -403,7 +417,7 @@ impl FrameCache for SqliteCache {
 
     fn oldest(&mut self, limit: usize) -> Result<Vec<Cached>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, ts, extended, is_fd, arb_id, data, bus, dir, protocol, crc_valid
+            "SELECT id, ts, extended, is_fd, arb_id, data, bus, dir, protocol, crc_valid, flags, dlc
              FROM frames ORDER BY id LIMIT ?1",
         )?;
         let mut out = Vec::with_capacity(limit);
@@ -440,23 +454,32 @@ impl FrameCache for SqliteCache {
                         format!("no sample for protocol {tag:?}").into(),
                     ));
                 }
-                Some(Protocol::Can) => Sample::Can(CanSample {
-                    ts_us,
-                    extended: r.get(2)?,
-                    is_fd: r.get(3)?,
-                    arb_id: r.get(4)?,
-                    data: r.get(5)?,
-                    bus,
-                    // An unreadable tag is `rx` — the Python wrote whatever
-                    // `--pg-dir` said, so a cache from one could hold anything,
-                    // and the direction is not worth dropping a frame over.
-                    dir: r
-                        .get_ref(7)?
-                        .as_str()
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(Direction::Rx),
-                }),
+                Some(Protocol::Can) => {
+                    let flags = CanFlags(r.get::<_, Option<u8>>(10)?.unwrap_or(0));
+                    Sample::Can(CanSample {
+                        ts_us,
+                        extended: r.get(2)?,
+                        is_fd: r.get(3)?,
+                        rtr: flags
+                            .contains(CanFlags::RTR)
+                            .then(|| r.get(11))
+                            .transpose()?,
+                        brs: flags.contains(CanFlags::BRS),
+                        esi: flags.contains(CanFlags::ESI),
+                        arb_id: r.get(4)?,
+                        data: r.get(5)?,
+                        bus,
+                        // An unreadable tag is `rx` — the Python wrote whatever
+                        // `--pg-dir` said, so a cache from one could hold anything,
+                        // and the direction is not worth dropping a frame over.
+                        dir: r
+                            .get_ref(7)?
+                            .as_str()
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(Direction::Rx),
+                    })
+                }
             };
             Ok(Cached {
                 id: r.get(0)?,
@@ -566,6 +589,9 @@ mod tests {
             arb_id,
             extended: false,
             is_fd: false,
+            rtr: None,
+            brs: false,
+            esi: false,
             data: vec![1, 2, 3],
             bus: SourceId(0),
             dir: Direction::Rx,
@@ -622,12 +648,27 @@ mod tests {
             arb_id: 0x18DA_F110,
             extended: true,
             is_fd: true,
+            rtr: None,
+            brs: true,
+            esi: true,
             data: (0..64).collect(),
             bus: SourceId(7),
             dir: Direction::Tx,
         }));
-        c.append(std::slice::from_ref(&original)).unwrap();
-        assert_eq!(c.oldest(1).unwrap()[0].sample, original);
+        let Sample::Can(fd) = &*original else {
+            unreachable!()
+        };
+        let remote = Arc::new(Sample::Can(CanSample {
+            is_fd: false,
+            rtr: Some(8),
+            brs: false,
+            esi: false,
+            data: Vec::new(),
+            ..fd.clone()
+        }));
+        c.append(&[original.clone(), remote.clone()]).unwrap();
+        let back: Vec<_> = c.oldest(2).unwrap().into_iter().map(|c| c.sample).collect();
+        assert_eq!(back, [original, remote]);
     }
 
     /// A Modbus message rides in the CAN columns, and every field has to come
@@ -870,6 +911,9 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
                 arb_id: 0x123,
                 extended: false,
                 is_fd: false,
+                rtr: None,
+                brs: false,
+                esi: false,
                 data: vec![1, 2, 3],
                 bus: SourceId(0),
                 dir: Direction::Rx,
@@ -882,6 +926,9 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
                 arb_id: 0x18DA_F110,
                 extended: true,
                 is_fd: true,
+                rtr: None,
+                brs: false,
+                esi: false,
                 data: (0..64).collect(),
                 bus: SourceId(7),
                 dir: Direction::Tx,
@@ -942,6 +989,9 @@ INSERT INTO sqlite_sequence VALUES('frames',3);
             arb_id: 0x18DA_F110,
             extended: true,
             is_fd: true,
+            rtr: None,
+            brs: false,
+            esi: false,
             data: vec![0xAA; 12],
             bus: SourceId(7),
             dir: Direction::Tx,

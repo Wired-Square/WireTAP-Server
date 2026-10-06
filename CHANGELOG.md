@@ -35,6 +35,9 @@ All notable changes to this project are documented here. Entries go under
   the daemon is not installed and enabled, is marked for autoremoval, ships
   with a CAN interface configured or a CAN HAT overlay in `config.txt`, or a
   radio's driver is blacklisted.
+- **CAN remote frames are archived**, with the length code they request as
+  `dlc` and no data, where the daemon used to drop them. A GVRET client and the
+  Test Pattern responder still never see one, and `--echo-console` tags it `R`.
 - **The archive keeps a CAN FD frame's BRS and ESI.** `/frames` serves
   `is_rtr`, `is_brs` and `is_esi` beside `is_fd`. The analytical queries,
   `payloads`, `inventory` and the hourly rollup leave remote frames out.

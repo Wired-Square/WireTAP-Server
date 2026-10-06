@@ -724,6 +724,9 @@ mod tests {
             arb_id,
             extended: false,
             is_fd: false,
+            rtr: None,
+            brs: false,
+            esi: false,
             data: vec![1, 2, 3],
             bus: SourceId(0),
             dir: Direction::Rx,
@@ -1107,6 +1110,9 @@ mod tests {
             Arc::new(Sample::Can(CanSample {
                 extended: true,
                 is_fd: true,
+                rtr: None,
+                brs: false,
+                esi: false,
                 dir: Direction::Tx,
                 bus: SourceId(3),
                 ..can(BASE + 1_500, 0x456)

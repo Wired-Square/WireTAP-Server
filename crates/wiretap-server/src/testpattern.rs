@@ -94,7 +94,10 @@ pub async fn responder_loop<S: ReplySink>(
         let Sample::Can(sample) = &*sample else {
             continue;
         };
-        if sample.bus != bus || !is_test_pattern_frame(sample.arb_id, sample.extended) {
+        if sample.bus != bus
+            || sample.rtr.is_some()
+            || !is_test_pattern_frame(sample.arb_id, sample.extended)
+        {
             continue;
         }
         // The capture timestamp rather than a fresh clock reading: the crate
@@ -149,6 +152,9 @@ mod tests {
             arb_id,
             extended: false,
             is_fd,
+            rtr: None,
+            brs: false,
+            esi: false,
             data,
             bus: BUS,
             dir: Direction::Rx,
@@ -265,6 +271,9 @@ mod tests {
             arb_id: SWEEP_REQUEST_BASE + 5,
             extended: true,
             is_fd: false,
+            rtr: None,
+            brs: false,
+            esi: false,
             data: vec![0; 5],
             bus: BUS,
             dir: Direction::Rx,
@@ -272,6 +281,21 @@ mod tests {
         let replies = run(vec![
             framed(Message::Control(Command::Start { mode: 0, run: RUN })),
             extended_sweep,
+        ])
+        .await;
+        assert!(replies.is_empty(), "{replies:?}");
+    }
+
+    #[tokio::test]
+    async fn a_remote_frame_on_a_sweep_id_is_not_echoed() {
+        let Sample::Can(mut remote) = (*sample(SWEEP_REQUEST_BASE + 8, false, Vec::new())).clone()
+        else {
+            unreachable!()
+        };
+        remote.rtr = Some(8);
+        let replies = run(vec![
+            framed(Message::Control(Command::Start { mode: 0, run: RUN })),
+            Arc::new(Sample::Can(remote)),
         ])
         .await;
         assert!(replies.is_empty(), "{replies:?}");
