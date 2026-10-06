@@ -94,7 +94,7 @@ impl ForwardSink {
     fn connection(&mut self) -> Result<&mut Connection, SinkError> {
         self.conn
             .as_mut()
-            .ok_or_else(|| SinkError("forward: not connected".into()))
+            .ok_or_else(|| SinkError::Failed("forward: not connected".into()))
     }
 
     /// Send one `BATCH` and wait for its acknowledgement.
@@ -117,14 +117,14 @@ impl ForwardSink {
         conn.send(&message).await?;
         let frame = conn.recv().await?;
         if frame.mtype != proto::MSG_ACK {
-            return Err(SinkError("forward: malformed ACK".into()));
+            return Err(SinkError::Failed("forward: malformed ACK".into()));
         }
         let ack = proto::parse_ack(&frame.body)
-            .map_err(|_| SinkError("forward: malformed ACK".into()))?;
+            .map_err(|_| SinkError::Failed("forward: malformed ACK".into()))?;
         // A gateway that cannot read a batch's seq refuses it as seq 0.
         let unread_seq = ack.seq == 0 && ack.status == proto::ACK_MALFORMED;
         if ack.seq != seq && !unread_seq {
-            return Err(SinkError(format!(
+            return Err(SinkError::Failed(format!(
                 "forward: ACK for seq={} while awaiting seq={seq}",
                 ack.seq
             )));
@@ -134,9 +134,9 @@ impl ForwardSink {
             // Back-pressure, and the reason this protocol has an ACK at all:
             // failing here caches the frames rather than dropping them into a
             // gateway that has said it cannot take them.
-            proto::ACK_OVERLOADED => Err(SinkError("forward: gateway overloaded".into())),
+            proto::ACK_OVERLOADED => Err(SinkError::Failed("forward: gateway overloaded".into())),
             proto::ACK_MALFORMED => self.quarantine(chunk, seq),
-            status => Err(SinkError(format!(
+            status => Err(SinkError::Failed(format!(
                 "forward: batch nacked (seq={} status={status})",
                 ack.seq
             ))),
@@ -150,7 +150,7 @@ impl ForwardSink {
         let path = &self.dead_letter;
         tokio::task::block_in_place(|| SqliteCache::open(path, u64::MAX)?.append(chunk))
             .map_err(|e| {
-                SinkError(format!(
+                SinkError::Failed(format!(
                     "forward: batch refused as malformed (seq={seq}) and not quarantined to {}: {e}",
                     path.display()
                 ))
@@ -192,14 +192,16 @@ impl ForwardSink {
             rx: Vec::new(),
         };
         let hello = proto::encode_hello(&self.hello())
-            .map_err(|e| SinkError(format!("forward: cannot send HELLO: {e}")))?;
+            .map_err(|e| SinkError::Failed(format!("forward: cannot send HELLO: {e}")))?;
         conn.send(&hello).await?;
         let frame = conn.recv().await?;
         if frame.mtype != proto::MSG_HELLO_ACK {
-            return Err(SinkError("forward: no HELLO_ACK from gateway".into()));
+            return Err(SinkError::Failed(
+                "forward: no HELLO_ACK from gateway".into(),
+            ));
         }
-        let ack =
-            proto::parse_hello_ack(&frame.body).map_err(|e| SinkError(format!("forward: {e}")))?;
+        let ack = proto::parse_hello_ack(&frame.body)
+            .map_err(|e| SinkError::Failed(format!("forward: {e}")))?;
         Ok((conn, ack))
     }
 
@@ -291,8 +293,20 @@ async fn with_timeout<T>(
 ) -> Result<T, SinkError> {
     match tokio::time::timeout(IO_TIMEOUT, op).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(SinkError(format!("forward: {what} failed: {e}"))),
-        Err(_) => Err(SinkError(format!("forward: timed out on {what}"))),
+        Ok(Err(e)) => Err(SinkError::Failed(format!("forward: {what} failed: {e}"))),
+        Err(_) => Err(SinkError::Failed(format!("forward: timed out on {what}"))),
+    }
+}
+
+fn closed(body: &[u8]) -> SinkError {
+    match proto::parse_close(body) {
+        Ok(proto::Close {
+            reason: proto::CLOSE_REASSIGNED,
+        }) => SinkError::Closed("gateway closed the session: catalogue reassigned".into()),
+        Ok(proto::Close { reason }) => {
+            SinkError::Closed(format!("gateway closed the session (reason {reason})"))
+        }
+        Err(e) => SinkError::Failed(format!("forward: malformed CLOSE: {e}")),
     }
 }
 
@@ -315,7 +329,7 @@ impl Connection {
     /// The `CATALOG` answering `get`.
     async fn recv_catalog(&mut self, get: &proto::CatalogGet) -> Result<proto::Catalog, String> {
         loop {
-            let frame = self.recv_any().await.map_err(|e| e.0)?;
+            let frame = self.recv_any().await.map_err(|e| e.to_string())?;
             if frame.mtype != proto::MSG_CATALOG {
                 return Err(format!("a reply of type {:#04x}", frame.mtype));
             }
@@ -336,7 +350,7 @@ impl Connection {
         while let Some(get) = next {
             self.send(&proto::encode_catalog_get(&get))
                 .await
-                .map_err(|e| e.0)?;
+                .map_err(|e| e.to_string())?;
             let chunk = self.recv_catalog(&get).await?;
             match chunk.status {
                 proto::CATALOG_OK => {}
@@ -350,13 +364,17 @@ impl Connection {
         Ok(blob)
     }
 
-    /// Read until one complete, intact message has arrived.
+    /// Read until one complete, intact message has arrived. A `CLOSE` is the
+    /// gateway ending the session, whatever was asked.
     async fn recv_any(&mut self) -> Result<proto::WireFrame, SinkError> {
         loop {
             match proto::take_frame(&mut self.rx) {
-                Err(e) => return Err(SinkError(format!("forward: {e}"))),
+                Err(e) => return Err(SinkError::Failed(format!("forward: {e}"))),
                 Ok(Some(frame)) if !frame.crc_ok => {
-                    return Err(SinkError("forward: bad CRC from gateway".into()));
+                    return Err(SinkError::Failed("forward: bad CRC from gateway".into()));
+                }
+                Ok(Some(frame)) if frame.mtype == proto::MSG_CLOSE => {
+                    return Err(closed(&frame.body));
                 }
                 Ok(Some(frame)) => return Ok(frame),
                 Ok(None) => {}
@@ -365,7 +383,9 @@ impl Connection {
             let mut buf = [0u8; READ_BUF];
             let n = with_timeout("read", self.stream.read(&mut buf)).await?;
             if n == 0 {
-                return Err(SinkError("forward: gateway closed connection".into()));
+                return Err(SinkError::Failed(
+                    "forward: gateway closed connection".into(),
+                ));
             }
             self.rx.extend_from_slice(&buf[..n]);
         }
@@ -399,7 +419,7 @@ impl BatchSink for ForwardSink {
                 proto::HELLO_UNAVAILABLE => ": the gateway's database is not available yet".into(),
                 _ => String::new(),
             };
-            return Err(SinkError(format!(
+            return Err(SinkError::Failed(format!(
                 "forward: HELLO rejected (status={}){why}",
                 ack.status
             )));
@@ -448,7 +468,7 @@ impl BatchSink for ForwardSink {
         let conn = self.connection()?;
         conn.send(&ping).await?;
         if conn.recv().await?.mtype != proto::MSG_PONG {
-            return Err(SinkError("forward: unexpected idle reply".into()));
+            return Err(SinkError::Failed("forward: unexpected idle reply".into()));
         }
         Ok(())
     }
@@ -506,6 +526,9 @@ mod tests {
         nack_from: usize,
         /// Hang up rather than answering the first batch.
         close_on_batch: bool,
+        /// Close the first session with this reason instead of answering its
+        /// first batch or ping.
+        close_with: Option<u8>,
     }
 
     impl Default for Script {
@@ -519,6 +542,7 @@ mod tests {
                 ack_status: proto::ACK_OK,
                 nack_from: 0,
                 close_on_batch: false,
+                close_with: None,
             }
         }
     }
@@ -543,8 +567,12 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let task = tokio::spawn(async move {
             let mut seen = Seen::default();
-            for _ in 0..script.connections {
+            for i in 0..script.connections {
                 let (mut stream, _) = listener.accept().await.unwrap();
+                let script = Script {
+                    close_with: script.close_with.filter(|_| i == 0),
+                    ..script.clone()
+                };
                 answer(&mut stream, &script, &mut seen).await;
             }
             seen
@@ -577,6 +605,12 @@ mod tests {
                 continue;
             }
 
+            if let (Some(reason), proto::MSG_BATCH | proto::MSG_PING) =
+                (script.close_with, frame.mtype)
+            {
+                let _ = stream.write_all(&proto::encode_close(reason)).await;
+                return;
+            }
             let reply = match frame.mtype {
                 proto::MSG_HELLO => {
                     let hello = proto::parse_hello(&frame.body).expect("a valid HELLO");
@@ -1266,7 +1300,7 @@ mod tests {
         let mut s = sink(port, "");
         s.connect().await.unwrap();
         let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err().cause;
-        assert_eq!(err, SinkError("forward: gateway overloaded".into()));
+        assert_eq!(err, SinkError::Failed("forward: gateway overloaded".into()));
         s.close().await;
         let _ = gateway.await;
     }
@@ -1417,10 +1451,53 @@ mod tests {
         let err = s.write_batch(&[sample(1, 1)]).await.unwrap_err().cause;
         assert_eq!(
             err,
-            SinkError("forward: gateway closed connection".into()),
+            SinkError::Failed("forward: gateway closed connection".into()),
             "and not a ten-second timeout"
         );
         let _ = gateway.await;
+    }
+
+    #[tokio::test]
+    async fn a_session_the_gateway_closes_is_told_apart_from_an_outage() {
+        for (reason, why) in [
+            (
+                proto::CLOSE_REASSIGNED,
+                "gateway closed the session: catalogue reassigned",
+            ),
+            (7, "gateway closed the session (reason 7)"),
+        ] {
+            let (port, gateway) = fake_gateway(Script {
+                close_with: Some(reason),
+                ..Script::default()
+            })
+            .await;
+            let mut s = sink(port, "");
+            s.connect().await.unwrap();
+            let err = s.keep_alive().await.unwrap_err();
+            assert_eq!(err.to_string(), why);
+            let _ = gateway.await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_in_flight_when_the_gateway_reassigns_goes_to_the_next_session() {
+        let dir = TempDir::new("reassigned");
+        let (port, gateway) = fake_gateway(Script {
+            close_with: Some(proto::CLOSE_REASSIGNED),
+            connections: 2,
+            ..Script::default()
+        })
+        .await;
+        let frames = two_chunks();
+        run_batcher(port, dir.0.join("cache.db"), &frames).await;
+
+        let seen = tokio::time::timeout(Duration::from_secs(2), gateway)
+            .await
+            .expect("a second session, at once")
+            .unwrap();
+        let sent: usize = seen.batches.iter().map(|b| b.records.len()).sum();
+        assert_eq!(sent, frames.len());
+        assert!(cached(&dir.0.join("cache.db")).is_empty());
     }
 
     #[tokio::test]

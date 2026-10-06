@@ -65,6 +65,11 @@ All notable changes to this project are documented here. Entries go under
 - **`wiretap-can@` brings up a gs_usb adapter**, such as a candleLight
   CANable, that cannot restart from bus-off. When the kernel refuses
   `restart-ms`, `can-up` says so and sets the interface up without it.
+- **A catalogue reassignment is no longer logged on the daemon as an
+  outage.** The gateway closes the session with a `CLOSE` naming the
+  reassignment, and the daemon logs it at INFO and reconnects at once, where
+  it logged a write error and "database unavailable" and backed off. A batch
+  the gateway had not acknowledged is cached and sent first.
 
 ## [0.1.9] — 2026-10-03
 

@@ -59,14 +59,21 @@ const FULL_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DROPS_PER_CLOCK_CHECK: u64 = 1024;
 
 /// Why a sink write failed. A string for the same reason [`crate::cache`]'s is:
-/// the caller's response is to cache the batch and back off, whatever went
-/// wrong.
+/// the caller's response to a failure is to cache the batch and back off,
+/// whatever went wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SinkError(pub String);
+pub enum SinkError {
+    Failed(String),
+    /// The far end ended the session on purpose and expects a reconnect at
+    /// once: not an outage.
+    Closed(String),
+}
 
 impl std::fmt::Display for SinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Failed(why) | Self::Closed(why) => f.write_str(why),
+        }
     }
 }
 
@@ -496,8 +503,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                         }
                     }
                     Err(e) => {
-                        self.fail(e, Vec::new()).await;
-                        if !self.wait_to_retry(&mut backoff).await {
+                        if !self.fail(e, Vec::new(), &mut backoff).await {
                             break;
                         }
                         continue;
@@ -513,8 +519,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                 Ok(true) => continue,
                 Ok(false) => {}
                 Err(e) => {
-                    self.fail(e, Vec::new()).await;
-                    if !self.wait_to_retry(&mut backoff).await {
+                    if !self.fail(e, Vec::new(), &mut backoff).await {
                         break;
                     }
                     continue;
@@ -528,8 +533,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                     break;
                 }
                 if let Err(e) = self.sink.keep_alive().await {
-                    self.fail(e, Vec::new()).await;
-                    if !self.wait_to_retry(&mut backoff).await {
+                    if !self.fail(e, Vec::new(), &mut backoff).await {
                         break;
                     }
                 }
@@ -538,8 +542,10 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
 
             if let Err(e) = self.sink.write_batch(&batch).await {
                 add(&self.counters.written, e.delivered as u64);
-                self.fail(e.cause, batch.split_off(e.delivered)).await;
-                if !self.wait_to_retry(&mut backoff).await {
+                if !self
+                    .fail(e.cause, batch.split_off(e.delivered), &mut backoff)
+                    .await
+                {
                     break;
                 }
                 continue;
@@ -725,20 +731,36 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
         Ok(true)
     }
 
-    /// The sink failed: say so once, put `batch` somewhere durable, and empty
-    /// the queue behind it so the capture keeps its own path clear.
-    async fn fail(&mut self, e: SinkError, batch: Vec<Arc<Sample>>) {
-        error!("write error: {e}{}", self.tag);
+    /// The sink failed: say so once, put `batch` somewhere durable, empty the
+    /// queue behind it so the capture keeps its own path clear, and wait to
+    /// retry. A session the far end closed caches `batch` too, but reconnects
+    /// at once. `false` once there is no point retrying.
+    async fn fail(
+        &mut self,
+        e: SinkError,
+        batch: Vec<Arc<Sample>>,
+        backoff: &mut Duration,
+    ) -> bool {
+        let closed = matches!(e, SinkError::Closed(_));
+        if closed {
+            info!("{e}; reconnecting{}", self.tag);
+        } else {
+            error!("write error: {e}{}", self.tag);
+        }
         self.sink.close().await;
         self.connected = false;
-        if !self.sink_down {
+        if !closed && !self.sink_down {
             self.sink_down = true;
             warn!("database unavailable, caching frames to disk{}", self.tag);
         }
         if !batch.is_empty() {
             self.cache_batch(&batch);
         }
+        if closed {
+            return true;
+        }
         self.drain_queue_to_cache();
+        self.wait_to_retry(backoff).await
     }
 
     /// Store a batch on disk, or count it dropped and say why. Returns how
@@ -943,7 +965,7 @@ mod tests {
 
         fn check(&self) -> SinkResult {
             match self.fault.lock().unwrap().clone() {
-                Some(e) => Err(SinkError(e)),
+                Some(e) => Err(SinkError::Failed(e)),
                 None => Ok(()),
             }
         }

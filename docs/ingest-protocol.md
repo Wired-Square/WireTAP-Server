@@ -41,8 +41,10 @@ database cannot be read. When the meta database fails at a `HELLO`, the
 gateway logs a warning and answers with no assignments rather than refusing
 the session. An anonymous v3 `HELLO`, or a v2 one, records nothing and gets
 no assignments. When a daemon's assignment changes, the gateway closes that
-daemon's sessions whose `HELLO` named the interface, after any reply it owes,
-and the reconnect reads the new assignment.
+daemon's sessions whose `HELLO` named the interface, after any reply it owes
+and a `CLOSE` naming the reassignment, and the reconnect reads the new
+assignment. The daemon logs a `CLOSE` at INFO, not as an outage, and
+reconnects at once; a batch still owed an ACK is cached and sent first.
 
 Before its first batch, a sink fetches any assigned catalogue it does not
 have, checks the blob against its SHA-1, and parses it as it would a `catalog`
