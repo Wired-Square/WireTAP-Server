@@ -106,15 +106,14 @@ impl std::fmt::Display for RunError {
             // No capability hint: an AF_CAN raw socket needs none.
             Self::OpenCan { iface, err } => {
                 write!(f, "cannot open {iface}: {err}")?;
-                match err.raw_os_error() {
-                    Some(libc::ENODEV) => write!(f, ". Check `ip link show {iface}`"),
-                    Some(libc::EAFNOSUPPORT) => write!(
+                if err.raw_os_error() == Some(libc::EAFNOSUPPORT) {
+                    write!(
                         f,
                         ". Is the can_raw module loaded, and AF_CAN in the unit's \
                          RestrictAddressFamilies=?"
-                    ),
-                    _ => Ok(()),
+                    )?;
                 }
+                Ok(())
             }
             Self::OpenSerial { path, err } => write!(
                 f,
@@ -270,7 +269,7 @@ async fn start_devices(
 }
 
 #[cfg(target_os = "linux")]
-/// A CAN device with its socket open and its archive found.
+/// A CAN device opened or waited for, and its archive found.
 struct Opened {
     device: Device,
     writer: CanWriter,
@@ -310,13 +309,14 @@ async fn start_capture(
     let any_fd = settings.any_fd();
 
     let (transmits, transmit_queue) = mpsc::channel(TRANSMIT_QUEUE);
+    let buses = Arc::new(gvret::BusInfo::new(
+        bus_count(opened.len(), settings.bus_offset),
+        rates.iter().map(|r| r.nominal),
+    ));
     let listener = gvret::Server::bind(
         &settings.host,
         settings.port,
-        gvret::BusInfo {
-            count: bus_count(opened.len(), settings.bus_offset),
-            speeds: rates.iter().map(|r| r.nominal).collect(),
-        },
+        buses.clone(),
         frames.clone(),
         transmits,
     )
@@ -344,9 +344,10 @@ async fn start_capture(
         },
     );
 
-    for (o, task) in opened.iter().zip(tasks) {
+    for (i, (o, task)) in opened.iter().zip(tasks).enumerate() {
         readers.spawn(read_loop(
             task,
+            (buses.clone(), i),
             o.device.interface.clone(),
             o.device.bus,
             settings.default_dir,
@@ -420,30 +421,44 @@ fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {
 #[cfg(target_os = "linux")]
 /// Publish one interface's frames to everything downstream.
 ///
-/// A loss is logged once and its end once, as the serial tap does, however
-/// many retries lie between: "reopened" for a new socket, else "reading again"
-/// at the first read.
+/// A loss, or an interface missing at startup, is logged once and its end
+/// once, as the serial tap does, however many retries lie between: "found" or
+/// "reopened" for a new socket, else "reading again" at the first read.
+///
+/// GVRET clients are told the bitrate read at each new socket, and again at
+/// the first read after it or a loss: an adapter's interface can be bound
+/// before `wiretap-can@` has set its bitrate.
 async fn read_loop(
     mut task: CanTask,
+    (buses, index): (Arc<gvret::BusInfo>, usize),
     iface: String,
     bus: SourceId,
     dir: Direction,
     frames: broadcast::Sender<Arc<Sample>>,
     archive: Option<Archive>,
 ) {
+    let reread_rate = || buses.set_speed(index, socketcan::bitrates(&iface).nominal);
+    let mut opened = false;
     let mut reopening = false;
     let mut lost = false;
+    let mut rate_stale = false;
     while let Some(event) = task.next_event().await {
         match event {
             CanEvent::Connected(_) => {
+                reread_rate();
+                rate_stale = true;
                 if std::mem::take(&mut reopening) {
-                    info!("{iface}: reopened");
+                    info!("{iface}: {}", if opened { "reopened" } else { "found" });
                     lost = false;
                 }
+                opened = true;
             }
             CanEvent::Read(reads) => {
                 if std::mem::take(&mut lost) {
                     info!("{iface}: reading again");
+                }
+                if std::mem::take(&mut rate_stale) {
+                    reread_rate();
                 }
                 for read in reads {
                     // An own transmit goes to the archive alone: broadcast, it
@@ -463,12 +478,15 @@ async fn read_loop(
             CanEvent::Disconnected {
                 error, consecutive, ..
             } => {
-                if consecutive == 1 {
-                    error!("{iface}: {}", socketcan::loss(&error));
+                match consecutive {
+                    1 if opened => error!("{iface}: {}", socketcan::loss(&error)),
+                    1 => warn!("waiting for {iface}: {error}. Check `ip link show {iface}`"),
+                    _ => {}
                 }
                 // A read error keeps the socket, so nothing is reopened.
                 reopening = !matches!(error, CanError::Read(_));
                 lost = true;
+                rate_stale = true;
             }
             // `Bus` is gs_usb's and PEAK's alone, and this reads SocketCAN.
             _ => {}
@@ -662,12 +680,6 @@ mod tests {
 
     #[test]
     fn a_can_open_hints_at_the_fix_for_its_error_and_never_at_a_capability() {
-        let missing = open_can(io::Error::from_raw_os_error(libc::ENODEV));
-        assert!(
-            missing.ends_with(". Check `ip link show can0`"),
-            "{missing}"
-        );
-
         let refused = open_can(io::Error::from_raw_os_error(libc::EAFNOSUPPORT));
         assert!(
             refused.contains("can_raw") && refused.contains("RestrictAddressFamilies="),

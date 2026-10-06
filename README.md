@@ -190,7 +190,8 @@ that key and never by password.
 on any host, and forwards nothing until `[forward]` is set. A CAN adapter comes
 up from `can.d/<interface>.conf` through `wiretap-can@`, as
 [above](#can-interfaces); the image ships with none configured and no CAN HAT
-overlay in `config.txt`.
+overlay in `config.txt`. Until one comes up, the daemon logs that it is waiting
+for `can0` and opens it when it appears.
 
 The image also carries a local gateway, installed and disabled. It needs
 storage mounted at `/srv/wiretap-gateway` before it will start; the steps are
@@ -198,9 +199,6 @@ in [appliance/README.md](appliance/README.md#enabling-the-local-gateway).
 
 Known behaviour, with fixes to come:
 
-- With no CAN adapter, `wiretap-server` exits on its missing interface and is
-  restarted, backing off to once a minute. Waiting for the device instead
-  needs a `wslib-wiretap-rs` release.
 - On a first boot the mDNS name can come up as `wiretap-<serial>-2.local`.
   `systemctl restart avahi-daemon` restores it until the chassis fixes it.
 - A factory reset puts the packaged configuration back but leaves

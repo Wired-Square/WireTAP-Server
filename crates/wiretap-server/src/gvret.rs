@@ -13,6 +13,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,7 +52,28 @@ pub struct BusInfo {
     /// numbers.
     pub count: u8,
     /// Nominal bitrate per interface, in configuration order.
-    pub speeds: Vec<u32>,
+    speeds: Vec<AtomicU32>,
+}
+
+impl BusInfo {
+    pub fn new(count: u8, speeds: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            count,
+            speeds: speeds.into_iter().map(AtomicU32::new).collect(),
+        }
+    }
+
+    /// For an interface that came up at another rate than it started with.
+    pub fn set_speed(&self, interface: usize, nominal: u32) {
+        self.speeds[interface].store(nominal, Ordering::Relaxed);
+    }
+
+    fn speeds(&self) -> Vec<u32> {
+        self.speeds
+            .iter()
+            .map(|s| s.load(Ordering::Relaxed))
+            .collect()
+    }
 }
 
 /// The listening socket, and everything a client task is given at accept.
@@ -69,13 +91,13 @@ impl Server {
     pub async fn bind(
         host: &str,
         port: u16,
-        buses: BusInfo,
+        buses: Arc<BusInfo>,
         frames: broadcast::Sender<Arc<Sample>>,
         transmits: mpsc::Sender<Transmit>,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind((host, port)).await?,
-            buses: Arc::new(buses),
+            buses,
             frames,
             transmits,
         })
@@ -167,7 +189,10 @@ impl Client {
         match command {
             ClientCommand::DevInfo => out.extend_from_slice(&encode_dev_info()),
             ClientCommand::CanbusParams => {
-                out.extend_from_slice(&encode_canbus_params(self.buses.count, &self.buses.speeds));
+                out.extend_from_slice(&encode_canbus_params(
+                    self.buses.count,
+                    &self.buses.speeds(),
+                ));
             }
             ClientCommand::NumBuses => out.extend_from_slice(&encode_num_buses(self.buses.count)),
             ClientCommand::Timebase => out.extend_from_slice(&encode_timebase(elapsed_us(self.t0))),
@@ -303,7 +328,7 @@ mod tests {
         transmits: mpsc::Receiver<Transmit>,
     }
 
-    async fn harness(buses: BusInfo) -> Harness {
+    async fn harness(buses: Arc<BusInfo>) -> Harness {
         let (frames, _) = broadcast::channel(64);
         let (tx, transmits) = mpsc::channel(8);
         let server = Server::bind("127.0.0.1", 0, buses, frames.clone(), tx)
@@ -318,11 +343,8 @@ mod tests {
         }
     }
 
-    fn two_buses() -> BusInfo {
-        BusInfo {
-            count: 2,
-            speeds: vec![500_000, 250_000],
-        }
+    fn two_buses() -> Arc<BusInfo> {
+        Arc::new(BusInfo::new(2, [500_000, 250_000]))
     }
 
     /// Read exactly `n` bytes, failing the test rather than hanging forever if
@@ -353,7 +375,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_client_is_answered_over_a_real_socket() {
-        let h = harness(two_buses()).await;
+        let buses = two_buses();
+        let h = harness(buses.clone()).await;
         let mut c = TcpStream::connect(h.addr).await.unwrap();
 
         c.write_all(&[&SYNC[..], &[0xF1, 0x07, 0xF1, 0x0C]].concat())
@@ -369,6 +392,14 @@ mod tests {
         assert_eq!(
             expect_bytes(&mut c, 12).await,
             encode_canbus_params(2, &[500_000, 250_000])
+        );
+
+        buses.set_speed(1, 1_000_000);
+        c.write_all(&[0xF1, 0x06]).await.unwrap();
+        assert_eq!(
+            expect_bytes(&mut c, 12).await,
+            encode_canbus_params(2, &[500_000, 1_000_000]),
+            "an interface reopened at another rate"
         );
     }
 

@@ -5,7 +5,7 @@ use std::io;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use wiretap_catalog::LineSettings;
 use wiretap_io::serial::{self, Access, SerialError, SerialEvent, SerialOptions, SerialTask};
 use wiretap_model::{Sample, SourceId};
@@ -56,6 +56,7 @@ pub fn open(path: &str, line: &SerialSettings) -> io::Result<SerialTask> {
         exclusive: true,
         read_buffer: 4096,
         reopen: Some(Duration::from_secs(1)),
+        wait_for_device: true,
         ..SerialOptions::default()
     };
     serial::open(path, line.line, options).map_err(|e| match e {
@@ -64,8 +65,8 @@ pub fn open(path: &str, line: &SerialSettings) -> io::Result<SerialTask> {
     })
 }
 
-/// Hand every read to the taps for as long as the task runs. A loss is logged
-/// once and its end once.
+/// Hand every read to the taps for as long as the task runs. A loss, or a line
+/// missing at startup, is logged once and its end once.
 pub async fn drain(
     interface: String,
     mut task: SerialTask,
@@ -73,6 +74,7 @@ pub async fn drain(
     mut raw: Option<RawTap>,
     mut publish: impl FnMut(Sample),
 ) {
+    let mut opened = false;
     let mut lost = false;
     while let Some(event) = task.next_event().await {
         match event {
@@ -81,8 +83,9 @@ pub async fn drain(
                     raw.reset();
                 }
                 if std::mem::take(&mut lost) {
-                    info!("{interface}: reopened");
+                    info!("{interface}: {}", if opened { "reopened" } else { "found" });
                 }
+                opened = true;
             }
             SerialEvent::Read { bytes, at } => {
                 if let Some(raw) = &mut raw {
@@ -104,8 +107,10 @@ pub async fn drain(
             SerialEvent::Disconnected {
                 error, consecutive, ..
             } => {
-                if consecutive == 1 {
-                    error!("{interface}: {error}; reopening");
+                match consecutive {
+                    1 if opened => error!("{interface}: {error}; reopening"),
+                    1 => warn!("waiting for {interface}: {error}"),
+                    _ => {}
                 }
                 if let Some(framed) = &mut framed {
                     framed.tap.reset();
@@ -338,17 +343,16 @@ mod tests {
 
     /// macOS has no termios constant above 230 400 baud.
     #[cfg(target_os = "linux")]
-    #[test]
-    fn every_supported_baud_reaches_the_open() {
+    #[tokio::test]
+    async fn every_supported_baud_reaches_the_open() {
         for &baud in crate::settings::SUPPORTED_BAUDS {
             let line = SerialSettings {
                 line: LineSettings { baud, ..LINE.line },
                 ..LINE
             };
-            let refused = open("/nonexistent/wiretap-tap", &line)
-                .err()
-                .expect("opened");
-            assert_eq!(refused.kind(), io::ErrorKind::NotFound, "{baud}: {refused}");
+            if let Err(refused) = open("/nonexistent/wiretap-tap", &line) {
+                panic!("{baud}: {refused}");
+            }
         }
     }
 
@@ -366,6 +370,21 @@ mod tests {
             .err()
             .expect("a second open got past TIOCEXCL");
         assert_eq!(refused.raw_os_error(), Some(libc::EBUSY), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_line_missing_at_startup_is_waited_for() {
+        let link =
+            std::env::temp_dir().join(format!("wiretap-server-absent-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        let mut received = tap(link.to_str().expect("utf-8 path"), SourceId(0));
+
+        let mut pty = Pty::new();
+        std::os::unix::fs::symlink(&pty.slave, &link).expect("symlink");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        pty.master.write_all(&REQUEST).expect("write");
+        assert_eq!(next(&mut received).await.raw, REQUEST);
+        let _ = std::fs::remove_file(&link);
     }
 
     /// Unplugged mid-request and replugged as a fresh tty: the half request

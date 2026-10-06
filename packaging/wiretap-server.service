@@ -49,8 +49,9 @@ TimeoutStopSec=30
 # A capture that stops is a capture with a hole in it.
 Restart=always
 RestartSec=5s
-# A device absent at boot fails every start until it appears; one a minute is
-# enough to notice it, and the cap bounds the hole a real crash leaves.
+# A device absent at boot is waited for, but a refused open (a permission, a
+# missing module) fails every start until fixed; one a minute is enough to
+# notice it, and the cap bounds the hole a real crash leaves.
 RestartSteps=5
 RestartMaxDelaySec=60s
 

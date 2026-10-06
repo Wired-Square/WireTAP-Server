@@ -13,8 +13,8 @@ use wiretap_model::{CanSample, Direction, SourceId};
 
 use super::{system_time_to_us, Bitrates};
 
-/// Open `interface` now, so a missing one is the caller's error, and read it
-/// until the task is dropped.
+/// Open `interface` now, or wait for it if it is missing, and read it until
+/// the task is dropped. Any other open error is the caller's.
 ///
 /// Without `fd`, FD frames are dropped and FD sends refused. `listen_only`
 /// refuses every send. What this socket sends comes back as a `Tx` read,
@@ -23,6 +23,7 @@ pub async fn open(interface: &str, fd: bool, listen_only: bool) -> io::Result<Ca
     let mut options = CanOptions::default();
     options.listen_only = listen_only;
     options.own_frames = true;
+    options.wait_for_device = true;
     let sc = SocketCanOptions {
         interface: interface.to_owned(),
         fd,
@@ -73,5 +74,29 @@ pub fn loss(error: &CanError) -> String {
             "interface is down; capture resumes once it is up".to_owned()
         }
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wiretap_io::can::CanEvent;
+
+    #[tokio::test]
+    async fn an_interface_missing_at_startup_is_waited_for() {
+        let mut task = super::open("wiretap-absent0", false, true)
+            .await
+            .expect("open");
+        let first = task.next_event().await;
+        assert!(
+            matches!(
+                first,
+                Some(CanEvent::Disconnected {
+                    consecutive: 1,
+                    retry_in: Some(_),
+                    ..
+                })
+            ),
+            "{first:?}"
+        );
     }
 }
