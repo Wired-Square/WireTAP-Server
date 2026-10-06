@@ -231,9 +231,10 @@ columns, so the column sets don't match.)
 
 **If the source archive predates 2026-09-10**, the frame table there is called
 `can_frame` and has no `protocol` column. **The gateway migrates it for you**
-when you press **Migrate now** — nothing to run by hand. It is fast and rewrites
-nothing: 5.3 s for 87.8 M rows on a fully compressed hypertable, with every chunk
-still compressed afterwards.
+when you press **Migrate now** — nothing to run by hand. That first step is fast
+and rewrites nothing: 5.3 s for 87.8 M rows on a fully compressed hypertable,
+with every chunk still compressed afterwards. The run carries on to the current
+version, though, and v4 rewrites every chunk (below).
 
 Two things to know when it does:
 
@@ -262,7 +263,7 @@ TimescaleDB has a use-after-free (fixed by
 in 2.28.1) that fails the statement at random with `unrecognized node type`.
 Every migration now refuses an older engine before it changes anything: the
 database stays at its old version, marked *failed* in the admin UI with the
-engine version it found, and the gateway tries again when it next starts.
+engine version it found, and **Migrate now** tries again.
 0.1.3 did not check, and left such a database half-migrated and without its
 `events` table. Check before upgrading a gateway that carries it:
 
@@ -281,7 +282,7 @@ which refuse a version mismatch until that `ALTER` has run. TimescaleDB does
 not downgrade; snapshot first. Only then move the gateway's tag.
 
 **An archive at schema v1** (any database the gateway has run since
-2026-09-10) is taken to v3 in one pass:
+2026-09-10) is taken to v3, then on to v4 below, in one pass:
 [0002_events_annotations.sql](schema/migrations/0002_events_annotations.sql)
 reshapes the never-used `events` table into the annotations table
 (milliseconds; refuses to run if that table holds a row, and says so in the

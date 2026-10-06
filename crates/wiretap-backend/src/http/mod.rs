@@ -1107,10 +1107,10 @@ mod tests {
         assert_eq!(schema_consensus(&s), "v1");
     }
 
-    /// A database behind and *not* being migrated still refuses reads and
-    /// writes. Folding it into the version tally reported a tidy "v0" while
-    /// nothing worked — which is what an operator running with automatic
-    /// migration off would have seen.
+    /// A database behind and *not* being migrated still refuses reads. Folding
+    /// it into the version tally reported a tidy "v0" while nothing could be
+    /// read — which is what an operator running with automatic migration off
+    /// would have seen.
     #[test]
     fn a_database_left_behind_is_not_a_clean_consensus() {
         let s = states(&[
@@ -1271,7 +1271,7 @@ mod tests {
         let chosen = db::tests::behind_database("chosen").await;
         let other = db::tests::behind_database("other").await;
         let dbs = db::tests::live_databases(false);
-        dbs.migrate_all().await;
+        db::tests::sweep(&dbs).await;
         for name in [&chosen, &other] {
             dbs.write_rows(name, &frames(0x7D0, 1_700_000_000_000_000, 3))
                 .await
@@ -1319,7 +1319,7 @@ mod tests {
     async fn the_databases_list_shows_a_migration_advancing_chunk_by_chunk() {
         let name = db::tests::seeded_v3_database("progress", 40, 2880).await;
         let dbs = db::tests::live_databases(false);
-        dbs.migrate_all().await;
+        db::tests::sweep(&dbs).await;
         let at = gateway(dbs.clone()).await;
         let path = format!("/v1/databases/{name}/migrate");
         let (status, _) = request_to(at, "POST", &path, Some("bootstrap"), None).await;

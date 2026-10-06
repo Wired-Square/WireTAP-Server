@@ -225,18 +225,22 @@ pub async fn rollup_status(client: &Client) -> Result<RollupState, String> {
 /// measured at 16 s per 88 M compressed rows — and owed after any migration
 /// that leaves the aggregate uncovered: `db.rs` asks before running it.
 pub async fn refresh_rollup(client: &Client) -> Result<(), String> {
+    refresh(client, REFRESH_SQL).await
+}
+
+async fn refresh(client: &Client, sql: &str) -> Result<(), String> {
     // Retried once, and only for a collision. Creating the aggregate also creates
     // its maintenance policy, and that job can be refreshing while this runs;
     // TimescaleDB refuses the second with 55P03 rather than blocking. Retrying
     // anything else would double the cost of a genuine failure — on a large
     // archive that is minutes of refresh run twice while the database is still
     // refusing traffic — and delay the error that says why.
-    match refresh_rollup_once(client).await {
+    match refresh_once(client, sql).await {
         Ok(()) => Ok(()),
         Err(e) if is_concurrent_refresh(&e) => {
             tracing::warn!("rollup refresh collided with the maintenance job, retrying: {e}");
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            refresh_rollup_once(client).await
+            refresh_once(client, sql).await
         }
         Err(e) => Err(e),
     }
@@ -261,21 +265,22 @@ pub async fn refresh_rollup_span(
     span: &crate::ingest::writer::Drained,
 ) -> Result<(), String> {
     let at = |t: std::time::SystemTime| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339();
-    client
-        .batch_execute(&format!(
+    refresh(
+        client,
+        &format!(
             "CALL refresh_continuous_aggregate('public.capture_frame_hourly', \
                date_trunc('hour', '{}'::timestamptz), \
                date_trunc('hour', '{}'::timestamptz) + INTERVAL '1 hour')",
             at(span.first),
             at(span.last)
-        ))
-        .await
-        .map_err(|e| format!("rollup refresh failed: {}", db_error_detail(&e)))
+        ),
+    )
+    .await
 }
 
-async fn refresh_rollup_once(client: &Client) -> Result<(), String> {
+async fn refresh_once(client: &Client, sql: &str) -> Result<(), String> {
     client
-        .batch_execute(REFRESH_SQL)
+        .batch_execute(sql)
         .await
         .map_err(|e| format!("rollup refresh failed: {}", db_error_detail(&e)))
 }

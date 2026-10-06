@@ -175,6 +175,8 @@ const CREATE_PENDING: &str = "CREATE TABLE IF NOT EXISTS public.capture_frame_pe
 
 /// Advisory lock keys. Every buffered write holds `BUFFER_LOCK` shared and the
 /// drain holds it exclusively, so no batch lands in a buffer already drained.
+/// A write is refused rather than queued behind a drain: a capture server that
+/// gives up waiting for its ACK sends the batch again.
 const BUFFER_LOCK: i64 = 0x5754_4150_0001;
 const CREATE_PENDING_LOCK: i64 = 0x5754_4150_0002;
 
@@ -210,7 +212,8 @@ pub enum Written {
 
 /// Buffer a batch for a database behind this build's schema, deciding under
 /// the drain's lock, so a batch either lands before the drain or finds the
-/// database current and goes to `capture_frame`.
+/// database current and goes to `capture_frame`; during the drain, it is
+/// refused.
 pub async fn buffer_rows(pool: &Pool, batch: &[FrameRow]) -> Result<Written, CopyError> {
     let text = copy_text(batch)?;
     let mut client = pool.get().await.map_err(pool_error)?;
@@ -218,9 +221,20 @@ pub async fn buffer_rows(pool: &Pool, batch: &[FrameRow]) -> Result<Written, Cop
         .transaction()
         .await
         .map_err(CopyError::postgres("begin"))?;
-    tx.execute("SELECT pg_advisory_xact_lock_shared($1)", &[&BUFFER_LOCK])
+    let locked: bool = tx
+        .query_one(
+            "SELECT pg_try_advisory_xact_lock_shared($1)",
+            &[&BUFFER_LOCK],
+        )
         .await
-        .map_err(CopyError::postgres("buffer lock"))?;
+        .map_err(CopyError::postgres("buffer lock"))?
+        .get(0);
+    if !locked {
+        return Err(CopyError {
+            code: None,
+            message: "the buffer is being drained; retry shortly".into(),
+        });
+    }
     let current = crate::schema::detect_version(&*tx)
         .await
         .map_err(pool_error)?
@@ -228,14 +242,16 @@ pub async fn buffer_rows(pool: &Pool, batch: &[FrameRow]) -> Result<Written, Cop
     let table = if current {
         "public.capture_frame"
     } else {
-        // Serialised, because two concurrent `CREATE TABLE IF NOT EXISTS` can
-        // both find it missing and one then fails.
-        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&CREATE_PENDING_LOCK])
-            .await
-            .map_err(CopyError::postgres("create lock"))?;
-        tx.batch_execute(CREATE_PENDING)
-            .await
-            .map_err(CopyError::postgres("create buffer"))?;
+        if !has_pending(&*tx).await.map_err(pool_error)? {
+            // Serialised, because two concurrent `CREATE TABLE IF NOT EXISTS`
+            // can both find it missing and one then fails.
+            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&CREATE_PENDING_LOCK])
+                .await
+                .map_err(CopyError::postgres("create lock"))?;
+            tx.batch_execute(CREATE_PENDING)
+                .await
+                .map_err(CopyError::postgres("create buffer"))?;
+        }
         "public.capture_frame_pending"
     };
     let sink = tx
@@ -441,6 +457,37 @@ mod tests {
             assert!(ours.is_some(), "the buffer has no {column}");
             assert_eq!(ours, typed(table, column), "{column}");
         }
+    }
+
+    /// A capture server gives up on an ACK after ten seconds and sends the batch
+    /// again, so a write held behind a long drain and stored afterwards is stored
+    /// twice. Refused at once, it is retried instead.
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn a_write_during_a_drain_is_refused_for_a_retry_rather_than_held() {
+        use crate::db::{tests::*, WriteError};
+        let name = behind_database("draining").await;
+        let dbs = live_databases(false);
+        sweep(&dbs).await;
+        let draining = dbs.connect_raw(&name).await.unwrap();
+        draining
+            .execute("SELECT pg_advisory_lock($1)", &[&BUFFER_LOCK])
+            .await
+            .unwrap();
+
+        let write = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dbs.write_rows(&name, &frames(0x7E8, 1_700_000_000_000_000, 3)),
+        )
+        .await
+        .expect("the write waited for the drain");
+        assert!(
+            matches!(&write, Err(WriteError::Copy(e)) if !refused_the_rows(e.code.as_ref())),
+            "{write:?}"
+        );
+        drop(draining);
+        assert!(!buffer_exists(&name).await);
+        dbs.delete_database(&name).await.unwrap();
     }
 
     #[test]

@@ -145,11 +145,11 @@ Notes:
   restarts too, about 20 s — so capture daemons cache through it; pulling the
   image first (`docker pull`) keeps that window to the recreate alone. Take a
   snapshot first if the release migrates the schema —
-  the CHANGELOG says when one does, and a large archive can be refusing traffic
-  for minutes while it migrates (measured: about two minutes for 1.9 billion
-  rows at v3). Capture daemons cache to disk through that and drain when it
-  clears. Data on the dataset persists across container replacement; the old
-  image stays in `docker images` for a rollback.
+  the CHANGELOG says when one does. A database behind then waits for **Migrate
+  now** on the Databases page, refusing reads and buffering its ingest, and a
+  large archive can take hours to migrate (v4: 5 h 20 m for 645 M rows). Data
+  on the dataset persists across container replacement; the old image stays in
+  `docker images` for a rollback.
 - **"Update available" on the Apps page is not a gateway release.** For a
   Custom App it means an image digest moved for *some* tag your YAML names;
   with both tags pinned it stays quiet. If the release needs a newer

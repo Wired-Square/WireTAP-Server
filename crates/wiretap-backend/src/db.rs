@@ -21,7 +21,7 @@ use crate::schema;
 /// `connect_raw` — is deliberately outside it; it must work for the gateway to
 /// authenticate anything at all.
 ///
-/// Ingest for a database `Pending` or `Migrating` is not refused but buffered
+/// Ingest for a database not `Current` is not refused but buffered
 /// into `capture_frame_pending`, and drained into `capture_frame` before the
 /// database is next `Current`: see [`Databases::write_rows`].
 #[derive(Clone, Debug)]
@@ -180,7 +180,8 @@ pub struct Databases {
     /// version a database is at, and the reads it would otherwise block are
     /// exactly the ones it exists to make fast.
     rollup_rebuild: Arc<Mutex<HashMap<String, Instant>>>,
-    /// Pools for buffering ingest, kept while a database is not `Current`.
+    /// Pools for buffering ingest, dropped once a database is `Current`: a pool
+    /// keeps its idle connections for good.
     buffer_pools: Arc<Mutex<HashMap<String, Pool>>>,
     /// Rows this process has buffered per database since its last drain.
     buffered: Arc<Mutex<HashMap<String, u64>>>,
@@ -223,7 +224,9 @@ impl Databases {
         // Under the pools lock, which `pool_if_current` holds from its check to
         // its insert, so no pool is cached for a state being left.
         let mut pools = self.pools.lock().await;
-        if !matches!(state, DbSchemaState::Current { .. }) {
+        if matches!(state, DbSchemaState::Current { .. }) {
+            self.buffer_pools.lock().await.remove(name);
+        } else {
             pools.remove(name);
         }
         self.schema_state
@@ -262,21 +265,26 @@ impl Databases {
     /// Bring one database to the current schema, probing it first.
     /// Idempotent, and safe to call on a database that is already current.
     pub async fn migrate_one(&self, name: &str) -> Result<(), String> {
-        let at = match self.probe_version(name).await {
-            Ok(at) => at,
-            Err(e) => {
-                self.set_state(name, DbSchemaState::failed(0, e.clone()))
-                    .await;
-                return Err(e);
-            }
-        };
-        self.migrate_from(name, at).await
+        self.migrate_from(name, None).await
     }
 
-    /// The migration proper, given a version the caller has already established.
-    /// Split from [`Self::migrate_one`] so the sweep's probe pass is not thrown
-    /// away and asked again.
+    /// The migration proper, given the version the caller found. Split from
+    /// [`Self::migrate_one`] so the sweep's probe pass is not thrown away and
+    /// asked again for a database already current. One behind is asked again
+    /// under the lock: a run queued behind another may find it finished.
     async fn migrate_from(&self, name: &str, at: Option<i32>) -> Result<(), String> {
+        let _guard = self.create_lock.lock().await;
+        let at = match at {
+            Some(schema::SCHEMA_VERSION) => at,
+            _ => match self.probe_version(name).await {
+                Ok(at) => at,
+                Err(e) => {
+                    self.set_state(name, DbSchemaState::failed(at.unwrap_or(0), e.clone()))
+                        .await;
+                    return Err(e);
+                }
+            },
+        };
         // A database already at the current version is *not* marked `Migrating`:
         // that would evict its pool and refuse its reads on every sweep. But the
         // schema is still re-applied, because `apply_capture_schema` is
@@ -285,7 +293,6 @@ impl Databases {
         // current version means it finished, and re-running it costs a few
         // milliseconds.
         let migrating = at != Some(schema::SCHEMA_VERSION);
-        let _guard = self.create_lock.lock().await;
         let since = Instant::now();
         if migrating {
             self.set_state(name, DbSchemaState::migrating()).await;
@@ -947,18 +954,28 @@ pub(crate) mod tests {
         Databases::new(Arc::new(config))
     }
 
-    async fn fresh_database(prefix: &str) -> String {
+    /// Held to create a database, and to sweep. On a fresh cluster two first
+    /// runs race to create the role the schema grants to; and a sweep re-applies
+    /// the schema to every current database on the cluster, which re-stamps one
+    /// caught between its creation and `then`.
+    static CLUSTER: Mutex<()> = Mutex::const_new(());
+
+    /// A new capture database, with `then` run on it.
+    async fn fresh_database(prefix: &str, then: &str) -> String {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let name = format!("{prefix}_{stamp}");
-        // One at a time: on a fresh cluster, two first runs race to create the
-        // role the schema grants to.
-        static CREATING: Mutex<()> = Mutex::const_new(());
-        let _creating = CREATING.lock().await;
+        let _cluster = CLUSTER.lock().await;
         live_databases(true).create_database(&name).await.unwrap();
+        run(&name, then).await;
         name
+    }
+
+    pub(crate) async fn sweep(dbs: &Databases) {
+        let _cluster = CLUSTER.lock().await;
+        dbs.migrate_all().await;
     }
 
     pub(crate) async fn run(name: &str, sql: &str) {
@@ -970,22 +987,19 @@ pub(crate) mod tests {
     /// over its own work, so the newest one takes it to current with nothing
     /// of its own to do: what is left is the runner's.
     pub(crate) async fn behind_database(prefix: &str) -> String {
-        let name = fresh_database(prefix).await;
         let behind = schema::SCHEMA_VERSION - 1;
-        run(
-            &name,
+        fresh_database(
+            prefix,
             &format!("UPDATE public.schema_version SET version = {behind}"),
         )
-        .await;
-        name
+        .await
     }
 
     /// A database in v3's shape, with `days` of CAN frames, `per_day` to a
     /// day's chunk, the older half compressed.
     pub(crate) async fn seeded_v3_database(prefix: &str, days: u32, per_day: u32) -> String {
-        let name = fresh_database(prefix).await;
-        run(
-            &name,
+        fresh_database(
+            prefix,
             &format!(
                 "DROP MATERIALIZED VIEW public.capture_frame_hourly CASCADE;
                  DROP VIEW public.can_fd_frame_bytes, public.can_frame_bytes, public.can_frame;
@@ -1007,8 +1021,7 @@ pub(crate) mod tests {
                 days / 2
             ),
         )
-        .await;
-        name
+        .await
     }
 
     /// `n` CAN frames of `id`, a millisecond apart from `from_us`.
@@ -1064,7 +1077,7 @@ pub(crate) mod tests {
     async fn a_database_migrated_by_hand_is_served_without_a_restart() {
         let name = behind_database("handrun").await;
         let dbs = live_databases(false);
-        dbs.migrate_all().await;
+        sweep(&dbs).await;
         assert_eq!(state_of(&dbs, &name).await.label(), "pending");
         assert!(
             dbs.pool(&name).await.is_err(),
@@ -1097,7 +1110,10 @@ pub(crate) mod tests {
     async fn a_new_database_is_initialised_but_an_existing_one_behind_waits() {
         let dbs = live_databases(false);
         let new = format!("fresh_{}", std::process::id());
-        dbs.create_database(&new).await.unwrap();
+        {
+            let _cluster = CLUSTER.lock().await;
+            dbs.create_database(&new).await.unwrap();
+        }
         assert_eq!(state_of(&dbs, &new).await.label(), "current");
         assert_eq!(
             version_on_disk(&dbs, &new).await,
@@ -1123,7 +1139,7 @@ pub(crate) mod tests {
     async fn ingest_during_a_migration_lands_once_after_it_and_reads_stay_refused() {
         let name = seeded_v3_database("during", 12, 24).await;
         let dbs = live_databases(false);
-        dbs.migrate_all().await;
+        sweep(&dbs).await;
 
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = tokio::spawn({
@@ -1132,10 +1148,14 @@ pub(crate) mod tests {
                 let mut sent = 0;
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     let from = 1_700_000_000_000_000 + sent * 1000;
-                    dbs.write_rows(&name, &frames(0x7B0, from, 10))
+                    // Sent again when refused, as a capture server does.
+                    if dbs
+                        .write_rows(&name, &frames(0x7B0, from, 10))
                         .await
-                        .unwrap();
-                    sent += 10;
+                        .is_ok()
+                    {
+                        sent += 10;
+                    }
                 }
                 sent
             }
@@ -1162,7 +1182,7 @@ pub(crate) mod tests {
     async fn a_buffer_left_by_a_crash_is_drained_at_startup() {
         let name = behind_database("crashed").await;
         let before = live_databases(false);
-        before.migrate_all().await;
+        sweep(&before).await;
         before
             .write_rows(&name, &frames(0x7C0, 1_700_000_000_000_000, 7))
             .await
@@ -1174,11 +1194,134 @@ pub(crate) mod tests {
         assert!(buffer_exists(&name).await);
 
         let restarted = live_databases(false);
-        restarted.migrate_all().await;
+        sweep(&restarted).await;
         assert_eq!(state_of(&restarted, &name).await.label(), "current");
         assert_eq!(archived(&name, 0x7C0).await, (7, 7));
         assert!(!buffer_exists(&name).await);
         restarted.delete_database(&name).await.unwrap();
+    }
+
+    async fn rollup_table(name: &str) -> String {
+        let client = live_databases(true).connect_raw(name).await.unwrap();
+        client
+            .query_one(
+                "SELECT format('%I.%I', materialization_hypertable_schema, \
+                                        materialization_hypertable_name) \
+                   FROM timescaledb_information.continuous_aggregates \
+                  WHERE view_name = 'capture_frame_hourly'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_run_queued_behind_one_that_finished_does_not_migrate_again() {
+        let name = behind_database("queued").await;
+        let dbs = live_databases(false);
+        sweep(&dbs).await;
+        dbs.start_migration(&name).await.unwrap();
+        until_label(&dbs, &name, "current").await;
+        let rollup = rollup_table(&name).await;
+
+        dbs.migrate_from(&name, Some(schema::SCHEMA_VERSION - 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            rollup_table(&name).await,
+            rollup,
+            "the migration ran again and rebuilt the rollup"
+        );
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB 2.29; see live_databases"]
+    async fn a_drain_that_meets_a_refresh_in_progress_still_refreshes_its_span() {
+        let name = behind_database("collides").await;
+        let dbs = live_databases(false);
+        sweep(&dbs).await;
+        dbs.write_rows(&name, &frames(0x7E9, 1_700_000_000_000_000, 5))
+            .await
+            .unwrap();
+        let by_hand = dbs.connect_raw(&name).await.unwrap();
+        schema::migrate(&by_hand, Some(schema::SCHEMA_VERSION - 1))
+            .await
+            .unwrap();
+
+        // A refresh of the whole range in progress, as TimescaleDB records one,
+        // for a second.
+        let refreshing = dbs.connect_raw(&name).await.unwrap();
+        refreshing
+            .batch_execute(
+                "INSERT INTO _timescaledb_catalog.continuous_aggs_jobs_refresh_ranges
+                 SELECT mat_hypertable_id, -9223372036854775807, 9223372036854775807,
+                        pg_backend_pid(), 0, now()
+                   FROM _timescaledb_catalog.continuous_agg",
+            )
+            .await
+            .unwrap();
+        let finishes = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            refreshing
+                .batch_execute(
+                    "DELETE FROM _timescaledb_catalog.continuous_aggs_jobs_refresh_ranges \
+                     WHERE job_id = 0",
+                )
+                .await
+                .unwrap();
+        });
+
+        let served = dbs.pool(&name).await;
+        assert!(served.is_ok(), "{}", served.err().unwrap());
+        finishes.await.unwrap();
+        let materialised: i64 = by_hand
+            .query_one(
+                &format!("SELECT count(*) FROM {}", rollup_table(&name).await),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(materialised > 0, "the drained span was never materialised");
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_migrated_database_keeps_no_connection_for_its_buffer() {
+        let name = behind_database("idle").await;
+        let dbs = live_databases(false);
+        sweep(&dbs).await;
+        dbs.write_rows(&name, &frames(0x7EA, 1_700_000_000_000_000, 2))
+            .await
+            .unwrap();
+        dbs.start_migration(&name).await.unwrap();
+        until_label(&dbs, &name, "current").await;
+
+        let postgres = dbs.connect_raw("postgres").await.unwrap();
+        let held = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let n: i64 = postgres
+                    .query_one(
+                        "SELECT count(*) FROM pg_stat_activity \
+                          WHERE datname = $1 AND backend_type = 'client backend'",
+                        &[&name],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0);
+                if n == 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(held.is_ok(), "a connection is still open to {name}");
+        dbs.delete_database(&name).await.unwrap();
     }
 
     fn failed_ago(ago: Duration) -> DbSchemaState {
