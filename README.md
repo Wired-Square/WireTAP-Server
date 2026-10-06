@@ -163,11 +163,57 @@ takes the new one, `refused` with the reason, or its `local` catalogue.
 Port 23 is the GVRET default and needs `CAP_NET_BIND_SERVICE`; the packaged unit
 grants it.
 
+## The Raspberry Pi appliance
+
+A card image for a 64-bit Raspberry Pi, Debian trixie: `wiretap-server` as the
+package installs it, `can-utils`, and `wiretap-appliance`, which administers the
+box from a browser. [appliance/README.md](appliance/README.md) has the detail.
+
+**Images are built by hand and not published yet.** Nothing in CI or in a
+release makes one. `appliance/scaffold/image/build-remote.sh` builds it on a
+Debian build box and fetches the `.img.xz` back into
+`appliance/scaffold/image/deploy/`; the order is in
+[docs/workspaces.md](docs/workspaces.md#building-the-image).
+
+Write it with Raspberry Pi Imager's **Use custom**, and decline its OS
+customisation: the card names and secures itself on first boot, and Imager's
+first-run script would fight that.
+
+On first boot the card renames itself `wiretap-<serial>`, the last six hex
+digits of the board's serial, and answers at `https://wiretap-<serial>.local`
+with a self-signed certificate it made for that name, so the browser warns
+once. Whoever arrives first makes the first account there. A shipped card has
+no SSH; a developer's card, built with a key in `config.local`, takes root by
+that key and never by password.
+
+`wiretap-server` is configured in `/etc/wiretap-server/wiretap-server.toml`, as
+on any host, and forwards nothing until `[forward]` is set. A CAN adapter comes
+up from `can.d/<interface>.conf` through `wiretap-can@`, as
+[above](#can-interfaces); the image ships with none configured and no CAN HAT
+overlay in `config.txt`.
+
+The image also carries a local gateway, installed and disabled. It needs
+storage mounted at `/srv/wiretap-gateway` before it will start; the steps are
+in [appliance/README.md](appliance/README.md#enabling-the-local-gateway).
+
+Known behaviour, with fixes to come:
+
+- With no CAN adapter, `wiretap-server` exits on its missing interface and is
+  restarted, backing off to once a minute. Waiting for the device instead
+  needs a `wslib-wiretap-rs` release.
+- On a first boot the mDNS name can come up as `wiretap-<serial>-2.local`.
+  `systemctl restart avahi-daemon` restores it until the chassis fixes it.
+- A factory reset puts the packaged configuration back but leaves
+  `/var/lib/wiretap-server`, so the daemon keeps its cached catalogue
+  assignments.
+
 ## Layout
 
 | Path | What |
 | --- | --- |
 | [crates/wiretap-backend/](crates/wiretap-backend/) | The gateway: HTTP API, ingest listener, admin SPA, Docker stack, capture schema |
+| [appliance/](appliance/) | The Raspberry Pi appliance: its web daemon and card image, a workspace of its own |
+| [docs/workspaces.md](docs/workspaces.md) | Why there are two cargo workspaces, how each is built, and the appliance's cross-build on a Mac |
 | [docs/ingest-protocol.md](docs/ingest-protocol.md) | Where the binary ingest spec lives, for anyone writing capture-device firmware, and the `[ingest]` settings |
 | [tools/](tools/) | Test and admin scripts. Never packaged, never shipped |
 | [debian/](debian/), [packaging/](packaging/) | Package metadata, maintainer scripts, `make-deb.sh`, the systemd unit and the lifecycle test |

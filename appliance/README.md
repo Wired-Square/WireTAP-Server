@@ -60,20 +60,26 @@ scaffold/packaging/make-deb.sh --target image    # -> target/debian/image/wireta
 
 It cross-builds a static `aarch64-unknown-linux-musl` binary and wants `cargo`,
 `dpkg-deb`, `appliance-xtask`, zig and the cross-link variables in the
-chassis's `BUILDING.md`. On a Mac, put GNU coreutils first on `PATH`.
+chassis's `BUILDING.md`. On a Mac, [docs/workspaces.md](../docs/workspaces.md#cross-building-the-appliance-on-a-mac)
+has the whole environment.
 
 ## Building the image
 
 pi-gen needs Debian and root, so the image is built on a Debian build host.
 Copy `scaffold/image/config.local.example` to `scaffold/image/config.local`,
-which is git-ignored, and set your SSH public key and `BUILD_HOST` there. Then,
-with the package built:
+which is git-ignored, and set your SSH public key and `BUILD_HOST` there. A
+`TAILSCALE_AUTH_KEY` there makes every card join the tailnet; without one, a
+card joins only when enrolled from the Network screen. Then:
 
 ```sh
 (cd .. && packaging/make-deb.sh --arch arm64)   # wiretap-server, into ../target/deb/
 scripts/stage-wiretap-server.sh                 # copies it into the image's 10-wiretap substage
-scaffold/image/build-remote.sh                  # builds there, fetches the .img.xz back
+scaffold/packaging/make-deb.sh --target image   # wiretap-appliance, as above
+scaffold/image/build-remote.sh                  # builds there, fetches the .img.xz into scaffold/image/deploy/
 ```
+
+Write the `.img.xz` with Raspberry Pi Imager's **Use custom**, declining its OS
+customisation.
 
 The staging script refuses to pick between two `wiretap-server` packages in
 `../target/deb/`; delete the one the image should not carry.

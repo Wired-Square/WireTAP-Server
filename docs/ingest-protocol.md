@@ -1,7 +1,7 @@
 # WireTAP Binary Ingest Protocol
 
 The spec is `crates/wiretap-protocol/docs/ingest.md` in
-[wiretap-lib-rs](https://github.com/Wired-Square/wiretap-lib-rs), at the tag the
+[wslib-wiretap-rs](https://github.com/Wired-Square/wslib-wiretap-rs), at the tag the
 workspace `Cargo.toml` pins; the .deb installs it as
 `/usr/share/doc/wiretap-server/ingest-protocol.md`. Its reference client and
 conformance suite is [tools/test_ingest_client.py](../tools/test_ingest_client.py).
