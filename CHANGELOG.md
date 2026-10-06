@@ -53,6 +53,12 @@ All notable changes to this project are documented here. Entries go under
   `WIRETAP_APPLIANCE_ONBOARDING=browser` for the host screens and the
   first-account screen.
 
+### Fixed
+
+- **A daemon whose CAN interface or serial device is missing restarts once a
+  minute, not every five seconds.** The unit backs off from 5 s to a 60 s cap.
+  Waiting for the device without exiting needs a `wslib-wiretap-rs` release.
+
 ## [0.1.9] — 2026-10-03
 
 A catalogue can be assigned to a capture daemon's serial line at the gateway,
