@@ -40,6 +40,8 @@ ID_TX = 1 << 31
 
 KIND_CAN, KIND_MODBUS = 0, 1
 FLAG_CRC_VALID = 0x01
+CAN_FLAG_RTR, CAN_FLAG_BRS, CAN_FLAG_ESI = 0x01, 0x02, 0x04
+CAN_RTR_LEN_SHIFT = 3
 
 
 def frame_message(mtype: int, body: bytes = b"", corrupt_crc: bool = False) -> bytes:
@@ -58,8 +60,9 @@ def encode_raw_record(delta_us: int, kind: int, flags: int, bus: int,
 
 
 def encode_record(delta_us: int, arb_id: int, payload: bytes,
-                  extended=False, fd=False, tx=False, bus=0) -> bytes:
-    """A CAN record."""
+                  extended=False, fd=False, tx=False, bus=0, flags=0) -> bytes:
+    """A CAN record. `flags` is the record's CAN_FLAG_* bits, and an RTR's
+    requested length code shifted by CAN_RTR_LEN_SHIFT."""
     id_flags = (arb_id & 0x1FFFFFFF)
     if extended:
         id_flags |= ID_EXTENDED
@@ -67,7 +70,7 @@ def encode_record(delta_us: int, arb_id: int, payload: bytes,
         id_flags |= ID_FD
     if tx:
         id_flags |= ID_TX
-    return encode_raw_record(delta_us, KIND_CAN, 0, bus, id_flags, payload)
+    return encode_raw_record(delta_us, KIND_CAN, flags, bus, id_flags, payload)
 
 
 def encode_modbus_record(delta_us: int, unit: int, func: int, message: bytes,

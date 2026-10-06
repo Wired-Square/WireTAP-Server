@@ -76,6 +76,7 @@ impl Args {
 }
 
 use wiretap_model::Protocol;
+use wiretap_protocol::can::CanFlags;
 
 /// Which protocol a query is about when the caller does not say.
 ///
@@ -125,21 +126,20 @@ impl WhereClause for FrameFilter {
         );
         sql += &extended_clause(args, self.is_extended);
         sql += &time_clause(args, &self.start_time, &self.end_time);
-        sql
+        sql + NOT_REMOTE
     }
 }
 
-/// `extended` and `is_fd` as the API has always spoken them. A Modbus row
-/// stores NULL — it has no such bits — and every client parses a `bool`, so
-/// the wire keeps saying `false` for one until the desktop takes an option.
-/// [`extended_clause`] is the same reading applied to a filter.
-fn bool_column(row: &tokio_postgres::Row, col: &str) -> bool {
-    row.get::<_, Option<bool>>(col).unwrap_or(false)
-}
+/// A remote frame's empty payload is no reading of its id's bytes or timing,
+/// and the rollup, which a full inventory reads, leaves it out.
+const NOT_REMOTE: &str = " AND flags & 1 = 0";
+
+/// `flags`' EXT bit as the `extended` the API has always spoken.
+const EXTENDED: &str = "flags & 8 <> 0";
 
 fn extended_clause(args: &mut Args, is_extended: Option<bool>) -> String {
     is_extended.map_or_else(String::new, |ext| {
-        format!(" AND coalesce(extended, false) = ${}::bool", args.add(ext))
+        format!(" AND ({EXTENDED}) = ${}::bool", args.add(ext))
     })
 }
 
@@ -276,9 +276,9 @@ pub async fn mirror_validation(
     extra += &time_clause(&mut args, &p.start_time, &p.end_time);
     let query = format!(
         "WITH mirror_frames AS (\
-            SELECT ts, data_bytes FROM public.capture_frame {where_protocol} AND id = ${mirror_id}::int4{extra}), \
+            SELECT ts, data_bytes FROM public.capture_frame {where_protocol} AND id = ${mirror_id}::int4{extra}{NOT_REMOTE}), \
          source_frames AS (\
-            SELECT ts, data_bytes FROM public.capture_frame {where_protocol} AND id = ${source_id}::int4{extra}) \
+            SELECT ts, data_bytes FROM public.capture_frame {where_protocol} AND id = ${source_id}::int4{extra}{NOT_REMOTE}) \
          SELECT (EXTRACT(EPOCH FROM m.ts) * 1000000)::float8 AS mirror_ts, \
                 (EXTRACT(EPOCH FROM s.ts) * 1000000)::float8 AS source_ts, \
                 m.data_bytes AS mirror_payload, s.data_bytes AS source_payload \
@@ -633,7 +633,7 @@ pub async fn pattern_search(
     let w = time_clause(&mut args, &p.start_time, &p.end_time);
     let query = format!(
         "SELECT (EXTRACT(EPOCH FROM ts) * 1000000)::float8 AS timestamp_us, \
-         id AS frame_id, extended, data_bytes \
+         id AS frame_id, {EXTENDED} AS extended, data_bytes \
          FROM public.capture_frame {proto}{w} ORDER BY ts"
     );
 
@@ -671,7 +671,7 @@ pub async fn pattern_search(
             results.push(PatternSearchResult {
                 timestamp_us: row.get::<_, f64>("timestamp_us") as i64,
                 frame_id: row.get::<_, i32>("frame_id") as u32,
-                is_extended: bool_column(&row, "extended"),
+                is_extended: row.get("extended"),
                 payload: data_bytes,
                 match_positions,
             });
@@ -722,7 +722,7 @@ pub async fn inventory(
         let max_dlc = row.get::<_, i32>("max_dlc") as u16;
         InventoryEntry {
             frame_id: row.get::<_, i32>("id") as u32,
-            is_extended: bool_column(row, "extended"),
+            is_extended: row.get("extended"),
             count: row.get("cnt"),
             first_us: row.get::<_, f64>("first_us") as i64,
             last_us: row.get::<_, f64>("last_us") as i64,
@@ -756,11 +756,11 @@ pub async fn inventory(
     let proto = protocol_clause(&mut args, protocol);
     let w = time_clause(&mut args, &start_time, &end_time);
     let query = format!(
-        "SELECT id, extended, COUNT(*)::int8 AS cnt, \
+        "SELECT id, {EXTENDED} AS extended, COUNT(*)::int8 AS cnt, \
          (EXTRACT(EPOCH FROM MIN(ts)) * 1000000)::float8 AS first_us, \
          (EXTRACT(EPOCH FROM MAX(ts)) * 1000000)::float8 AS last_us, \
          MAX(dlc)::int4 AS max_dlc \
-         FROM public.capture_frame {proto}{w} GROUP BY id, extended ORDER BY id, extended"
+         FROM public.capture_frame {proto}{w}{NOT_REMOTE} GROUP BY 1, 2 ORDER BY 1, 2"
     );
     let rows = client
         .query(&query, &args.refs())
@@ -851,7 +851,7 @@ pub async fn frames_batch(
     let mut args = Args::default();
     let mut sql = format!(
         "SELECT (EXTRACT(EPOCH FROM ts) * 1000000)::float8 AS ts_us, \
-         id, extended, dlc, is_fd, data_bytes, bus, dir \
+         id, flags, dlc, data_bytes, bus \
          FROM public.capture_frame {}",
         protocol_clause(&mut args, protocol)
     );
@@ -876,18 +876,24 @@ pub async fn frames_batch(
         .skip(skip)
         .map(|row| {
             let data: Vec<u8> = row.get("data_bytes");
+            let flags = CanFlags(row.get::<_, i16>("flags") as u8);
             FrameBatchRow {
                 ts_us: row.get::<_, f64>("ts_us") as i64,
                 id: row.get::<_, i32>("id") as u32,
-                extended: bool_column(row, "extended"),
+                extended: flags.contains(CanFlags::EXT),
                 dlc: row.get::<_, i16>("dlc") as u16,
                 len: Some(data.len() as u16),
-                is_fd: bool_column(row, "is_fd"),
-                is_rtr: false,
-                is_brs: false,
-                is_esi: false,
+                is_fd: flags.contains(CanFlags::FD),
+                is_rtr: flags.contains(CanFlags::RTR),
+                is_brs: flags.contains(CanFlags::BRS),
+                is_esi: flags.contains(CanFlags::ESI),
                 bus: row.get::<_, i32>("bus") as u8,
-                dir: row.get("dir"),
+                dir: if flags.contains(CanFlags::TX) {
+                    "tx"
+                } else {
+                    "rx"
+                }
+                .to_owned(),
                 data_hex: hex::encode(data),
             }
         })
@@ -1019,6 +1025,12 @@ mod tests {
         assert!(!refused_for_the_request(None));
         assert!(!refused_for_the_request(Some(&SqlState::ADMIN_SHUTDOWN)));
         assert!(!refused_for_the_request(Some(&SqlState::UNDEFINED_TABLE)));
+    }
+
+    #[test]
+    fn the_flag_predicates_read_the_bits_canflags_names() {
+        assert_eq!(NOT_REMOTE, format!(" AND flags & {} = 0", CanFlags::RTR.0));
+        assert_eq!(EXTENDED, format!("flags & {} <> 0", CanFlags::EXT.0));
     }
 
     #[test]

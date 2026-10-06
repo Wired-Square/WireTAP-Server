@@ -35,13 +35,22 @@ All notable changes to this project are documented here. Entries go under
   the daemon is not installed and enabled, is marked for autoremoval, ships
   with a CAN interface configured or a CAN HAT overlay in `config.txt`, or a
   radio's driver is blacklisted.
+- **The archive keeps a CAN FD frame's BRS and ESI.** `/frames` serves
+  `is_rtr`, `is_brs` and `is_esi` beside `is_fd`. The analytical queries,
+  `payloads`, `inventory` and the hourly rollup leave remote frames out.
 
 ### Changed
 
+- **Schema v4: a frame's flags are one `flags` column.** `extended`, `is_fd`
+  and `dir` are packed into it and dropped; `can_frame` and its byte views
+  still serve them by name. The gateway migrates each archive on start,
+  rewriting every chunk and rebuilding the rollup, and refuses ingest while it
+  does: time it on a copy first. A plain INSERT through `can_frame` no longer
+  works; `ingest_can_frame` does.
 - **Built on `wslib-wiretap-rs` v0.1.1**, the WireTAP libraries' new home
   (`v0.1.0`, restarted from `wiretap-lib-rs` v0.25.1, then the ingest
   protocol's server close, waiting for a missing device, and CAN's RTR, BRS
-  and ESI flags, which nothing here stores yet).
+  and ESI flags).
 - **Clearing an unassigned interface answers 204, not 404.** `DELETE
   /v1/admin/assignments` is idempotent; a clear whose `expected` no longer
   matches still answers 409 with `current` null.

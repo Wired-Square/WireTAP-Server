@@ -15,6 +15,7 @@ use deadpool_postgres::Pool;
 use futures_util::SinkExt;
 use tokio_postgres::error::SqlState;
 use wiretap_model::Protocol;
+use wiretap_protocol::can::CanFlags;
 use wiretap_protocol::ingest::{RecordFields, RecordKind, ID_ARB_MASK};
 
 /// One row of `capture_frame`, whichever protocol it came off. A column the
@@ -25,20 +26,20 @@ pub struct FrameRow {
     pub ts_us: i64,
     pub protocol: Protocol,
     pub id: u32,
-    pub extended: Option<bool>,
+    /// `CanFlags` bits; a row off another wire has only `TX`.
+    pub flags: u8,
     pub dlc: u16,
-    pub is_fd: Option<bool>,
     pub data: Vec<u8>,
     pub bus: u8,
-    pub dir_tx: bool,
     pub unit: Option<i16>,
     pub func: Option<i16>,
     pub crc_valid: Option<bool>,
 }
 
 impl FrameRow {
-    /// A wire record's row. A Modbus row's `dlc` is the message length, CRC
-    /// included, and a raw serial row's the chunk length, not a CAN length code.
+    /// A wire record's row. A CAN row's `dlc` is the length code, a remote
+    /// frame's the one it requests; a Modbus row's is the message length, CRC
+    /// included, and a raw serial row's the chunk length.
     pub fn new(
         ts_us: i64,
         kind: RecordKind,
@@ -47,27 +48,24 @@ impl FrameRow {
         bus: u8,
         data: Vec<u8>,
     ) -> Self {
-        match RecordFields::from_wire(kind, id_flags, flags) {
-            RecordFields::Can {
-                arb_id,
-                extended,
-                fd,
-                transmitted,
-                ..
-            } => Self {
-                ts_us,
-                protocol: Protocol::Can,
-                id: arb_id,
-                extended: Some(extended),
-                dlc: u16::from(wiretap_protocol::payload_dlc(data.len(), fd)),
-                is_fd: Some(fd),
-                data,
-                bus,
-                dir_tx: transmitted,
-                unit: None,
-                func: None,
-                crc_valid: None,
-            },
+        let fields = RecordFields::from_wire(kind, id_flags, flags);
+        let tx = |transmitted| if transmitted { CanFlags::TX.0 } else { 0 };
+        match fields {
+            RecordFields::Can { transmitted, .. } => {
+                let frame = fields.to_can(bus, data).expect("a CAN record");
+                Self {
+                    ts_us,
+                    protocol: Protocol::Can,
+                    id: frame.arb_id,
+                    flags: CanFlags::of(&frame, transmitted).0,
+                    dlc: u16::from(frame.dlc()),
+                    data: frame.data,
+                    bus,
+                    unit: None,
+                    func: None,
+                    crc_valid: None,
+                }
+            }
             RecordFields::Modbus {
                 unit,
                 func,
@@ -77,12 +75,10 @@ impl FrameRow {
                 ts_us,
                 protocol: Protocol::Modbus,
                 id: id_flags & ID_ARB_MASK,
-                extended: None,
+                flags: tx(transmitted),
                 dlc: data.len() as u16,
-                is_fd: None,
                 data,
                 bus,
-                dir_tx: transmitted,
                 unit: Some(i16::from(unit)),
                 func: Some(i16::from(func)),
                 crc_valid: Some(crc_valid),
@@ -94,12 +90,10 @@ impl FrameRow {
                 ts_us,
                 protocol: Protocol::Serial,
                 id: 0,
-                extended: None,
+                flags: tx(transmitted),
                 dlc: data.len() as u16,
-                is_fd: None,
                 data,
                 bus,
-                dir_tx: transmitted,
                 unit: None,
                 func: None,
                 crc_valid: None,
@@ -181,7 +175,7 @@ pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), CopyError>
     let sink = client
         .copy_in(
             "COPY public.capture_frame \
-             (ts, protocol, id, extended, dlc, is_fd, data_bytes, bus, dir, unit, func, crc_valid) \
+             (ts, protocol, id, flags, dlc, data_bytes, bus, unit, func, crc_valid) \
              FROM STDIN",
         )
         .await
@@ -210,16 +204,14 @@ fn copy_text(batch: &[FrameRow]) -> Result<String, CopyError> {
         // (\x…) is written as \\x…
         let _ = writeln!(
             buf,
-            "{}\t{}\t{}\t{}\t{}\t{}\t\\\\x{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t\\\\x{}\t{}\t{}\t{}\t{}",
             ts.format("%Y-%m-%dT%H:%M:%S%.6f+00:00"),
             row.protocol.as_str(),
             row.id,
-            Nullable(row.extended.map(copy_bool)),
+            row.flags,
             row.dlc,
-            Nullable(row.is_fd.map(copy_bool)),
             hex::encode(&row.data),
             row.bus,
-            if row.dir_tx { "tx" } else { "rx" },
             Nullable(row.unit),
             Nullable(row.func),
             Nullable(row.crc_valid.map(copy_bool)),
@@ -251,15 +243,12 @@ mod tests {
             (m.unit, m.func, m.crc_valid),
             (Some(1), Some(0x20), Some(true))
         );
-        assert_eq!((m.extended, m.is_fd, m.dir_tx), (None, None, false));
+        assert_eq!(m.flags, 0);
         assert_eq!(m.data, raw);
 
         let c = FrameRow::new(5, RecordKind::Can, 0x7E0 | ID_FD | ID_TX, 0, 0, vec![0; 12]);
         assert_eq!((c.protocol, c.id, c.dlc), (Protocol::Can, 0x7E0, 9));
-        assert_eq!(
-            (c.extended, c.is_fd, c.dir_tx),
-            (Some(false), Some(true), true)
-        );
+        assert_eq!(c.flags, (CanFlags::FD.0 | CanFlags::TX.0));
         assert_eq!((c.unit, c.func, c.crc_valid), (None, None, None));
     }
 
@@ -277,20 +266,17 @@ mod tests {
             chunk.clone(),
         );
         assert_eq!(
-            (r.ts_us, r.protocol, r.id, r.dlc, r.bus, r.dir_tx),
-            (7, Protocol::Serial, 0, 256, 3, false)
+            (r.ts_us, r.protocol, r.id, r.flags, r.dlc, r.bus),
+            (7, Protocol::Serial, 0, 0, 256, 3)
         );
-        assert_eq!((r.extended, r.is_fd), (None, None));
         assert_eq!((r.unit, r.func, r.crc_valid), (None, None, None));
         assert_eq!(r.data, chunk);
         let line = copy_text(&[r]).unwrap();
         assert!(
-            line.starts_with(
-                "1970-01-01T00:00:00.000007+00:00\tserial\t0\t\\N\t256\t\\N\t\\\\x0001"
-            ),
+            line.starts_with("1970-01-01T00:00:00.000007+00:00\tserial\t0\t0\t256\t\\\\x0001"),
             "{line}"
         );
-        assert!(line.ends_with("feff\t3\trx\t\\N\t\\N\t\\N\n"), "{line}");
+        assert!(line.ends_with("feff\t3\t\\N\t\\N\t\\N\n"), "{line}");
     }
 
     #[test]
@@ -321,5 +307,56 @@ mod tests {
             let e = classify(code.clone());
             assert!(matches!(e, QueryError::Database(_)), "{code:?}");
         }
+    }
+
+    /// The `flags` column's bits are `CanFlags`, and a remote frame stores the
+    /// length code it requests with no data, whatever the record carried.
+    #[test]
+    fn a_can_row_stores_its_flags_and_a_remote_frame_its_requested_code() {
+        use wiretap_protocol::ingest::{CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_RTR, ID_EXTENDED};
+        let remote = FrameRow::new(
+            1,
+            RecordKind::Can,
+            0x7DF,
+            CAN_FLAG_RTR | 8 << 3,
+            0,
+            vec![1, 2],
+        );
+        let fd = FrameRow::new(
+            1,
+            RecordKind::Can,
+            0x18DA_F110 | ID_EXTENDED | ID_FD | ID_TX,
+            CAN_FLAG_BRS | CAN_FLAG_ESI,
+            2,
+            vec![0xAA; 12],
+        );
+        let modbus = FrameRow::new(
+            1,
+            RecordKind::Modbus,
+            modbus_id(1, 3) | ID_TX,
+            0,
+            0,
+            vec![1],
+        );
+        let lines = copy_text(&[remote, fd, modbus]).unwrap();
+        let columns: Vec<Vec<&str>> = lines
+            .lines()
+            .map(|l| l.split('\t').skip(1).take(6).collect())
+            .collect();
+        assert_eq!(
+            columns,
+            [
+                ["can", "2015", "1", "8", "\\\\x", "0"],
+                [
+                    "can",
+                    "417001744",
+                    "62",
+                    "9",
+                    &format!("\\\\x{}", "aa".repeat(12)),
+                    "2"
+                ],
+                ["modbus", "259", "32", "1", "\\\\x01", "0"],
+            ]
+        );
     }
 }

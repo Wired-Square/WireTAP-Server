@@ -1,5 +1,5 @@
 -- wiretap-schema-postgres.sql
--- Version: 20260920
+-- Version: 20261006
 -- Schema for raw capture frames + decoded signals (TimescaleDB hypertable).
 -- CAN, Modbus and serial share one table, discriminated by `protocol`.
 --
@@ -80,6 +80,18 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- And for the packed flags: the rollup below is built on `flags`.
+DO $$ BEGIN
+  IF to_regclass('public.capture_frame') IS NOT NULL
+     AND NOT EXISTS (SELECT FROM pg_attribute
+                     WHERE attrelid = to_regclass('public.capture_frame')
+                       AND attname = 'flags' AND NOT attisdropped)
+  THEN
+    RAISE EXCEPTION 'public.capture_frame predates the flags column; apply '
+                    'crates/wiretap-backend/schema/migrations/0004_capture_frame_flags.sql first';
+  END IF;
+END $$;
+
 -- ----------------------------------------
 -- Schema version
 -- ----------------------------------------
@@ -136,29 +148,26 @@ CREATE TABLE IF NOT EXISTS public.capture_frame (
   protocol    text        NOT NULL DEFAULT 'can'  -- which wire this came off
                 CHECK (protocol IN ('can', 'modbus', 'serial')),
   id          integer     NOT NULL,               -- CAN arbitration id, Modbus register, serial frame id
-  extended    boolean,                            -- CAN: 11-bit if false or 29-bit if true; NULL off any other wire
-  dlc         smallint    NOT NULL                -- CAN: length code 0..15; bytes off any other wire, 0..256 Modbus
+  dlc         smallint    NOT NULL                -- CAN: length code 0..15, a remote frame's requested; bytes off any other wire, 0..256 Modbus
                 CHECK (dlc >= 0 AND dlc <= 256),
-  is_fd       boolean,                            -- CAN FD flag; NULL off any other wire
-  data_bytes  bytea       NOT NULL,               -- raw payload
+  data_bytes  bytea       NOT NULL,               -- raw payload; empty for a remote frame
   bus         integer     NOT NULL DEFAULT 0,     -- gvret bus id / link index
-  dir         text        NOT NULL DEFAULT 'rx'   -- gvret frame direction (rx/tx)
-                CHECK (dir IN ('rx', 'tx')),
+  flags       smallint,                           -- CanFlags: RTR 1, BRS 2, ESI 4, EXT 8, FD 16, TX 32; only TX off CAN
   unit        smallint,                           -- Modbus slave address; NULL otherwise
   func        smallint,                           -- Modbus function code, vendor codes included; NULL otherwise
   crc_valid   boolean,                            -- Modbus: did the framer's CRC check out; NULL otherwise
-  -- Each column belongs to its protocol: a CAN row carries the CAN pair and
-  -- none of the Modbus three, a Modbus row the Modbus three, anything else
-  -- none of the Modbus three. A Modbus row's CAN pair is free, not required
-  -- NULL — rows from before 0003 hold `false` there. The constraint turns a
-  -- writer bug into an error instead of a row whose `id` disagrees with the
-  -- columns beside it.
+  -- Each column belongs to its protocol: every row has flags, only a CAN row
+  -- has bits besides TX, a Modbus row has the Modbus three, and anything else
+  -- none of them. The constraint turns a writer bug into an error instead of a
+  -- row whose `id` disagrees with the columns beside it.
   CONSTRAINT capture_frame_protocol_columns_check CHECK (
     CASE protocol
-      WHEN 'can'    THEN extended IS NOT NULL AND is_fd IS NOT NULL
+      WHEN 'can'    THEN flags IS NOT NULL
                          AND unit IS NULL AND func IS NULL AND crc_valid IS NULL
-      WHEN 'modbus' THEN unit IS NOT NULL AND func IS NOT NULL AND crc_valid IS NOT NULL
-      ELSE               unit IS NULL AND func IS NULL AND crc_valid IS NULL
+      WHEN 'modbus' THEN flags IS NOT NULL AND flags IN (0, 32)
+                         AND unit IS NOT NULL AND func IS NOT NULL AND crc_valid IS NOT NULL
+      ELSE               flags IS NOT NULL AND flags IN (0, 32)
+                         AND unit IS NULL AND func IS NULL AND crc_valid IS NULL
     END)
 );
 
@@ -197,17 +206,19 @@ SELECT add_compression_policy('public.capture_frame',
 -- materialized_only = false folds in the not-yet-materialised tail.
 -- `protocol` is in the GROUP BY, not a WHERE: the rollup has to serve every
 -- protocol, and a bare can_frame_hourly over a mixed table would report Modbus
--- frames as CAN to anything that trusted the name.
+-- frames as CAN to anything that trusted the name. Remote frames are left out:
+-- their `dlc` is a length they asked for, not one they carried.
 CREATE MATERIALIZED VIEW IF NOT EXISTS public.capture_frame_hourly
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
   time_bucket(INTERVAL '1 hour', ts) AS bucket,
-  protocol, id, extended, bus,
+  protocol, id, flags & 8 <> 0 AS extended, bus,
   count(*)  AS frame_count,
   min(ts)   AS first_ts,
   max(ts)   AS last_ts,
   max(dlc)  AS max_dlc
 FROM public.capture_frame
+WHERE flags & 1 = 0
 GROUP BY 1, 2, 3, 4, 5
 WITH NO DATA;
 
@@ -224,21 +235,20 @@ SELECT add_continuous_aggregate_policy('public.capture_frame_hourly',
 -- exist for everything else — psql sessions, dashboards, the runbooks — so the
 -- rename is not a breaking change for anyone outside this repo.
 --
--- `can_frame` is a simple single-table view with a WHERE, so PostgreSQL makes
--- it auto-updatable: a plain INSERT through it works, and `protocol` comes from
--- the column default.
---
--- INSERT works; **COPY does not** — `cannot copy to view`, and enabling it
--- would take an INSTEAD OF trigger. That is deliberate: these views are for
--- readers. The gateway's own bulk path COPYs `public.capture_frame`, and the
--- last outside bulk writer went with the Python oracle on 2026-09-10.
+-- `can_frame` names `flags`' bits as the columns they replaced. Those are
+-- computed, so an INSERT through it cannot set them, and `flags` has no
+-- default: a write goes to `ingest_can_frame` or the table. **COPY does not
+-- work either** — `cannot copy to view`. That is deliberate: these views are
+-- for readers. The gateway's own bulk path COPYs `public.capture_frame`, and
+-- the last outside bulk writer went with the Python oracle on 2026-09-10.
 --
 -- The two byte views below derive from this one rather than re-filtering the
 -- base table, so the CAN rows are defined here and nowhere else.
 -- `can_frame_hourly` reads the rollup and needs its own filter. All four are
 -- the same CAN-only family: they are dropped together or not at all.
 CREATE OR REPLACE VIEW public.can_frame AS
-SELECT ts, ingest_ts, id, extended, dlc, is_fd, data_bytes, bus, dir
+SELECT ts, ingest_ts, id, flags & 8 <> 0 AS extended, dlc, flags & 16 <> 0 AS is_fd,
+       data_bytes, bus, CASE WHEN flags & 32 <> 0 THEN 'tx' ELSE 'rx' END AS dir
 FROM public.capture_frame
 WHERE protocol = 'can';
 
@@ -384,13 +394,15 @@ BEGIN
     _dlc := octet_length(_data_bytes);
   END IF;
 
-  -- Writes the base table rather than the can_frame view: the view is
-  -- auto-updatable and would work, but naming the protocol here is clearer
-  -- than relying on a column default reached through two layers.
+  IF _dir NOT IN ('rx', 'tx') THEN
+    RAISE EXCEPTION 'dir must be rx or tx';
+  END IF;
+
   INSERT INTO public.capture_frame
-    (ts, protocol, id, extended, dlc, is_fd, data_bytes, bus, dir)
+    (ts, protocol, id, flags, dlc, data_bytes, bus)
   VALUES
-    (_ts, 'can', v_id, _extended, _dlc, _is_fd, _data_bytes, _bus, _dir);
+    (_ts, 'can', v_id, _extended::int * 8 + _is_fd::int * 16 + (_dir = 'tx')::int * 32,
+     _dlc, _data_bytes, _bus);
 END $$;
 
 -- ----------------------------------------
@@ -446,5 +458,5 @@ GRANT USAGE ON SEQUENCE public.events_id_seq TO wiretap;
 -- Everything above exists by the time this runs, which is the point: this row
 -- is the marker that the file completed, not that it started.
 INSERT INTO public.schema_version (version, description)
-  VALUES (3, 'capture_frame: per-protocol columns tied to protocol')
+  VALUES (4, 'capture_frame: flags packed into one column')
   ON CONFLICT (version) DO NOTHING;

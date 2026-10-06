@@ -251,6 +251,20 @@ rows, about two minutes on a 1.8 B-row archive.
 The rollup is left alone: the gateway checks whether it still covers the
 archive rather than rebuilding it after every migration.
 
+**Schema v4 rewrites every chunk.**
+[0004_capture_frame_flags.sql](schema/migrations/0004_capture_frame_flags.sql)
+packs `extended`, `is_fd` and `dir` into one `flags` column, which also carries
+a CAN frame's RTR, BRS and ESI, and drops the three; `can_frame` still serves
+them by name. It backfills one chunk to a transaction, oldest first,
+decompressing and recompressing each compressed one, so a run interrupted
+anywhere resumes where it stopped. Then it swaps the CHECK (a scan) and rebuilds
+the rollup without remote frames. Measured on 24 M rows: about 11 s per
+2 M-row compressed chunk and 6 s per uncompressed one, 8 s for the CHECK and
+13 s for the rollup. The database refuses ingest for all of it, so the capture
+servers' disk caches must hold that long. Updated uncompressed chunks keep
+their old row versions until autovacuum reclaims them, about half again their
+size. Time it on a copy of the archive first.
+
 To do it by hand instead — worth it if you want to snapshot 30 GB first — start
 the gateway with `WIRETAP_AUTO_MIGRATE=false` and run the migration for the
 version the archive is *at* against the *source* archive, with `-f` and from
@@ -262,6 +276,7 @@ cd schema/migrations
 psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0001_capture_frame.sql                  # from v0
 psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0002_events_annotations.sql             # from v1
 psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0003_capture_frame_protocol_columns.sql # from v2
+psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0004_capture_frame_flags.sql            # from v3
 ```
 
 `-f`, not `< 0001_capture_frame.sql` and not `docker compose exec … psql`: the

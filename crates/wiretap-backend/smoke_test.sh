@@ -153,6 +153,46 @@ curl -fsS -X DELETE -H "$A" "$BASE/v1/admin/keys/$ikid" >/dev/null
 curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/frames?limit=5000" | python3 -c 'import sys,json;assert [(f["dlc"],f["len"]) for f in json.load(sys.stdin)["frames"] if f["id"]==2032]==[(9,12)]'; check "an FD frame serves its length code as dlc and its bytes as len" $?
 curl -fsS -H "$R" "$BASE/v1/db/$IMPORT_DB/inventory" | python3 -c 'import sys,json;assert [(e["max_dlc"],e["max_len"]) for e in json.load(sys.stdin)["entries"] if e["frame_id"]==2032]==[(9,12)]'; check "inventory serves an FD id's longest payload in bytes as max_len" $?
 
+# --- a remote frame and an FD frame's BRS and ESI, over TCP ingest ---
+FLAGS_DB="smoke_flags_$(date +%s)"
+read -r fkid flags_key < <(curl -fsS -H "$A" -H "$J" -d '{"name":"smoke-flags","role":"ingest"}' "$BASE/v1/admin/keys" | python3 -c 'import sys,json;k=json.load(sys.stdin);print(k["id"],k["key"])')
+PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$flags_key" "$FLAGS_DB" <<'PYEOF'
+import sys, time
+from test_ingest_client import (ReferenceClient, encode_record, CAN_FLAG_RTR, CAN_FLAG_BRS,
+                                CAN_FLAG_ESI, CAN_RTR_LEN_SHIFT)
+c = ReferenceClient(sys.argv[1], int(sys.argv[2]), token=sys.argv[3], database=sys.argv[4])
+assert c.hello()[0] == 0
+records = [
+    encode_record(0, 0x7F1, b"", flags=CAN_FLAG_RTR | 8 << CAN_RTR_LEN_SHIFT),
+    encode_record(1, 0x7F1, bytes([0x11, 0x22])),
+    encode_record(2, 0x7F2, bytes(12), fd=True, flags=CAN_FLAG_BRS | CAN_FLAG_ESI),
+    encode_record(3, 0x7F3, b"", flags=CAN_FLAG_RTR | 2 << CAN_RTR_LEN_SHIFT),
+]
+assert c.send_batch(1, records, base_ts_us=int(time.time() * 1_000_000))[1] == 0
+PYEOF
+check "a remote frame and an FD frame with BRS and ESI ingested over TCP" $?
+curl -fsS -X DELETE -H "$A" "$BASE/v1/admin/keys/$fkid" >/dev/null
+curl -fsS -H "$R" "$BASE/v1/db/$FLAGS_DB/frames" | python3 -c '
+import sys, json
+rows = {(f["id"], f["len"]): (f["dlc"], f["is_rtr"], f["is_brs"], f["is_esi"], f["is_fd"], f["dir"])
+        for f in json.load(sys.stdin)["frames"]}
+assert rows == {(0x7F1, 0): (8, True, False, False, False, "rx"),
+                (0x7F1, 2): (2, False, False, False, False, "rx"),
+                (0x7F2, 12): (9, False, True, True, True, "rx"),
+                (0x7F3, 0): (2, True, False, False, False, "rx")}, rows'
+check "frames serves a remote frame its code as dlc and len 0, and BRS and ESI as bools" $?
+q() { curl -fsS -H "$R" -H "$J" -d "$2" "$BASE/v1/db/$FLAGS_DB/query/$1"; }
+q first-last '{"frame_id":2033}' | python3 -c 'import sys,json;r=json.load(sys.stdin)["results"];assert (r["total_count"],r["first_payload"])==(1,[0x11,0x22]),r'
+check "first-last leaves the remote frame out" $?
+curl -fsS -H "$R" -H "$J" -d '{"frame_id":2033}' "$BASE/v1/db/$FLAGS_DB/payloads" | python3 -c 'import sys,json;p=json.load(sys.stdin)["payloads"];assert len(p)==1,p'
+check "payloads leaves the remote frame out" $?
+q distribution '{"frame_id":2033,"byte_index":0}' | python3 -c 'import sys,json;r=json.load(sys.stdin)["results"];assert [(x["value"],x["count"]) for x in r]==[(0x11,1)],r'
+check "distribution leaves the remote frame out" $?
+for range in "" "?start=2000-01-01T00:00:00Z"; do
+    curl -fsS -H "$R" "$BASE/v1/db/$FLAGS_DB/inventory$range" | python3 -c 'import sys,json;e={x["frame_id"]:(x["count"],x["max_dlc"]) for x in json.load(sys.stdin)["entries"]};assert e=={2033:(1,2),2034:(1,9)},e'
+    check "inventory${range:+ over a range} counts data frames only, so an id sending only remote frames is absent" $?
+done
+
 # --- admin views ---
 curl -fsS -H "$A" "$BASE/v1/db/$DB/activity" | grep -q queries; check "activity" $?
 curl -fsS -H "$A" "$BASE/v1/admin/ingest-sessions" | grep -q sessions; check "ingest-sessions" $?

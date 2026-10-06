@@ -21,7 +21,7 @@ const INIT_SCHEMA: &str = include_str!("../schema/init_schema.sql");
 /// The version `init_schema.sql` creates. [`MIGRATIONS`] takes an older database
 /// up to it. Kept in step with the `schema_version` row that file inserts —
 /// `the_schema_seeds_the_version_it_claims` holds the two together.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 pub struct Migration {
     pub version: i32,
@@ -47,6 +47,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 3,
         description: "capture_frame: per-protocol columns tied to protocol",
         sql: include_str!("../schema/migrations/0003_capture_frame_protocol_columns.sql"),
+    },
+    Migration {
+        version: 4,
+        description: "capture_frame: flags packed into one column",
+        sql: include_str!("../schema/migrations/0004_capture_frame_flags.sql"),
     },
 ];
 
@@ -135,6 +140,10 @@ pub enum RollupState {
     Covered { lag_secs: i64 },
 }
 
+/// The frames the rollup summarises: remote frames are left out of it, so an
+/// archive that opens with one is still covered.
+const ROLLED_UP: &str = "public.capture_frame WHERE flags & 1 = 0";
+
 /// One query answering every question about the rollup.
 ///
 /// Deliberately compares the *earliest* stored bucket with the earliest frame.
@@ -158,11 +167,11 @@ pub async fn rollup_status(client: &Client) -> Result<RollupState, String> {
     let row = client
         .query_one(
             &format!(
-                "SELECT (SELECT min(ts) FROM public.capture_frame), \
-                        (SELECT max(ts) FROM public.capture_frame), \
+                "SELECT (SELECT min(ts) FROM {ROLLED_UP}), \
+                        (SELECT max(ts) FROM {ROLLED_UP}), \
                         (SELECT min(bucket) FROM {mat}), \
                         (SELECT max(bucket) FROM {mat}), \
-                        (SELECT min(ts) FROM public.capture_frame) \
+                        (SELECT min(ts) FROM {ROLLED_UP}) \
                           < now() - INTERVAL '3 hours'"
             ),
             &[],
@@ -536,16 +545,24 @@ mod tests {
         );
     }
 
+    fn check_body(stmt: &str) -> String {
+        let from = stmt
+            .find(&format!("{PROTOCOL_COLUMNS_CHECK} CHECK ("))
+            .expect("the constraint's CHECK");
+        let to = stmt[from..].find("END)").expect("a CASE end") + from + 4;
+        stmt[from..to]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    const PROTOCOL_COLUMNS_CHECK: &str = "capture_frame_protocol_columns_check";
+
     /// 0003 re-scans every compressed chunk to validate its CHECK — seconds per
-    /// 100 M rows — so the add is guarded and runs once, and the fresh table in
-    /// init_schema.sql carries the same constraint under the same name, which is
-    /// what the precondition guard tests for. Same *body* too: a migrated and a
-    /// fresh database must agree on what a row of each protocol is. The CAN pair
-    /// loses NOT NULL in both, and the CHECK is what keeps a CAN row from losing
-    /// it too.
+    /// 100 M rows — so the add is guarded and runs once. The CAN pair loses NOT
+    /// NULL, and the CHECK is what keeps a CAN row from losing it too.
     #[test]
-    fn the_protocol_columns_migration_adds_what_the_schema_declares() {
-        const CONSTRAINT: &str = "capture_frame_protocol_columns_check";
+    fn the_protocol_columns_migration_guards_its_check() {
         let stmts = split_statements(MIGRATIONS[2].sql);
         assert!(
             stmts
@@ -554,65 +571,117 @@ mod tests {
                     && s.contains("ALTER COLUMN is_fd    DROP NOT NULL")),
             "the CAN pair keeps NOT NULL"
         );
-        fn check_body(stmt: &str) -> String {
-            let from = stmt
-                .find(&format!("{CONSTRAINT} CHECK ("))
-                .expect("the constraint's CHECK");
-            let to = stmt[from..].find("END)").expect("a CASE end") + from + 4;
-            stmt[from..to]
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-
         let add = stmts
             .into_iter()
-            .find(|s| s.contains(&format!("ADD CONSTRAINT {CONSTRAINT}")))
+            .find(|s| s.contains(&format!("ADD CONSTRAINT {PROTOCOL_COLUMNS_CHECK}")))
             .expect("the constraint is added");
         assert!(
-            add.starts_with("DO $$") && add.contains(&format!("conname = '{CONSTRAINT}'")),
+            add.starts_with("DO $$")
+                && add.contains(&format!("conname = '{PROTOCOL_COLUMNS_CHECK}'"))
+                && check_body(&add)
+                    .contains("WHEN 'can' THEN extended IS NOT NULL AND is_fd IS NOT NULL"),
             "the add is not guarded by the constraint's own name"
         );
-
-        let schema = split_statements(INIT_SCHEMA);
-        let table = schema
-            .iter()
-            .find(|s| s.starts_with("CREATE TABLE IF NOT EXISTS public.capture_frame"))
-            .expect("capture_frame present");
-        assert!(
-            table.contains(&format!("CONSTRAINT {CONSTRAINT} CHECK")),
-            "a fresh capture_frame lacks the constraint the migration adds"
-        );
-        let column = |name: &str| {
-            table
-                .lines()
-                .find(|l| l.trim_start().starts_with(name))
-                .unwrap_or_else(|| panic!("no {name} column"))
-        };
-        for name in ["extended", "is_fd"] {
-            assert!(
-                !column(name).contains("NOT NULL"),
-                "a fresh capture_frame still has {name} NOT NULL"
-            );
-        }
-        assert!(
-            check_body(table)
-                .contains("WHEN 'can' THEN extended IS NOT NULL AND is_fd IS NOT NULL"),
-            "the check no longer holds a CAN row to its pair"
-        );
-        assert_eq!(
-            check_body(table),
-            check_body(&add),
-            "a fresh and a migrated capture_frame disagree on the check"
-        );
-        let guard = schema
-            .iter()
-            .find(|s| s.contains(&format!("conname = '{CONSTRAINT}'")) && s.contains("RAISE"))
+        let guard = split_statements(INIT_SCHEMA)
+            .into_iter()
+            .find(|s| {
+                s.contains(&format!("conname = '{PROTOCOL_COLUMNS_CHECK}'")) && s.contains("RAISE")
+            })
             .expect("the Modbus-columns guard is present");
         assert!(
             guard.contains("0003_capture_frame_protocol_columns.sql first'"),
             "the guard does not name its migration in the RAISE text"
         );
+    }
+
+    /// 0004 swaps the same CHECK for one on `flags`, after every row has one and
+    /// before the columns it packs are dropped. A fresh and a migrated
+    /// capture_frame must agree on what a row of each protocol is.
+    #[test]
+    fn the_flags_migration_backfills_then_checks_then_drops() {
+        let stmts = split_statements(MIGRATIONS[3].sql);
+        let at = |what: &str| {
+            stmts
+                .iter()
+                .position(|s| s.contains(what))
+                .unwrap_or_else(|| panic!("no {what}"))
+        };
+        let swap = at(&format!("ADD CONSTRAINT {PROTOCOL_COLUMNS_CHECK}"));
+        assert!(at("ADD COLUMN IF NOT EXISTS flags") < at("CALL public.wiretap_backfill_flags()"));
+        assert!(at("CALL public.wiretap_backfill_flags()") < swap);
+        assert!(swap < at("DROP MATERIALIZED VIEW IF EXISTS public.capture_frame_hourly"));
+        assert!(
+            at("DROP VIEW IF EXISTS") < at("DROP COLUMN IF EXISTS dir"),
+            "the views read the columns"
+        );
+        assert!(
+            stmts[swap].contains("pg_get_constraintdef(oid) LIKE '%flags%'"),
+            "a repeated run pays for the validating scan again"
+        );
+
+        let table = split_statements(INIT_SCHEMA)
+            .into_iter()
+            .find(|s| s.starts_with("CREATE TABLE IF NOT EXISTS public.capture_frame"))
+            .expect("capture_frame present");
+        assert_eq!(
+            check_body(&table),
+            check_body(&stmts[swap]),
+            "a fresh and a migrated capture_frame disagree on the check"
+        );
+        let columns: Vec<&str> = table
+            .lines()
+            .filter_map(|l| l.split_whitespace().next())
+            .collect();
+        assert!(columns.contains(&"flags"));
+        for gone in ["extended", "is_fd", "dir"] {
+            assert!(!columns.contains(&gone), "a fresh capture_frame has {gone}");
+        }
+        let guard = split_statements(INIT_SCHEMA)
+            .into_iter()
+            .find(|s| s.contains("attname = 'flags'") && s.contains("RAISE"))
+            .expect("the flags guard is present");
+        assert!(guard.contains("0004_capture_frame_flags.sql first'"));
+
+        let sql = MIGRATIONS[3].sql;
+        let init = sql
+            .find("\\ir ../init_schema.sql")
+            .expect("0004 reaches init_schema.sql");
+        let post = sql
+            .find("\\ir 0001_capture_frame_post.sql")
+            .expect("the psql run refreshes the rebuilt rollup");
+        assert!(
+            init < post,
+            "the refresh would run before the aggregate exists"
+        );
+    }
+
+    /// The SQL spells `CanFlags`' bits as literals; these are the ones it uses.
+    #[test]
+    fn the_schema_spells_the_bits_canflags_names() {
+        use wiretap_protocol::can::CanFlags;
+        let (rtr, ext, fd, tx) = (
+            CanFlags::RTR.0,
+            CanFlags::EXT.0,
+            CanFlags::FD.0,
+            CanFlags::TX.0,
+        );
+        for sql in [
+            format!("WHERE flags & {rtr} = 0"),
+            format!("flags & {ext} <> 0 AS extended"),
+            format!("flags & {fd} <> 0 AS is_fd"),
+            format!("flags & {tx} <> 0 THEN 'tx'"),
+            format!("flags IN (0, {tx})"),
+            format!("_extended::int * {ext} + _is_fd::int * {fd} + (_dir = 'tx')::int * {tx}"),
+        ] {
+            assert!(INIT_SCHEMA.contains(&sql), "init_schema.sql lacks {sql}");
+        }
+        assert!(ROLLED_UP.ends_with(&format!("WHERE flags & {rtr} = 0")));
+        for sql in [
+            format!("extended::int * {ext} + is_fd::int * {fd}"),
+            format!("(dir = 'tx')::int * {tx}"),
+        ] {
+            assert!(MIGRATIONS[3].sql.contains(&sql), "0004 lacks {sql}");
+        }
     }
 
     /// Under psql each migration `\ir`s its successor and only the newest one
@@ -627,6 +696,7 @@ mod tests {
             "0001_capture_frame.sql",
             "0002_events_annotations.sql",
             "0003_capture_frame_protocol_columns.sql",
+            "0004_capture_frame_flags.sql",
         ];
         assert_eq!(files.len(), MIGRATIONS.len(), "name the new migration here");
         let reaches_init = |m: &Migration| m.sql.contains("\\ir ../init_schema.sql");
