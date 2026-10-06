@@ -102,13 +102,14 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$R" "$BASE/v1/db/$DB
 # --- import: 1000 synthetic records into a fresh auto-created db ---
 # Unique db name per run so the count assertion is idempotent.
 IMPORT_DB="smoke_import_$(date +%s)"
-python3 - <<'EOF' > /tmp/wiretap_import.bin
+PYTHONPATH="$TOOLS" python3 - <<'EOF' > /tmp/wiretap_import.bin
 import struct, sys, time
+from test_ingest_client import IMPORT_HEADER, encode_import_record
 base = int(time.time() * 1_000_000)
 out = sys.stdout.buffer
+out.write(IMPORT_HEADER)
 for i in range(1000):
-    payload = struct.pack("<II", i, i * 2)
-    out.write(struct.pack("<qIBB", base + i * 1000, 0x300 + (i % 4), 0, len(payload)) + payload)
+    out.write(encode_import_record(base + i * 1000, 0x300 + (i % 4), struct.pack("<II", i, i * 2)))
 EOF
 resp=$(curl -fsS -H "$A" -H "Content-Type: application/x-wiretap-frames" \
     --data-binary @/tmp/wiretap_import.bin "$BASE/v1/db/$IMPORT_DB/import?create=true")
@@ -117,6 +118,10 @@ cnt=$(curl -fsS -H "$R" -H "$J" -d '{"frame_id":768}' "$BASE/v1/db/$IMPORT_DB/qu
 [ "$cnt" = "250" ]; check "imported frames queryable (0x300 count=$cnt)" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" -H "Content-Type: application/x-wiretap-frames" --data-binary @/tmp/wiretap_import.bin "$BASE/v1/db/$IMPORT_DB/import")
 [ "$code" = "403" ]; check "read key cannot import" $?
+resp=$(tail -c +6 /tmp/wiretap_import.bin | curl -s -w '\n%{http_code}' -H "$A" -H "Content-Type: application/x-wiretap-frames" \
+    --data-binary @- "$BASE/v1/db/$IMPORT_DB/import")
+[ "${resp##*$'\n'}" = "400" ] && printf '%s' "${resp%$'\n'*}" | grep -q 'magic'
+check "an older desktop's body, with no header, is a 400 saying so" $?
 
 # --- modbus rows: written over TCP ingest, the only path that carries them,
 # and read back only when a protocol is named ---
@@ -192,6 +197,33 @@ for range in "" "?start=2000-01-01T00:00:00Z"; do
     curl -fsS -H "$R" "$BASE/v1/db/$FLAGS_DB/inventory$range" | python3 -c 'import sys,json;e={x["frame_id"]:(x["count"],x["max_dlc"]) for x in json.load(sys.stdin)["entries"]};assert e=={2033:(1,2),2034:(1,9)},e'
     check "inventory${range:+ over a range} counts data frames only, so an id sending only remote frames is absent" $?
 done
+
+# --- the same frames over capture import, stored as ingest stored them ---
+PYTHONPATH="$TOOLS" python3 - <<'EOF' > /tmp/wiretap_import_flags.bin
+import sys, time
+from test_ingest_client import (IMPORT_HEADER, encode_import_record, CAN_FLAG_RTR, CAN_FLAG_BRS,
+                                CAN_FLAG_ESI, CAN_RTR_LEN_SHIFT)
+base = int(time.time() * 1_000_000)
+sys.stdout.buffer.write(IMPORT_HEADER + b"".join([
+    encode_import_record(base, 0x7F1, b"", flags=CAN_FLAG_RTR | 8 << CAN_RTR_LEN_SHIFT),
+    encode_import_record(base + 1, 0x7F1, bytes([0x11, 0x22])),
+    encode_import_record(base + 2, 0x7F2, bytes(12), fd=True, flags=CAN_FLAG_BRS | CAN_FLAG_ESI),
+    encode_import_record(base + 3, 0x7F3, b"", flags=CAN_FLAG_RTR | 2 << CAN_RTR_LEN_SHIFT),
+]))
+EOF
+curl -fsS -H "$A" -H "Content-Type: application/x-wiretap-frames" --data-binary @/tmp/wiretap_import_flags.bin \
+    "$BASE/v1/db/${FLAGS_DB}_import/import?create=true" | grep -q '"imported":4'
+check "a remote frame and an FD frame with BRS and ESI imported" $?
+python3 - "$BASE" "$read_key" "$FLAGS_DB" "${FLAGS_DB}_import" <<'EOF'
+import json, sys, urllib.request
+base, key, ingested, imported = sys.argv[1:]
+def rows(db):
+    req = urllib.request.Request(f"{base}/v1/db/{db}/frames", headers={"Authorization": f"Bearer {key}"})
+    return sorted(sorted((k, v) for k, v in f.items() if k != "ts_us")
+                  for f in json.load(urllib.request.urlopen(req))["frames"])
+assert rows(imported) == rows(ingested), (rows(imported), rows(ingested))
+EOF
+check "frames serves the imported frames as it serves the ingested ones" $?
 
 # --- admin views ---
 curl -fsS -H "$A" "$BASE/v1/db/$DB/activity" | grep -q queries; check "activity" $?

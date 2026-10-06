@@ -104,6 +104,14 @@ missing); `DELETE /v1/db/{db}/events/{id}` removes it (204, 404 if missing).
 Times cross the wire as microseconds since the epoch, as `time-bounds` and
 `frames` already do. A key that can read a database can annotate it.
 
+`POST /v1/db/{db}/import` streams a local capture into a database, as an
+`ingest` or `admin` key. The body is version 2 of wiretap-protocol's
+`docs/import.md`: a `WTIM` header, then records carrying each frame's RTR,
+BRS and ESI, stored as ingest stores them. A body without the header, from an
+older desktop, or of another version is a 400 saying why. **Upgrade every
+gateway before a desktop that sends version 2**: an older gateway misreads it
+without an error.
+
 A database is created when: an admin creates it in the UI / API; an ingest
 client names an unknown one in its HELLO (auto-create, when enabled); or a
 capture import targets one with `?create=true`. Auto-create is gated by

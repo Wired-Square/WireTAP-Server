@@ -20,7 +20,7 @@ use wiretap_gateway::{
     AssignCatalog, AssignedCatalog, AssignmentConflict, CatalogRejected, DaemonList, StoredCatalog,
     UnassignParams,
 };
-use wiretap_protocol::import::parse_record;
+use wiretap_protocol::import::{parse_header, parse_record, BODY_HEADER};
 use wiretap_protocol::ingest::RecordKind;
 
 use crate::catalogs::AssignError;
@@ -728,8 +728,8 @@ struct ImportQuery {
 
 const IMPORT_CHUNK_ROWS: usize = 8192;
 
-/// Streaming capture import: the body is `wiretap_protocol::import` records
-/// back to back, COPYed in chunks as it streams.
+/// Streaming capture import: the body is a `wiretap_protocol::import` header
+/// then records, COPYed in chunks as it streams.
 async fn import_capture(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
@@ -746,62 +746,75 @@ async fn import_capture(
         }
     }
     let t0 = Instant::now();
+    let mut stream = req.into_body().into_data_stream();
+    let mut next_chunk = async || {
+        stream
+            .try_next()
+            .await
+            .map_err(|e| ApiError::from(format!("body read failed: {e}")))
+    };
+    let mut pending: Vec<u8> = Vec::new();
+    let header = loop {
+        if let Some(n) = parse_header(&pending)? {
+            break n;
+        }
+        let Some(bytes) = next_chunk().await? else {
+            return Err(ApiError::from(format!(
+                "import body ends before its {BODY_HEADER}-byte header"
+            )));
+        };
+        pending.extend_from_slice(&bytes);
+    };
+    pending.drain(..header);
     let pool = state
         .dbs
         .ensure_database(&db, q.create)
         .await
         .map_err(not_found)?;
 
-    let mut stream = req.into_body().into_data_stream();
-    let mut pending: Vec<u8> = Vec::new();
     let mut rows: Vec<FrameRow> = Vec::with_capacity(IMPORT_CHUNK_ROWS);
     let mut imported: u64 = 0;
-
     loop {
-        let chunk = stream
-            .try_next()
-            .await
-            .map_err(|e| ApiError::from(format!("body read failed: {e}")))?;
-        let done = chunk.is_none();
-        if let Some(bytes) = chunk {
-            pending.extend_from_slice(&bytes);
-            let mut read = 0;
-            while let Some((r, consumed)) = parse_record(&pending[read..])? {
-                read += consumed;
-                rows.push(FrameRow::new(
-                    r.ts_us,
-                    RecordKind::Can,
-                    r.id_flags,
-                    0,
-                    r.bus,
-                    r.payload,
-                ));
-            }
-            pending.drain(..read);
-        }
-
-        if rows.len() >= IMPORT_CHUNK_ROWS || (done && !rows.is_empty()) {
+        let read = import_rows(&pending, &mut rows)?;
+        pending.drain(..read);
+        let chunk = next_chunk().await?;
+        if rows.len() >= IMPORT_CHUNK_ROWS || (chunk.is_none() && !rows.is_empty()) {
             crate::ingest::writer::copy_rows(&pool, &rows)
                 .await
                 .map_err(sql::QueryError::from)?;
             imported += rows.len() as u64;
             rows.clear();
         }
-        if done {
-            if !pending.is_empty() {
-                return Err(ApiError::from(format!(
-                    "truncated record: {} trailing bytes",
-                    pending.len()
-                )));
-            }
-            break;
-        }
+        let Some(bytes) = chunk else { break };
+        pending.extend_from_slice(&bytes);
+    }
+    if !pending.is_empty() {
+        return Err(ApiError::from(format!(
+            "truncated record: {} trailing bytes",
+            pending.len()
+        )));
     }
 
     Ok(Json(ImportResult {
         imported,
         elapsed_ms: t0.elapsed().as_millis() as u64,
     }))
+}
+
+fn import_rows(buf: &[u8], rows: &mut Vec<FrameRow>) -> Result<usize, String> {
+    let mut read = 0;
+    while let Some((r, consumed)) = parse_record(&buf[read..])? {
+        read += consumed;
+        rows.push(FrameRow::new(
+            r.ts_us,
+            RecordKind::Can,
+            r.id_flags,
+            r.flags,
+            r.bus,
+            r.payload,
+        ));
+    }
+    Ok(read)
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,6 +1022,9 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::time::Instant;
+    use wiretap_protocol::can::CanFrame;
+    use wiretap_protocol::import;
+    use wiretap_protocol::ingest::RecordFields;
 
     fn states(pairs: &[(&str, db::DbSchemaState)]) -> HashMap<String, db::DbSchemaState> {
         pairs
@@ -1129,25 +1145,36 @@ mod tests {
         addr
     }
 
-    /// The status, and the body as JSON (`null` when it is not).
     async fn request(
         method: &str,
         path: &str,
         key: Option<&str>,
         body: Option<serde_json::Value>,
     ) -> (u16, serde_json::Value) {
+        let body = body.map(|b| b.to_string()).unwrap_or_default();
+        send(method, path, key, "application/json", body.as_bytes()).await
+    }
+
+    /// The status, and the body as JSON (`null` when it is not).
+    async fn send(
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        content_type: &str,
+        body: &[u8],
+    ) -> (u16, serde_json::Value) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut stream = tokio::net::TcpStream::connect(gateway().await)
             .await
             .unwrap();
-        let body = body.map(|b| b.to_string()).unwrap_or_default();
         let auth = key.map_or(String::new(), |k| format!("Authorization: Bearer {k}\r\n"));
         let head = format!(
             "{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n{auth}\
-             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+             Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
             body.len()
         );
-        stream.write_all((head + &body).as_bytes()).await.unwrap();
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).await.unwrap();
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
@@ -1250,5 +1277,78 @@ mod tests {
             .unwrap();
         let conflict: AssignmentConflict = serde_json::from_slice(&body).unwrap();
         assert_eq!(conflict.current, Some(now));
+    }
+
+    fn import_body(frames: &[(CanFrame, bool)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        import::encode_header_into(&mut body);
+        for (ts_us, (frame, transmitted)) in (0..).zip(frames) {
+            import::encode_record_into(&mut body, ts_us, frame, *transmitted);
+        }
+        body
+    }
+
+    /// An import is stored as ingest stores the same frames: RTR, BRS and ESI
+    /// in `flags`, and a remote frame's requested code as `dlc` with no data.
+    #[test]
+    fn an_import_stores_its_frames_as_ingest_does() {
+        let mut fd = CanFrame::data(2, 0x18DA_F110, true, true, true, vec![0xAA; 12]);
+        fd.esi = true;
+        let frames = [
+            (CanFrame::remote(0, 0x7F1, false, 8), false),
+            (CanFrame::remote(1, 0x7F1, false, 2), true),
+            (fd, false),
+        ];
+        let body = import_body(&frames);
+        let mut imported = Vec::new();
+        let records = &body[import::BODY_HEADER..];
+        assert_eq!(import_rows(records, &mut imported), Ok(records.len()));
+
+        let columns = |r: &FrameRow| (r.ts_us, r.id, r.flags, r.dlc, r.data.clone(), r.bus);
+        let ingested: Vec<_> = (0..)
+            .zip(&frames)
+            .map(|(ts_us, (frame, transmitted))| {
+                let (id_flags, flags) = RecordFields::from_can(frame, *transmitted).to_wire();
+                let row = FrameRow::new(
+                    ts_us,
+                    RecordKind::Can,
+                    id_flags,
+                    flags,
+                    frame.bus,
+                    frame.data.clone(),
+                );
+                columns(&row)
+            })
+            .collect();
+        assert_eq!(imported.iter().map(columns).collect::<Vec<_>>(), ingested);
+    }
+
+    /// The desktop shows the message; an older one sends a body without the
+    /// header, which would otherwise be misread as records.
+    #[tokio::test]
+    async fn an_import_body_this_gateway_does_not_take_is_a_400_with_a_message() {
+        let v2 = import_body(&[(
+            CanFrame::data(0, 0x123, false, false, false, vec![1]),
+            false,
+        )]);
+        let v1 = v2[import::BODY_HEADER..].to_vec();
+        let v3 = [&b"WTIM\x03"[..], &v1].concat();
+        for (body, says) in [
+            (v1, "magic"),
+            (v3, "version 3"),
+            (b"WTI".to_vec(), "header"),
+        ] {
+            let (status, err) = send(
+                "POST",
+                "/v1/db/capture/import",
+                Some("bootstrap"),
+                "application/x-wiretap-frames",
+                &body,
+            )
+            .await;
+            assert_eq!(status, 400, "{says}: {err}");
+            let msg = err["error"].as_str().unwrap_or_default();
+            assert!(msg.contains(says), "{says}: {msg}");
+        }
     }
 }

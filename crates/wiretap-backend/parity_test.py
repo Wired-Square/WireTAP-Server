@@ -79,13 +79,13 @@ ID_EXTENDED = 1 << 29
 
 
 def record(ts_us, arb, payload, extended=False):
-    flags = (arb & 0x1FFFFFFF) | (ID_EXTENDED if extended else 0)
-    return struct.pack("<qIBB", ts_us, flags, 0, len(payload)) + payload
+    id_flags = (arb & 0x1FFFFFFF) | (ID_EXTENDED if extended else 0)
+    return struct.pack("<qIBBB", ts_us, id_flags, 0, 0, len(payload)) + payload
 
 
 def build_dataset():
     base = 1_700_000_000_000_000  # fixed epoch us (deterministic)
-    buf = bytearray()
+    buf = bytearray(b"WTIM\x02")
     t = base
     for i in range(200):
         # inject a 5s gap before frame 100

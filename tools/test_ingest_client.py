@@ -59,18 +59,28 @@ def encode_raw_record(delta_us: int, kind: int, flags: int, bus: int,
     return struct.pack("<IBBBHI", delta_us, kind, flags, bus, len(payload), id_flags) + payload
 
 
+def can_id_flags(arb_id: int, extended=False, fd=False, tx=False) -> int:
+    return ((arb_id & 0x1FFFFFFF) | (ID_EXTENDED if extended else 0)
+            | (ID_FD if fd else 0) | (ID_TX if tx else 0))
+
+
 def encode_record(delta_us: int, arb_id: int, payload: bytes,
                   extended=False, fd=False, tx=False, bus=0, flags=0) -> bytes:
     """A CAN record. `flags` is the record's CAN_FLAG_* bits, and an RTR's
     requested length code shifted by CAN_RTR_LEN_SHIFT."""
-    id_flags = (arb_id & 0x1FFFFFFF)
-    if extended:
-        id_flags |= ID_EXTENDED
-    if fd:
-        id_flags |= ID_FD
-    if tx:
-        id_flags |= ID_TX
-    return encode_raw_record(delta_us, KIND_CAN, flags, bus, id_flags, payload)
+    return encode_raw_record(delta_us, KIND_CAN, flags, bus,
+                             can_id_flags(arb_id, extended, fd, tx), payload)
+
+
+IMPORT_HEADER = b"WTIM\x02"
+
+
+def encode_import_record(ts_us: int, arb_id: int, payload: bytes,
+                         extended=False, fd=False, tx=False, bus=0, flags=0) -> bytes:
+    """A capture-import record, after IMPORT_HEADER, with encode_record's
+    `flags`: `ts_us i64 | id_flags u32 | flags u8 | bus u8 | len u8 | payload`."""
+    return struct.pack("<qIBBB", ts_us, can_id_flags(arb_id, extended, fd, tx), flags, bus,
+                       len(payload)) + payload
 
 
 def encode_modbus_record(delta_us: int, unit: int, func: int, message: bytes,

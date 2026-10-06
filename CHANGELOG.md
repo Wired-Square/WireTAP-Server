@@ -44,16 +44,21 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **A capture import's body is versioned, and keeps RTR, BRS and ESI.** It
+  starts with a `WTIM` header and version 2, and its records carry the CAN
+  flags, stored as ingest stores them. An older desktop's body is refused
+  with a 400 saying so. **Upgrade every gateway before a desktop that sends
+  version 2**: an older gateway misreads it silently.
 - **Schema v4: a frame's flags are one `flags` column.** `extended`, `is_fd`
   and `dir` are packed into it and dropped; `can_frame` and its byte views
   still serve them by name. The gateway migrates each archive on start,
   rewriting every chunk and rebuilding the rollup, and refuses ingest while it
   does: time it on a copy first. A plain INSERT through `can_frame` no longer
   works; `ingest_can_frame` does.
-- **Built on `wslib-wiretap-rs` v0.1.1**, the WireTAP libraries' new home
+- **Built on `wslib-wiretap-rs` v0.1.2**, the WireTAP libraries' new home
   (`v0.1.0`, restarted from `wiretap-lib-rs` v0.25.1, then the ingest
-  protocol's server close, waiting for a missing device, and CAN's RTR, BRS
-  and ESI flags).
+  protocol's server close, waiting for a missing device, CAN's RTR, BRS
+  and ESI flags, and the versioned import body).
 - **Clearing an unassigned interface answers 204, not 404.** `DELETE
   /v1/admin/assignments` is idempotent; a clear whose `expected` no longer
   matches still answers 409 with `current` null.
