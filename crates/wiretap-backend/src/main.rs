@@ -133,10 +133,8 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
     // above, so the admin UI and the healthcheck can answer while it runs and
     // the migration is watchable rather than a silent gap before startup.
     //
-    // Databases behind the current version refuse reads and writes until the
-    // sweep reaches them. A capture server refused at HELLO treats it as a sink
-    // failure, which is the same path as a gateway outage: cache to disk, retry,
-    // drain. Nothing is lost, but nothing is written either until this finishes.
+    // Databases behind the current version refuse reads until they are
+    // migrated, and buffer their ingest meanwhile.
     tokio::spawn(async move { dbs.migrate_all().await });
     // `with_connect_info` so the access log can name the peer.
     axum::serve(

@@ -95,6 +95,40 @@ export interface DatabaseEntry {
   rollup_lag_secs: number | null;
   /** Seconds the rollup rebuild has been running, else null. */
   rollup_busy_secs: number | null;
+  /** What the migration to the current schema last reported; null when settled. */
+  migration: MigrationProgress | null;
+  /** Frames this gateway has buffered while the database is behind, else null. */
+  buffered_rows: number | null;
+}
+
+/** One migration's progress row, as `wiretap_migration_progress` keeps it. */
+export interface MigrationProgress {
+  phase: string;
+  chunks_done: number | null;
+  chunks_total: number | null;
+  rows_done: number | null;
+  /** The chunk being worked on, or the one a failed run stopped at. */
+  current_chunk_start: string | null;
+  compressed_left: number | null;
+  uncompressed_left: number | null;
+  avg_s_compressed: number | null;
+  avg_s_uncompressed: number | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
+/**
+ * Seconds left, from the average chunk time so far. Compressed and uncompressed
+ * chunks are costed apart, as a compressed one is decompressed and compressed
+ * again; until one kind has been timed, the other's average stands in.
+ */
+export function migrationEta(m: MigrationProgress): number | null {
+  const compressed = m.avg_s_compressed ?? m.avg_s_uncompressed;
+  const uncompressed = m.avg_s_uncompressed ?? m.avg_s_compressed;
+  if (compressed === null || uncompressed === null) return null;
+  return Math.round(
+    (m.compressed_left ?? 0) * compressed + (m.uncompressed_left ?? 0) * uncompressed,
+  );
 }
 
 /**
@@ -132,6 +166,8 @@ export function formatSpan(secs: number): string {
 export interface DatabaseList {
   databases: DatabaseEntry[];
   schema_version: number;
+  /** Whether a database behind is migrated without being asked. */
+  auto_migrate: boolean;
 }
 
 /** Seconds as `2m14s` — long enough to matter, short enough to read. */

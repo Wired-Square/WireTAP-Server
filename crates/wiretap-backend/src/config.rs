@@ -22,10 +22,9 @@ pub struct Config {
     pub bootstrap_admin_key: Option<Secret>,
     /// Allow ingest clients / imports to auto-create unknown databases.
     pub auto_create_databases: bool,
-    /// Migrate capture databases to the current schema on start. On by default:
-    /// the alternative is a gateway that refuses to serve databases it could
-    /// have fixed. Turn it off to migrate by hand — snapshotting a large archive
-    /// first, say — and run schema/migrations/*.sql yourself.
+    /// Migrate capture databases to the current schema on start. Off by
+    /// default: a migration can take hours, so a database behind waits for an
+    /// operator's Migrate now, buffering its ingest meanwhile.
     pub auto_migrate: bool,
     pub ingest_keepalive_secs: f64,
     pub ingest_max_batch_frames: usize,
@@ -62,7 +61,7 @@ impl Config {
                 .filter(|k| !k.is_empty())
                 .map(Secret::new),
             auto_create_databases: parse_or("WIRETAP_AUTO_CREATE", true),
-            auto_migrate: parse_or("WIRETAP_AUTO_MIGRATE", true),
+            auto_migrate: parse_or("WIRETAP_AUTO_MIGRATE", false),
             ingest_keepalive_secs: parse_or("WIRETAP_INGEST_KEEPALIVE_SECS", 30.0),
             ingest_max_batch_frames: parse_or("WIRETAP_INGEST_MAX_BATCH_FRAMES", 256),
             log_buffer: parse_or("WIRETAP_LOG_BUFFER", 2000),

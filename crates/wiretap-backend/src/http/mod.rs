@@ -33,9 +33,9 @@ use crate::schema;
 use crate::sql;
 use crate::state::AppState;
 use crate::types::{
-    DatabaseInfo, DatabaseList, ErrorBody, Event, EventPatch, EventsQuery, EventsResponse,
-    FramesQuery, Health, ImportResult, InventoryResponse, NewEvent, PayloadsParams,
-    PayloadsResponse, ProtocolQuery, SignalResponse, TimeRangeQuery,
+    DatabaseInfo, ErrorBody, Event, EventPatch, EventsQuery, EventsResponse, FramesQuery, Health,
+    ImportResult, InventoryResponse, NewEvent, PayloadsParams, PayloadsResponse, ProtocolQuery,
+    SignalResponse, TimeRangeQuery,
 };
 
 type St = Arc<AppState>;
@@ -83,6 +83,7 @@ pub fn router(state: St) -> Router {
             polled(get(list_databases)).merge(post(create_database)),
         )
         .route("/v1/databases/{db}", delete(delete_database))
+        .route("/v1/databases/{db}/migrate", post(migrate_database))
         .route("/v1/databases/{db}/rollup/refresh", post(refresh_rollup))
         .route("/v1/db/{db}/time-bounds", get(time_bounds))
         .route("/v1/db/{db}/inventory", get(inventory))
@@ -290,8 +291,8 @@ fn schema_consensus(states: &std::collections::HashMap<String, db::DbSchemaState
         return "migrating".into();
     }
     // Before the version fold: a database that is behind and *not* being
-    // migrated still refuses reads and writes, and folding it in would report a
-    // tidy consensus while nothing worked.
+    // migrated still refuses reads, and folding it in would report a tidy
+    // consensus while nothing could be read.
     if states.values().any(|s| matches!(s, Pending { .. })) {
         return "behind".into();
     }
@@ -319,6 +320,12 @@ async fn rollup_state(dbs: &db::Databases, name: &str) -> Option<(&'static str, 
         schema::RollupState::Incomplete => Some(("incomplete", None)),
         schema::RollupState::Covered { lag_secs } => Some(("covered", Some(lag_secs))),
     }
+}
+
+/// Not pooled, for the reason `rollup_state` gives.
+async fn migration_progress(dbs: &db::Databases, name: &str) -> Option<schema::MigrationProgress> {
+    let client = dbs.connect_raw(name).await.ok()?;
+    schema::migration_progress(&client).await.ok()?
 }
 
 /// Materialise the hourly rollup. Returns as soon as it has started — it is
@@ -350,10 +357,46 @@ async fn refresh_rollup(
     Ok(Json(json!({ "status": "started", "database": db })))
 }
 
+/// Migrate one database to the current schema. Returns as soon as it has
+/// started; the state, and the chunks done of a long one, are read back from
+/// `GET /v1/databases`.
+async fn migrate_database(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(db): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_admin(&key)?;
+    state.dbs.start_migration(&db).await.map_err(|e| match e {
+        db::MigrateRefusal::NotFound(m) => not_found(m),
+        db::MigrateRefusal::Conflict(m) => ApiError(StatusCode::CONFLICT, m),
+        db::MigrateRefusal::Unavailable(m) => unavailable(m),
+    })?;
+    Ok(Json(json!({ "status": "started" })))
+}
+
+/// [`DatabaseInfo`] with a migration's progress and the ingest buffered
+/// meanwhile, until the shared type carries them. The desktop's parser ignores
+/// fields it does not know.
+#[derive(Serialize)]
+struct DatabaseRow {
+    #[serde(flatten)]
+    info: DatabaseInfo,
+    migration: Option<schema::MigrationProgress>,
+    buffered_rows: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct DatabaseRows {
+    databases: Vec<DatabaseRow>,
+    schema_version: i32,
+    /// Whether a database behind is migrated without being asked.
+    auto_migrate: bool,
+}
+
 async fn list_databases(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
-) -> Result<Json<DatabaseList>, ApiError> {
+) -> Result<Json<DatabaseRows>, ApiError> {
     if !key.role.allows_read() {
         return Err(forbidden("key role does not allow reads"));
     }
@@ -372,9 +415,14 @@ async fn list_databases(
         .map_err(|e| ApiError::from(format!("database list failed: {e}")))?;
     let states = state.dbs.schema_states().await;
     let rebuilding = state.dbs.rollup_rebuilds().await;
+    let buffered = state.dbs.buffered_rows().await;
     let mut databases = Vec::new();
     for r in &rows {
         let name: String = r.get("datname");
+        // NULL for a database dropped since the list was read.
+        let Some(size_bytes) = r.get("size_bytes") else {
+            continue;
+        };
         // Same filter the sweep uses: a name this gateway would never manage is
         // not a capture database, and listing it as "unknown" would report the
         // deployment as mixed forever.
@@ -387,12 +435,15 @@ async fn list_databases(
         let schema = states.get(&name);
         // Only worth asking a database that is actually usable; one mid-migration
         // would refuse the connection anyway.
-        let rollup = match schema {
-            Some(db::DbSchemaState::Current { .. }) => rollup_state(&state.dbs, &name).await,
-            _ => None,
+        let (rollup, migration) = match schema {
+            Some(db::DbSchemaState::Current { .. }) => {
+                (rollup_state(&state.dbs, &name).await, None)
+            }
+            Some(_) => (None, migration_progress(&state.dbs, &name).await),
+            None => (None, None),
         };
-        databases.push(DatabaseInfo {
-            size_bytes: r.get("size_bytes"),
+        let info = DatabaseInfo {
+            size_bytes,
             schema_state: schema.map_or("unknown", |s| s.label()).into(),
             schema_version: schema.and_then(|s| s.version()),
             busy_secs: schema.and_then(|s| s.busy_secs()),
@@ -404,13 +455,19 @@ async fn list_databases(
             rollup_lag_secs: rollup.and_then(|(_, lag)| lag),
             rollup_busy_secs: rebuilding.get(&name).copied(),
             name,
+        };
+        databases.push(DatabaseRow {
+            buffered_rows: buffered.get(&info.name).copied(),
+            info,
+            migration,
         });
     }
     // The version they are all headed for, so the UI can render "v0 → v1"
     // without hardcoding what current means.
-    Ok(Json(DatabaseList {
+    Ok(Json(DatabaseRows {
         databases,
         schema_version: crate::schema::SCHEMA_VERSION,
+        auto_migrate: state.dbs.auto_migrate(),
     }))
 }
 
@@ -766,7 +823,7 @@ async fn import_capture(
         pending.extend_from_slice(&bytes);
     };
     pending.drain(..header);
-    let pool = state
+    state
         .dbs
         .ensure_database(&db, q.create)
         .await
@@ -779,9 +836,15 @@ async fn import_capture(
         pending.drain(..read);
         let chunk = next_chunk().await?;
         if rows.len() >= IMPORT_CHUNK_ROWS || (chunk.is_none() && !rows.is_empty()) {
-            crate::ingest::writer::copy_rows(&pool, &rows)
+            state
+                .dbs
+                .write_rows(&db, &rows)
                 .await
-                .map_err(sql::QueryError::from)?;
+                .map_err(|e| match e {
+                    db::WriteError::Db(db::DbError::Refused(m)) => not_found(m),
+                    db::WriteError::Db(db::DbError::Unavailable(m)) => unavailable(m),
+                    db::WriteError::Copy(e) => sql::QueryError::from(e).into(),
+                })?;
             imported += rows.len() as u64;
             rows.clear();
         }
@@ -1126,10 +1189,8 @@ mod tests {
         assert_eq!(schema_consensus(&HashMap::new()), "unknown");
     }
 
-    /// The router over a PostgreSQL that is not there, taking the key
-    /// `bootstrap` as admin.
-    async fn gateway() -> std::net::SocketAddr {
-        let dbs = db::tests::unreachable_databases(true);
+    /// The router over `dbs`, taking the key `bootstrap` as admin.
+    async fn gateway(dbs: db::Databases) -> std::net::SocketAddr {
         let sessions = crate::ingest::Sessions::default();
         let state = Arc::new(AppState {
             keys: crate::keys::KeyStore::new(dbs.clone(), Some("bootstrap")),
@@ -1151,11 +1212,21 @@ mod tests {
         key: Option<&str>,
         body: Option<serde_json::Value>,
     ) -> (u16, serde_json::Value) {
-        let body = body.map(|b| b.to_string()).unwrap_or_default();
-        send(method, path, key, "application/json", body.as_bytes()).await
+        let at = gateway(db::tests::unreachable_databases(true)).await;
+        request_to(at, method, path, key, body).await
     }
 
-    /// The status, and the body as JSON (`null` when it is not).
+    async fn request_to(
+        at: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (u16, serde_json::Value) {
+        let body = body.map(|b| b.to_string()).unwrap_or_default();
+        send_to(at, method, path, key, "application/json", body.as_bytes()).await
+    }
+
     async fn send(
         method: &str,
         path: &str,
@@ -1163,10 +1234,21 @@ mod tests {
         content_type: &str,
         body: &[u8],
     ) -> (u16, serde_json::Value) {
+        let at = gateway(db::tests::unreachable_databases(true)).await;
+        send_to(at, method, path, key, content_type, body).await
+    }
+
+    /// The status, and the body as JSON (`null` when it is not).
+    async fn send_to(
+        at: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        content_type: &str,
+        body: &[u8],
+    ) -> (u16, serde_json::Value) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut stream = tokio::net::TcpStream::connect(gateway().await)
-            .await
-            .unwrap();
+        let mut stream = tokio::net::TcpStream::connect(at).await.unwrap();
         let auth = key.map_or(String::new(), |k| format!("Authorization: Bearer {k}\r\n"));
         let head = format!(
             "{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n{auth}\
@@ -1180,6 +1262,117 @@ mod tests {
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
         let status = head.split(' ').nth(1).unwrap().parse().unwrap();
         (status, serde_json::from_str(body).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn migrate_starts_one_behind_database_and_leaves_the_others_behind() {
+        use db::tests::{archived, buffer_exists, frames, until_label, version_on_disk};
+        let chosen = db::tests::behind_database("chosen").await;
+        let other = db::tests::behind_database("other").await;
+        let dbs = db::tests::live_databases(false);
+        dbs.migrate_all().await;
+        for name in [&chosen, &other] {
+            dbs.write_rows(name, &frames(0x7D0, 1_700_000_000_000_000, 3))
+                .await
+                .unwrap();
+        }
+        let at = gateway(dbs.clone()).await;
+        let migrate = |name: &str| {
+            let path = format!("/v1/databases/{name}/migrate");
+            async move { request_to(at, "POST", &path, Some("bootstrap"), None).await }
+        };
+
+        let (status, body) = migrate(&chosen).await;
+        assert_eq!((status, &body), (200, &json!({ "status": "started" })));
+        let (status, _) = migrate(&chosen).await;
+        assert_eq!(status, 409, "a second start while it runs");
+
+        until_label(&dbs, &chosen, "current").await;
+        assert_eq!(
+            version_on_disk(&dbs, &chosen).await,
+            Some(schema::SCHEMA_VERSION)
+        );
+        assert_eq!(archived(&chosen, 0x7D0).await, (3, 3));
+        assert_eq!(db::tests::state_of(&dbs, &other).await.label(), "pending");
+        assert_eq!(
+            version_on_disk(&dbs, &other).await,
+            Some(schema::SCHEMA_VERSION - 1)
+        );
+        assert!(
+            buffer_exists(&other).await,
+            "the other's buffer was drained"
+        );
+
+        let (status, _) = migrate(&chosen).await;
+        assert_eq!(status, 409, "a start on a current database");
+        let (status, _) = migrate("no_such_database").await;
+        assert_eq!(status, 404);
+
+        for name in [&chosen, &other] {
+            dbs.delete_database(name).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn the_databases_list_shows_a_migration_advancing_chunk_by_chunk() {
+        let name = db::tests::seeded_v3_database("progress", 40, 2880).await;
+        let dbs = db::tests::live_databases(false);
+        dbs.migrate_all().await;
+        let at = gateway(dbs.clone()).await;
+        let path = format!("/v1/databases/{name}/migrate");
+        let (status, _) = request_to(at, "POST", &path, Some("bootstrap"), None).await;
+        assert_eq!(status, 200);
+
+        // Read as the list reads it, but without a connection to every other
+        // database in the cluster between samples.
+        let client = dbs.connect_raw(&name).await.unwrap();
+        let mut seen = Vec::new();
+        let mut listed = serde_json::Value::Null;
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            while db::tests::state_of(&dbs, &name).await.label() != "current" {
+                let now = schema::migration_progress(&client).await.unwrap();
+                let done = now.as_ref().and_then(|p| p.chunks_done);
+                if done.is_some() && seen.last() != done.as_ref() {
+                    seen.extend(done);
+                }
+                if listed.is_null() && now.is_some_and(|p| p.phase == "rollup") {
+                    let (_, list) =
+                        request_to(at, "GET", "/v1/databases", Some("bootstrap"), None).await;
+                    listed = list["databases"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|d| d["name"] == name.as_str())
+                        .unwrap()["migration"]
+                        .clone();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the migration never finished");
+
+        let total = listed["chunks_total"].as_i64().unwrap();
+        assert!(total >= 40, "{listed}");
+        assert!(seen.len() > 2, "chunks_done never advanced: {seen:?}");
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "{seen:?}");
+        assert_eq!(seen.last().copied(), Some(total as i32));
+        assert_eq!(listed["chunks_done"], total, "{listed}");
+        assert_eq!(listed["rows_done"], 40 * 2880, "{listed}");
+        for field in [
+            "current_chunk_start",
+            "compressed_left",
+            "uncompressed_left",
+            "avg_s_compressed",
+            "avg_s_uncompressed",
+            "last_error",
+            "updated_at",
+        ] {
+            assert!(listed.get(field).is_some(), "no {field}: {listed}");
+        }
+        dbs.delete_database(&name).await.unwrap();
     }
 
     fn assign(content: &str, provenance: serde_json::Value) -> serde_json::Value {

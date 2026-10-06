@@ -2,7 +2,7 @@
 
 pub use wiretap_gateway::{
     ByteChangeQueryResult, ByteChangeResult, ByteChangesParams, BytePositionStats,
-    DatabaseActivity, DatabaseActivityResult, DatabaseInfo, DatabaseList, DistributionParams,
+    DatabaseActivity, DatabaseActivityResult, DatabaseInfo, DistributionParams,
     DistributionQueryResult, DistributionResult, ErrorBody, Event, EventPatch, EventsQuery,
     EventsResponse, FirstLastParams, FirstLastQueryResult, FirstLastResult, FrameBatch,
     FrameBatchRow, FrameChangeQueryResult, FrameChangeResult, FrameChangesParams, FrameFilter,

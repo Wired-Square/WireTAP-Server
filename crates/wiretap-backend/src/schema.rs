@@ -14,9 +14,12 @@
 //! cannot run in a transaction is `WITH DATA` and `refresh_continuous_aggregate`,
 //! which is why the refresh is a separate step rather than part of a file.
 
-use tokio_postgres::Client;
+use tokio_postgres::{Client, GenericClient};
 
 const INIT_SCHEMA: &str = include_str!("../schema/init_schema.sql");
+
+/// The progress table and its helper, applied before any migration runs.
+const MIGRATION_PROGRESS: &str = include_str!("../schema/migration_progress.sql");
 
 /// The version `init_schema.sql` creates. [`MIGRATIONS`] takes an older database
 /// up to it. Kept in step with the `schema_version` row that file inserts —
@@ -65,7 +68,7 @@ const MIGRATIONS: &[Migration] = &[
 /// that introduced the table stamps every database from then on. That last
 /// case is why this fingerprints rather than assuming an absent table means
 /// "old".
-pub async fn detect_version(client: &Client) -> Result<Option<i32>, String> {
+pub async fn detect_version(client: &impl GenericClient) -> Result<Option<i32>, String> {
     let row = client
         .query_one(
             "SELECT to_regclass('public.schema_version') IS NOT NULL,
@@ -108,6 +111,9 @@ pub async fn migrate(client: &Client, from: Option<i32>) -> Result<(), String> {
         None => Vec::new(),
         Some(v) => MIGRATIONS.iter().filter(|m| m.version > v).collect(),
     };
+    if !pending.is_empty() {
+        apply(client, MIGRATION_PROGRESS, "migration progress").await?;
+    }
     for m in &pending {
         tracing::warn!(
             version = m.version,
@@ -249,6 +255,24 @@ fn is_concurrent_refresh(e: &str) -> bool {
 const REFRESH_SQL: &str =
     "CALL refresh_continuous_aggregate('public.capture_frame_hourly', NULL, NULL)";
 
+/// Materialise the rollup over the hours a drain wrote into.
+pub async fn refresh_rollup_span(
+    client: &Client,
+    span: &crate::ingest::writer::Drained,
+) -> Result<(), String> {
+    let at = |t: std::time::SystemTime| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339();
+    client
+        .batch_execute(&format!(
+            "CALL refresh_continuous_aggregate('public.capture_frame_hourly', \
+               date_trunc('hour', '{}'::timestamptz), \
+               date_trunc('hour', '{}'::timestamptz) + INTERVAL '1 hour')",
+            at(span.first),
+            at(span.last)
+        ))
+        .await
+        .map_err(|e| format!("rollup refresh failed: {}", db_error_detail(&e)))
+}
+
 async fn refresh_rollup_once(client: &Client) -> Result<(), String> {
     client
         .batch_execute(REFRESH_SQL)
@@ -272,13 +296,86 @@ fn failed_statement(e: &tokio_postgres::Error, stmt: &str) -> String {
 /// Apply the full capture schema to an (empty or already-initialised)
 /// database. Statements are idempotent (IF NOT EXISTS throughout).
 pub async fn apply_capture_schema(client: &Client) -> Result<(), String> {
-    for stmt in split_statements(INIT_SCHEMA) {
+    apply(client, INIT_SCHEMA, "schema").await
+}
+
+async fn apply(client: &Client, sql: &str, what: &str) -> Result<(), String> {
+    for stmt in split_statements(sql) {
         client
             .batch_execute(&stmt)
             .await
-            .map_err(|e| format!("schema statement failed: {}", failed_statement(&e, &stmt)))?;
+            .map_err(|e| format!("{what} statement failed: {}", failed_statement(&e, &stmt)))?;
     }
     Ok(())
+}
+
+/// How far a migration to [`SCHEMA_VERSION`] has got, as it reported through
+/// `wiretap_migration_progress`.
+#[derive(Debug, serde::Serialize)]
+pub struct MigrationProgress {
+    pub phase: String,
+    pub chunks_done: Option<i32>,
+    pub chunks_total: Option<i32>,
+    pub rows_done: Option<i64>,
+    pub current_chunk_start: Option<chrono::DateTime<chrono::Utc>>,
+    pub compressed_left: Option<i32>,
+    pub uncompressed_left: Option<i32>,
+    pub avg_s_compressed: Option<f64>,
+    pub avg_s_uncompressed: Option<f64>,
+    pub last_error: Option<String>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub async fn migration_progress(client: &Client) -> Result<Option<MigrationProgress>, String> {
+    let fail = |e: tokio_postgres::Error| format!("progress read failed: {e}");
+    let table = client
+        .query_one(
+            "SELECT to_regclass('public.wiretap_migration_progress') IS NOT NULL",
+            &[],
+        )
+        .await
+        .map_err(fail)?;
+    if !table.get::<_, bool>(0) {
+        return Ok(None);
+    }
+    let row = client
+        .query_opt(
+            "SELECT phase, chunks_done, chunks_total, rows_done, current_chunk_start, \
+                    compressed_left, uncompressed_left, avg_s_compressed, \
+                    avg_s_uncompressed, last_error, updated_at \
+               FROM public.wiretap_migration_progress WHERE target_version = $1",
+            &[&SCHEMA_VERSION],
+        )
+        .await
+        .map_err(fail)?;
+    Ok(row.map(|r| MigrationProgress {
+        phase: r.get(0),
+        chunks_done: r.get(1),
+        chunks_total: r.get(2),
+        rows_done: r.get(3),
+        current_chunk_start: r.get(4),
+        compressed_left: r.get(5),
+        uncompressed_left: r.get(6),
+        avg_s_compressed: r.get(7),
+        avg_s_uncompressed: r.get(8),
+        last_error: r.get(9),
+        updated_at: r.get(10),
+    }))
+}
+
+/// The gateway's own steps in a migration's progress row, when the migration
+/// keeps one. Best effort: progress is for the operator, not the run.
+pub async fn report_progress(client: &Client, phase: &str, error: Option<&str>) {
+    let reported = client
+        .execute(
+            "SELECT public.wiretap_migration_progress($1, $2, error => $3) \
+              WHERE to_regclass('public.wiretap_migration_progress') IS NOT NULL",
+            &[&SCHEMA_VERSION, &phase, &error],
+        )
+        .await;
+    if let Err(e) = reported {
+        tracing::debug!("could not report migration progress: {e}");
+    }
 }
 
 /// Split an SQL script into statements on top-level semicolons, respecting
@@ -653,6 +750,25 @@ mod tests {
             init < post,
             "the refresh would run before the aggregate exists"
         );
+    }
+
+    /// The gateway applies the progress helper itself; psql has only the
+    /// migration's `\ir` to find it by.
+    #[test]
+    fn a_migration_that_reports_progress_brings_the_helper_under_psql() {
+        for m in MIGRATIONS {
+            let Some(call) = m.sql.find("wiretap_migration_progress(") else {
+                continue;
+            };
+            let ir = m.sql.find("\\ir ../migration_progress.sql");
+            assert!(
+                ir.is_some_and(|ir| ir < call),
+                "migration {} reports before psql has the helper",
+                m.version
+            );
+        }
+        assert!(MIGRATION_PROGRESS
+            .contains("CREATE OR REPLACE FUNCTION public.wiretap_migration_progress("));
     }
 
     /// The SQL spells `CanFlags`' bits as literals; these are the ones it uses.

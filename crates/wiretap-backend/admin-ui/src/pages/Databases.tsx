@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { api, formatBytes } from "../api";
-import { RollupBadge, SchemaBadge, rollupNeedsWork } from "../SchemaBadge";
+import {
+  MigrationProgressView,
+  RollupBadge,
+  SchemaBadge,
+  canMigrate,
+  rollupNeedsWork,
+} from "../SchemaBadge";
 import { useDatabases } from "../useDatabases";
 
 export default function Databases() {
@@ -26,6 +32,24 @@ export default function Databases() {
     setError("");
     try {
       await api(`/v1/databases/${dbName}/rollup/refresh`, { method: "POST" });
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const migrate = async (dbName: string) => {
+    if (
+      !confirm(
+        `Migrate "${dbName}" to schema v${target} now? Until it finishes it refuses ` +
+          `reads, which can take hours on a large archive. Ingest is buffered and ` +
+          `stored once it is done.`,
+      )
+    )
+      return;
+    setError("");
+    try {
+      await api(`/v1/databases/${dbName}/migrate`, { method: "POST" });
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -78,11 +102,17 @@ export default function Databases() {
         </thead>
         <tbody>
           {databases.map((d) => (
-            <tr key={d.name}>
+            <tr key={d.name} id={`db-${d.name}`}>
               <td className="mono">{d.name}</td>
               <td>{formatBytes(d.size_bytes)}</td>
               <td>
-                <SchemaBadge db={d} target={target} />
+                <SchemaBadge db={d} target={target} />{" "}
+                {canMigrate(d) && (
+                  <button className="btn" onClick={() => migrate(d.name)}>
+                    Migrate now
+                  </button>
+                )}
+                <MigrationProgressView db={d} />
               </td>
               <td>
                 <RollupBadge db={d} />{" "}
@@ -103,10 +133,10 @@ export default function Databases() {
       </table>
       <p className="muted" style={{ marginBottom: 0 }}>
         Ingest devices can also auto-create a database by naming one in their
-        HELLO message (when auto-create is enabled). A database is migrated to the
-        current schema on start and refuses reads and writes while that runs; a
-        capture server refused this way treats it as an outage and caches to disk
-        until it can drain. Rebuilding a rollup does not block anything — it takes
+        HELLO message (when auto-create is enabled). A database behind the current
+        schema waits for Migrate now, or is migrated on start with
+        WIRETAP_AUTO_MIGRATE=true. It refuses reads until the migration is done; ingest
+        is buffered meanwhile and stored when it finishes. Rebuilding a rollup does not block anything — it takes
         minutes on a large archive, and until it finishes the buckets it has not
         reached are recomputed on every query. A rollup a few hours behind is the
         maintenance policy working normally. "incomplete" is not: the stored

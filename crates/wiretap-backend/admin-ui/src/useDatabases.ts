@@ -12,6 +12,7 @@ import { isBusy } from "./SchemaBadge";
 export function useDatabases() {
   const [databases, setDatabases] = useState<DatabaseEntry[]>([]);
   const [target, setTarget] = useState(0);
+  const [autoMigrate, setAutoMigrate] = useState(false);
   const [error, setError] = useState("");
 
   const refresh = useCallback(() => {
@@ -19,6 +20,7 @@ export function useDatabases() {
       .then((r) => {
         setDatabases(r.databases);
         setTarget(r.schema_version);
+        setAutoMigrate(r.auto_migrate);
       })
       .catch((e) => setError(String(e.message ?? e)));
   }, []);
@@ -28,7 +30,7 @@ export function useDatabases() {
   // Depends on the boolean, not the array: the response replaces the array
   // identity every time, which would tear down and recreate the interval on
   // each poll and stretch the period to "2s after the response".
-  const busy = databases.some(isBusy);
+  const busy = databases.some((d) => isBusy(d, autoMigrate));
   useEffect(() => {
     if (!busy) return;
     const t = setInterval(refresh, 2000);

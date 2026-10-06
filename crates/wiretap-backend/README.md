@@ -156,6 +156,39 @@ transaction. A `DELETE` that passes its guard with nothing to clear is 404.
 A change closes the daemon's sessions whose `HELLO` named the interface, so
 they reconnect to it.
 
+### Migration API
+
+What the admin UI uses, and the stable hook for other clients.
+
+`POST /v1/databases/{db}/migrate` (admin) starts migrating one database to the
+gateway's schema and answers at once: 200 `{"status":"started"}`; 409 if it is
+current, already migrating, or holds no capture schema; 404 if it does not
+exist. A database migrated by hand is also started this way, and the run then
+only drains its buffer.
+
+`GET /v1/databases` reports each database's state, with these fields beside
+the rest:
+
+| Field | Meaning |
+|-------|---------|
+| `schema_state` | `current`, `pending` (behind, waiting), `migrating`, `failed`, or `unknown` |
+| `schema_version` | the version it is at; null while migrating |
+| `busy_secs` | seconds the migration has run; null otherwise |
+| `schema_error` | why the last migration failed; null otherwise |
+| `buffered_rows` | frames this gateway has buffered for it since its last drain; null if none |
+| `migration` | the migration's progress row, for a database not current; null if it keeps none |
+| `migration.phase` | `backfill`, `check`, `rollup`, `drain`, `done`, or `failed` |
+| `migration.chunks_done`, `chunks_total` | chunks converted, of the hypertable's total |
+| `migration.rows_done` | rows converted in this run |
+| `migration.current_chunk_start` | the chunk being worked on, or the one a failed run stopped at |
+| `migration.compressed_left`, `uncompressed_left` | chunks still to visit, of each kind |
+| `migration.avg_s_compressed`, `avg_s_uncompressed` | average seconds per chunk of each kind so far |
+| `migration.last_error` | the error a failed run reported |
+| `migration.updated_at` | when the row last changed |
+
+The list also carries `schema_version`, the version every database is headed
+for, and `auto_migrate`.
+
 ## Configuration (environment)
 
 | Var | Default | Purpose |
@@ -164,7 +197,7 @@ they reconnect to it.
 | `WIRETAP_ADMIN_KEY` | — | Break-glass admin key |
 | `WIRETAP_DEFAULT_DB` | `wiretap` | Default capture database |
 | `WIRETAP_AUTO_CREATE` | `true` | Allow ingest/import to auto-create databases |
-| `WIRETAP_AUTO_MIGRATE` | `true` | Migrate capture databases to the current schema on start |
+| `WIRETAP_AUTO_MIGRATE` | `false` | Off, a capture database behind the schema waits for **Migrate now**, refusing reads and buffering ingest; on, every one is migrated on start. A new database is initialised either way |
 | `RUST_LOG` | `wiretap_backend=info` | Log filter |
 
 Full list (listen addresses, ingest keepalive/batch caps, log buffer size) is in
@@ -197,8 +230,8 @@ won't work — the new hypertable drops the legacy `row_id`/`id_hex`/`data_hex`
 columns, so the column sets don't match.)
 
 **If the source archive predates 2026-09-10**, the frame table there is called
-`can_frame` and has no `protocol` column. **The gateway migrates it for you** the
-first time it sees the database — nothing to run. It is fast and rewrites
+`can_frame` and has no `protocol` column. **The gateway migrates it for you**
+when you press **Migrate now** — nothing to run by hand. It is fast and rewrites
 nothing: 5.3 s for 87.8 M rows on a fully compressed hypertable, with every chunk
 still compressed afterwards.
 
@@ -210,9 +243,11 @@ Two things to know when it does:
   back empty, and its maintenance policy would then materialise only a recent
   window and advance the watermark past the gap, leaving `inventory` silently
   under-reporting the archive's history.
-- **A database refuses reads and writes while it migrates.** A capture server
-  forwarding into it treats that as an outage and caches to disk, so no frames
-  are lost, but nothing lands until the migration finishes.
+- **A database refuses reads while it migrates, and buffers its ingest.** A
+  batch for a database behind or migrating is acknowledged and stored in
+  `capture_frame_pending`, in the shape the gateway writes; it is moved into
+  `capture_frame` and the rollup refreshed over it before the database serves
+  again. A buffer a crash left behind is drained on the next start.
 - **An archive whose rollup does not reach back to its first frame is repaired
   on start**, whatever put it that way — a restored backup, an older build, or a
   maintenance run that materialised a recent window over an empty aggregate. That
@@ -268,13 +303,26 @@ decompressing and recompressing each compressed one, so a run interrupted
 anywhere resumes where it stopped. Then it swaps the CHECK (a scan) and rebuilds
 the rollup without remote frames. Measured on 24 M rows: about 11 s per
 2 M-row compressed chunk and 6 s per uncompressed one, 8 s for the CHECK and
-13 s for the rollup. The database refuses ingest for all of it, so the capture
-servers' disk caches must hold that long. Updated uncompressed chunks keep
-their old row versions until autovacuum reclaims them, about half again their
-size. Time it on a copy of the archive first.
+13 s for the rollup; on a 645 M-row archive, 5 h 20 m. The database refuses
+reads for all of it, and the gateway buffers its ingest. Budget transient space
+of about 1.7 uncompressed chunks: a 3.76 GB chunk took 6.25 GB at its peak,
+decompressed copy included. Updated uncompressed chunks keep their old row
+versions until autovacuum reclaims them, about 2 GB on such a chunk. Time it on
+a copy of the archive first.
 
-To do it by hand instead — worth it if you want to snapshot 30 GB first — start
-the gateway with `WIRETAP_AUTO_MIGRATE=false` and run the migration for the
+**A gateway does not migrate on start.** After an upgrade, each database
+behind waits, refusing reads and buffering ingest, and the admin UI names it in
+a banner. Migrate each one when you choose, from the Databases page (**Migrate
+now**) or with `POST /v1/databases/{db}/migrate` (see
+[Migration API](#migration-api)). It runs in the background, the other
+databases serve throughout, and the page shows its phase, chunks done of the
+total, rows converted, the chunk it is on, the time so far and an estimate of
+what is left. A run that fails shows its error and the chunk it stopped at;
+**Migrate now** resumes it. `WIRETAP_AUTO_MIGRATE=true` migrates every
+database on start instead, as earlier gateways did.
+
+To do it by hand instead — worth it if you want to snapshot 30 GB first — keep
+`WIRETAP_AUTO_MIGRATE=false` and run the migration for the
 version the archive is *at* against the *source* archive, with `-f` and from
 its own directory; each migration `\ir`s the next, so one command reaches the
 current version from wherever it starts:
@@ -291,7 +339,30 @@ psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0004_capture_frame
 files end in `\ir` lines that psql resolves relative to the script it is
 reading. Fed on stdin there is no such path, and inside the container the file
 is not there at all. Each sets its own `ON_ERROR_STOP`, so a non-zero exit means
-it did not finish.
+it did not finish. The gateway notices the database is current on its next
+request, drains what it buffered meanwhile, and serves it, without a restart.
+
+### Writing a long migration
+
+A migration gets buffered ingest, progress on the Databases page, resume and
+"Migrate now" from the runner, without code of its own, if it:
+
+- **works in chunks, each committed**: a procedure that `COMMIT`s per chunk, as
+  0004's backfill does, never one transaction over the archive;
+- **is idempotent and resumable**: a guard such as `flags IS NULL` skips work
+  already done, so a second run, by the gateway or by psql, carries on;
+- **reports through `wiretap_migration_progress`**
+  ([migration_progress.sql](schema/migration_progress.sql)): `\ir
+  ../migration_progress.sql` after the engine check, then call it with the
+  target version, a phase, and chunks done, total, rows done, the current
+  chunk, the compressed and uncompressed chunks left and the average seconds
+  of each, as far as they apply. It is committed with each chunk, so a failed
+  run names the chunk it stopped on;
+- **assumes no reads during the run**: the database refuses them until it is
+  current;
+- **ends at what the new gateway writes**: ingest buffered meanwhile is in the
+  shape the gateway writes (`writer::CREATE_PENDING`), and it is drained into
+  `capture_frame` straight after the migration's last statement.
 
 ```bash
 # 1. Bring the stack up (creates the target database + schema)
@@ -388,9 +459,10 @@ python3 ../../tools/test_ingest_client.py --host localhost --port 9323 \
 ./smoke_test.sh http://localhost:8423 "$WIRETAP_ADMIN_KEY" vehicle_test localhost:9323
 ```
 
-Expect **62 passed, 0 failed**. All four arguments are required, and the script refuses to
+Expect **73 passed, 0 failed**. All four arguments are required, and the script refuses to
 start without them. The third is the seeded database; the fourth is the ingest listener,
 which the Modbus checks write through — it is the only path that carries a Modbus row. With
 `PGHOST` and `PGPASSWORD` set (publish the port first, as the compose file's comment
-shows), four more reach PostgreSQL with `psql`, the last clearing the catalogue checks'
-rows: 66.
+shows), nine more reach PostgreSQL with `psql`, among them a database stamped a version
+behind and migrated through `POST /v1/databases/{db}/migrate`, the last clearing the
+catalogue checks' rows: 82.

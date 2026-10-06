@@ -121,6 +121,7 @@ services:
       WIRETAP_PG_HOST: timescaledb
       WIRETAP_DEFAULT_DB: wiretap
       WIRETAP_AUTO_CREATE: "true"
+      WIRETAP_AUTO_MIGRATE: "false"
     ports:
       - "8423:8423"
       - "9323:9323"

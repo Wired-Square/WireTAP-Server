@@ -38,12 +38,28 @@ All notable changes to this project are documented here. Entries go under
 - **CAN remote frames are archived**, with the length code they request as
   `dlc` and no data, where the daemon used to drop them. A GVRET client and the
   Test Pattern responder still never see one, and `--echo-console` tags it `R`.
+- **Migrate a database when you choose.** The Databases page's **Migrate
+  now**, or `POST /v1/databases/{db}/migrate`, migrates one database in the
+  background while the others serve, and a banner names every database
+  waiting. The page
+  shows the phase, chunks done of the total, rows converted, the chunk it is
+  on, the time so far and an estimate of what is left; a failed run shows its
+  error and the chunk it stopped at, and resumes from there. A database
+  migrated by hand is served on its next request, without a restart.
+- **Ingest is buffered while a database migrates.** A batch for a database
+  behind or migrating is acknowledged into `capture_frame_pending` and moved
+  into `capture_frame` before the database serves again, after a crash too.
+  Only reads are refused meanwhile.
 - **The archive keeps a CAN FD frame's BRS and ESI.** `/frames` serves
   `is_rtr`, `is_brs` and `is_esi` beside `is_fd`. The analytical queries,
   `payloads`, `inventory` and the hourly rollup leave remote frames out.
 
 ### Changed
 
+- **A gateway no longer migrates archives on start; each database behind waits
+  for Migrate now.** It refuses reads and buffers ingest until then.
+  `WIRETAP_AUTO_MIGRATE` now defaults to `false`; set it to `true` for the old
+  behaviour. A new database is still created at the current schema.
 - **A capture import's body is versioned, and keeps RTR, BRS and ESI.** It
   starts with a `WTIM` header and version 2, and its records carry the CAN
   flags, stored as ingest stores them. An older desktop's body is refused
@@ -51,10 +67,10 @@ All notable changes to this project are documented here. Entries go under
   version 2**: an older gateway misreads it silently.
 - **Schema v4: a frame's flags are one `flags` column.** `extended`, `is_fd`
   and `dir` are packed into it and dropped; `can_frame` and its byte views
-  still serve them by name. The gateway migrates each archive on start,
-  rewriting every chunk and rebuilding the rollup, and refuses ingest while it
-  does: time it on a copy first. A plain INSERT through `can_frame` no longer
-  works; `ingest_can_frame` does.
+  still serve them by name. Migrating an archive rewrites every chunk and
+  rebuilds the rollup, and the archive refuses reads while it runs: time it on
+  a copy first. A plain INSERT through `can_frame` no longer works;
+  `ingest_can_frame` does.
 - **Built on `wslib-wiretap-rs` v0.1.2**, the WireTAP libraries' new home
   (`v0.1.0`, restarted from `wiretap-lib-rs` v0.25.1, then the ingest
   protocol's server close, waiting for a missing device, CAN's RTR, BRS

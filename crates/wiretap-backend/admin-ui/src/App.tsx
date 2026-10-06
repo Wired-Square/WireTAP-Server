@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { api, clearKey, getKey, setKey } from "./api";
+import { canMigrate } from "./SchemaBadge";
+import { useDatabases } from "./useDatabases";
 import Activity from "./pages/Activity";
 import Daemons from "./pages/Daemons";
 import Databases from "./pages/Databases";
@@ -43,6 +45,15 @@ export default function App() {
           Sign out
         </button>
       </div>
+      <MigrationBanner
+        key={tab}
+        onOpen={(name) => {
+          setTab("Databases");
+          requestAnimationFrame(() =>
+            document.getElementById(`db-${name}`)?.scrollIntoView({ block: "center" }),
+          );
+        }}
+      />
       {tab === "Keys" && <Keys />}
       {tab === "Databases" && <Databases />}
       {tab === "Ingest" && <Ingest />}
@@ -51,6 +62,25 @@ export default function App() {
       {tab === "Logging" && <Logging />}
       {tab === "Health" && <Health />}
     </>
+  );
+}
+
+/** Names every database waiting for an operator's Migrate now, on every tab. */
+function MigrationBanner({ onOpen }: { onOpen: (name: string) => void }) {
+  const { databases } = useDatabases();
+  const waiting = databases.filter(canMigrate);
+  if (waiting.length === 0) return null;
+  return (
+    <div className="card banner">
+      {waiting.length === 1 ? "A database is" : `${waiting.length} databases are`} waiting
+      for migration:{" "}
+      {waiting.map((d) => (
+        <button key={d.name} className="btn mono" onClick={() => onOpen(d.name)}>
+          {d.name}
+        </button>
+      ))}{" "}
+      They refuse reads, and buffer ingest, until migrated with Migrate now.
+    </div>
   );
 }
 

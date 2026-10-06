@@ -10,8 +10,8 @@
 -- `false` the old NOT NULL demanded, and rewriting them is not worth what it
 -- would cost. The read API says `false` for either.
 --
--- **The gateway applies this itself**, on start, to every capture database it
--- finds behind. Also runnable by hand:
+-- **The gateway applies this itself** to a capture database behind, at Migrate
+-- now or, with WIRETAP_AUTO_MIGRATE=true, on start. Also runnable by hand:
 --
 --     psql -U postgres -d <db> -f 0003_capture_frame_protocol_columns.sql
 --

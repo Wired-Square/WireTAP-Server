@@ -1,4 +1,10 @@
-import { DatabaseEntry, ROLLUP_FRESH_SECS, formatElapsed, formatSpan } from "./api";
+import {
+  DatabaseEntry,
+  ROLLUP_FRESH_SECS,
+  formatElapsed,
+  formatSpan,
+  migrationEta,
+} from "./api";
 
 /**
  * How one database's schema state is drawn. Shared by Databases and Health so
@@ -20,14 +26,14 @@ export function SchemaBadge({ db, target }: { db: DatabaseEntry; target: number 
       return (
         <span
           className="badge behind"
-          title="Behind the current schema, so refusing reads and writes until the sweep reaches it"
+          title="Behind the current schema: refusing reads, and buffering ingest, until it is migrated"
         >
           v{version} → v{target}
         </span>
       );
     case "migrating":
       return (
-        <span className="badge migrating" title="Reads and writes are refused until this finishes">
+        <span className="badge migrating" title="Reads are refused, and ingest buffered, until this finishes">
           Migrating{busy !== null && ` ${formatElapsed(busy)}`}
         </span>
       );
@@ -42,17 +48,73 @@ export function SchemaBadge({ db, target }: { db: DatabaseEntry; target: number 
   }
 }
 
+/** What each phase a migration reports is doing, in the operator's words. */
+const PHASES: Record<string, string> = {
+  started: "starting",
+  backfill: "converting chunks",
+  check: "validating",
+  rollup: "rebuilding the rollup",
+  drain: "draining buffered ingest",
+  done: "finishing",
+  failed: "stopped",
+};
+
+/** Whether the Databases page offers to migrate this one now, or again. */
+export function canMigrate(db: DatabaseEntry): boolean {
+  return db.schema_state === "pending" || db.schema_state === "failed";
+}
+
 /**
- * True while this database is not settled — migrating, queued behind the sweep,
- * or rebuilding its rollup. Derived as "not settled" rather than listing the
- * busy states, so a page opened while the sweep still has everything `pending`
- * polls instead of sitting still.
+ * How far a migration has got: chunks, rows, the chunk it is on, the time it
+ * has taken and is likely to take, and the ingest buffered meanwhile. For a run
+ * that failed, the error and the chunk it stopped at.
  */
-export function isBusy(d: DatabaseEntry): boolean {
+export function MigrationProgressView({ db }: { db: DatabaseEntry }) {
+  const m = db.migration;
+  const running = db.schema_state === "migrating";
+  const buffered =
+    db.buffered_rows !== null && `${db.buffered_rows.toLocaleString()} frames buffered`;
+  if (!m || (!running && m.phase === "done")) {
+    return buffered ? <div className="migration muted">{buffered}</div> : null;
+  }
+  const error = db.schema_error ?? m.last_error;
+  const phase = PHASES[m.phase] ?? m.phase;
+  const day = m.current_chunk_start && new Date(m.current_chunk_start).toLocaleDateString();
+  const total = m.chunks_total ?? 0;
+  const done = m.chunks_done ?? 0;
+  const eta = running && m.phase === "backfill" ? migrationEta(m) : null;
+  const facts = [
+    total > 0 && `${done} of ${total} chunks`,
+    m.rows_done !== null && `${m.rows_done.toLocaleString()} rows converted`,
+    day && (error ? `stopped at ${day}` : `on ${day}`),
+    running && db.busy_secs !== null && `${formatSpan(db.busy_secs)} so far`,
+    eta !== null && `about ${formatSpan(eta)} left`,
+    buffered,
+  ].filter(Boolean);
   return (
-    d.rollup_busy_secs !== null ||
-    (d.schema_state !== "current" && d.schema_state !== "unknown")
+    <div className="migration">
+      <div className="muted">
+        {running ? phase : error ? "Stopped" : `Last reported: ${phase}`}
+      </div>
+      {total > 0 && (
+        <div className="progress" title={`${done} of ${total} chunks`}>
+          <div style={{ width: `${(100 * done) / total}%` }} />
+        </div>
+      )}
+      <div className="muted">{facts.join(" · ")}</div>
+      {!running && error && <div className="error">{error}</div>}
+    </div>
   );
+}
+
+/**
+ * True while this database is changing by itself — migrating, queued behind
+ * the startup sweep, or rebuilding its rollup. With automatic migration off a
+ * `pending` database waits for an operator, so it is not polled for.
+ */
+export function isBusy(d: DatabaseEntry, autoMigrate: boolean): boolean {
+  if (d.rollup_busy_secs !== null || d.schema_state === "migrating") return true;
+  return autoMigrate && (d.schema_state === "pending" || d.schema_state === "failed");
 }
 
 /**

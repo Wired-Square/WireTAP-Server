@@ -11,19 +11,19 @@ use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
 
 use crate::config::Config;
+use crate::ingest::writer::{self, CopyError, FrameRow, Written};
 use crate::schema;
 
 /// Where a capture database stands relative to [`schema::SCHEMA_VERSION`].
 ///
-/// Only `Current` serves *capture data*. The gate is `Databases::pool`, so the
-/// key store — which lives in the default database but goes through
+/// Only `Current` serves reads of *capture data*. The gate is `Databases::pool`,
+/// so the key store — which lives in the default database but goes through
 /// `connect_raw` — is deliberately outside it; it must work for the gateway to
 /// authenticate anything at all.
 ///
-/// Refusing the rest is what makes a migration safe under a live capture. A
-/// capture server refused at HELLO reads it as a sink failure, and `Batcher::fail`
-/// treats any sink failure as an outage: cache to disk, reconnect, drain. That
-/// is the same path a gateway restart takes, and it is drilled.
+/// Ingest for a database `Pending` or `Migrating` is not refused but buffered
+/// into `capture_frame_pending`, and drained into `capture_frame` before the
+/// database is next `Current`: see [`Databases::write_rows`].
 #[derive(Clone, Debug)]
 pub enum DbSchemaState {
     Current {
@@ -55,6 +55,12 @@ impl DbSchemaState {
     fn current() -> Self {
         Self::Current {
             version: schema::SCHEMA_VERSION,
+        }
+    }
+
+    fn migrating() -> Self {
+        Self::Migrating {
+            since: Instant::now(),
         }
     }
 
@@ -116,6 +122,43 @@ impl From<DbError> for String {
     }
 }
 
+/// Why `start_migration` did not start one.
+#[derive(Debug)]
+pub enum MigrateRefusal {
+    NotFound(String),
+    /// Already current, already migrating, or not a capture database.
+    Conflict(String),
+    Unavailable(String),
+}
+
+impl From<String> for MigrateRefusal {
+    fn from(message: String) -> Self {
+        Self::Unavailable(message)
+    }
+}
+
+/// Why a batch was not stored.
+#[derive(Debug)]
+pub enum WriteError {
+    Db(DbError),
+    Copy(CopyError),
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Db(e) => e.fmt(f),
+            Self::Copy(e) => e.fmt(f),
+        }
+    }
+}
+
+/// Where a batch for one database goes.
+enum Route {
+    Live(Pool),
+    Buffered(Pool),
+}
+
 impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -137,6 +180,10 @@ pub struct Databases {
     /// version a database is at, and the reads it would otherwise block are
     /// exactly the ones it exists to make fast.
     rollup_rebuild: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Pools for buffering ingest, kept while a database is not `Current`.
+    buffer_pools: Arc<Mutex<HashMap<String, Pool>>>,
+    /// Rows this process has buffered per database since its last drain.
+    buffered: Arc<Mutex<HashMap<String, u64>>>,
     connect_timeout: Duration,
 }
 
@@ -148,6 +195,8 @@ impl Databases {
             create_lock: Arc::new(Mutex::new(())),
             schema_state: Arc::new(Mutex::new(HashMap::new())),
             rollup_rebuild: Arc::new(Mutex::new(HashMap::new())),
+            buffer_pools: Arc::new(Mutex::new(HashMap::new())),
+            buffered: Arc::new(Mutex::new(HashMap::new())),
             connect_timeout: CONNECT_TIMEOUT,
         }
     }
@@ -167,12 +216,9 @@ impl Databases {
     }
 
     async fn set_state(&self, name: &str, state: DbSchemaState) {
-        // Dropping the pool is what makes the gate bite on a *live* capture.
-        // `pool()` is entered once per session, not per batch, so an ingest
-        // client that connected before a migration would otherwise keep COPYing
-        // through it. Dropping the pool forces the next batch back through
-        // `require_current`, and discards prepared statements whose plans the
-        // rename has just invalidated.
+        // Dropping the pool is what makes the gate bite on a *live* capture: the
+        // next batch is routed afresh by `write_rows`, and prepared statements
+        // whose plans a migration has just invalidated are discarded.
         //
         // Under the pools lock, which `pool_if_current` holds from its check to
         // its insert, so no pool is cached for a state being left.
@@ -242,13 +288,19 @@ impl Databases {
         let _guard = self.create_lock.lock().await;
         let since = Instant::now();
         if migrating {
-            self.set_state(name, DbSchemaState::Migrating { since })
-                .await;
+            self.set_state(name, DbSchemaState::migrating()).await;
         }
 
         let result = async {
-            let client = self.connect_raw(name).await?;
+            let mut client = self.connect_raw(name).await?;
             schema::migrate(&client, at).await?;
+            if migrating {
+                schema::report_progress(&client, "drain", None).await;
+            }
+            // Into the hypertable before anything reads it, and in every run:
+            // a gateway that died between a migration and its drain left the
+            // buffer behind.
+            let drained = writer::drain_pending(&mut client).await?;
             // A rollup the migration left uncovered MUST be backfilled before
             // the maintenance policy runs, and before this database serves a
             // read — this is not a performance nicety, it is correctness.
@@ -275,13 +327,18 @@ impl Databases {
                     "the migration left the rollup uncovered; rebuilding it"
                 );
                 schema::refresh_rollup(&client).await?;
+            } else if let Some(span) = &drained {
+                schema::refresh_rollup_span(&client, span).await?;
             }
-            Ok::<(), String>(())
+            if migrating {
+                schema::report_progress(&client, "done", None).await;
+            }
+            Ok::<_, String>(drained)
         }
         .await;
 
         match &result {
-            Ok(()) => {
+            Ok(drained) => {
                 if migrating && at.is_some() {
                     tracing::warn!(
                         database = name,
@@ -291,15 +348,95 @@ impl Databases {
                         "schema migrated"
                     );
                 }
+                self.note_drained(name, drained.as_ref()).await;
                 self.set_state(name, DbSchemaState::current()).await;
             }
             Err(e) => {
                 tracing::error!(database = name, "schema migration failed: {e}");
+                if migrating {
+                    if let Ok(client) = self.connect_raw(name).await {
+                        schema::report_progress(&client, "failed", Some(e)).await;
+                    }
+                }
                 self.set_state(name, DbSchemaState::failed(at.unwrap_or(0), e.clone()))
                     .await;
             }
         }
-        result
+        result.map(|_| ())
+    }
+
+    async fn note_drained(&self, name: &str, drained: Option<&writer::Drained>) {
+        if let Some(drained) = drained {
+            tracing::info!(
+                database = name,
+                rows = drained.rows,
+                "drained the ingest buffered while it was behind"
+            );
+        }
+        self.buffered.lock().await.remove(name);
+    }
+
+    /// Rows buffered per database since its last drain.
+    pub async fn buffered_rows(&self) -> HashMap<String, u64> {
+        self.buffered.lock().await.clone()
+    }
+
+    /// Store one batch. A `Current` database takes it into `capture_frame`; one
+    /// behind or migrating, into its buffer, which the gateway drains once the
+    /// database is current. Reads stay refused meanwhile.
+    pub async fn write_rows(&self, name: &str, rows: &[FrameRow]) -> Result<(), WriteError> {
+        match self.route(name).await.map_err(WriteError::Db)? {
+            Route::Live(pool) => writer::copy_rows(&pool, rows)
+                .await
+                .map_err(WriteError::Copy),
+            Route::Buffered(pool) => match writer::buffer_rows(&pool, rows)
+                .await
+                .map_err(WriteError::Copy)?
+            {
+                Written::Buffered => {
+                    *self.buffered.lock().await.entry(name.into()).or_default() +=
+                        rows.len() as u64;
+                    Ok(())
+                }
+                // Migrated by hand meanwhile: drain it and serve it.
+                Written::Live => {
+                    let this = self.clone();
+                    let owned = name.to_string();
+                    tokio::spawn(async move { this.recheck_if_behind(&owned).await });
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    async fn owes_migration(&self, name: &str, failed_too: bool) -> bool {
+        match self.schema_state.lock().await.get(name) {
+            Some(DbSchemaState::Pending { .. } | DbSchemaState::Migrating { .. }) => true,
+            Some(DbSchemaState::Failed { .. }) => failed_too,
+            _ => false,
+        }
+    }
+
+    /// A failed database is buffered too, but with automatic migration on it
+    /// goes through `pool` first, which is what retries it.
+    async fn route(&self, name: &str) -> Result<Route, DbError> {
+        if !self.owes_migration(name, !self.config.auto_migrate).await {
+            match self.pool(name).await {
+                Ok(pool) => return Ok(Route::Live(pool)),
+                Err(e) if !self.owes_migration(name, true).await => return Err(e),
+                Err(_) => {}
+            }
+        }
+        let mut pools = self.buffer_pools.lock().await;
+        let pool = match pools.get(name) {
+            Some(pool) => pool.clone(),
+            None => {
+                let pool = self.build_pool(name)?;
+                pools.insert(name.to_string(), pool.clone());
+                pool
+            }
+        };
+        Ok(Route::Buffered(pool))
     }
 
     /// Sweep every capture database. Spawned after the listeners bind, so a slow
@@ -328,8 +465,13 @@ impl Databases {
                 // hypertables in them would be vandalism, not migration.
                 Ok(None) => continue,
                 Ok(Some(v)) => {
-                    if v == schema::SCHEMA_VERSION {
+                    // Current with a buffer a crash left: not served until the
+                    // loop below has drained it.
+                    if v == schema::SCHEMA_VERSION && !self.buffer_left(name).await {
                         self.set_state(name, DbSchemaState::Current { version: v })
+                            .await;
+                    } else if v == schema::SCHEMA_VERSION {
+                        self.set_state(name, DbSchemaState::Pending { version: v })
                             .await;
                     } else {
                         self.set_state(name, DbSchemaState::Pending { version: v })
@@ -346,16 +488,16 @@ impl Databases {
         if !behind.is_empty() && !self.config.auto_migrate {
             tracing::warn!(
                 databases = Self::names_of(&behind),
-                "behind schema v{} and WIRETAP_AUTO_MIGRATE is off; they will refuse \
-                 reads and writes until schema/migrations/*.sql is applied by hand",
+                "behind schema v{} and WIRETAP_AUTO_MIGRATE is off; they refuse reads, \
+                 and buffer ingest, until migrated from the admin UI's Databases page, \
+                 POST /v1/databases/{{db}}/migrate, or by hand",
                 schema::SCHEMA_VERSION
             );
-            return;
-        }
-        if !behind.is_empty() {
+            ours.retain(|(_, v)| *v == schema::SCHEMA_VERSION);
+        } else if !behind.is_empty() {
             tracing::warn!(
                 databases = Self::names_of(&behind),
-                "migrating to schema v{}; these refuse reads and writes until done",
+                "migrating to schema v{}; these refuse reads and buffer ingest until done",
                 schema::SCHEMA_VERSION
             );
         }
@@ -385,6 +527,87 @@ impl Databases {
         }
     }
 
+    /// Migrate one database in the background, through the path the sweep
+    /// takes, whether or not automatic migration is on.
+    pub async fn start_migration(&self, name: &str) -> Result<(), MigrateRefusal> {
+        if !valid_database_name(name) || !self.database_exists(name).await? {
+            return Err(MigrateRefusal::NotFound(format!(
+                "database '{name}' does not exist"
+            )));
+        }
+        let refuse_settled = |states: &HashMap<String, DbSchemaState>| match states.get(name) {
+            Some(state @ (DbSchemaState::Current { .. } | DbSchemaState::Migrating { .. })) => Err(
+                MigrateRefusal::Conflict(format!("database '{name}' is {}", state.label())),
+            ),
+            _ => Ok(()),
+        };
+        refuse_settled(&*self.schema_state.lock().await)?;
+        // Already current on disk, migrated by hand: the run below is then the
+        // cheap one that drains its buffer and serves it.
+        let at = self.probe_version(name).await?;
+        if at.is_none() {
+            return Err(MigrateRefusal::Conflict(format!(
+                "database '{name}' holds no capture schema"
+            )));
+        }
+        let mut states = self.schema_state.lock().await;
+        refuse_settled(&states)?;
+        states.insert(name.to_string(), DbSchemaState::migrating());
+        drop(states);
+        // Owned by the process, for the reason `require_current` gives.
+        let this = self.clone();
+        let owned = name.to_string();
+        tokio::spawn(async move { this.migrate_from(&owned, at).await });
+        Ok(())
+    }
+
+    /// A database left behind may since have been migrated by hand. Asked
+    /// again on each request while it is, and never migrated from here; found
+    /// current, its buffer is drained before it serves.
+    async fn recheck_if_behind(&self, name: &str) {
+        // A failure is asked again too, once the interval has passed: with
+        // automatic migration on, `require_current` retries it instead.
+        let behind = |state: Option<&DbSchemaState>| match state {
+            Some(DbSchemaState::Pending { .. }) => true,
+            Some(DbSchemaState::Failed { since, .. }) => {
+                !self.config.auto_migrate && since.elapsed() >= FAILED_RETRY_INTERVAL
+            }
+            None => !self.config.auto_migrate,
+            _ => false,
+        };
+        if !behind(self.schema_state.lock().await.get(name)) {
+            return;
+        }
+        let Ok(Some(version)) = self.probe_version(name).await else {
+            return;
+        };
+        let state = if version == schema::SCHEMA_VERSION {
+            match self.drain(name).await {
+                Ok(drained) => self.note_drained(name, drained.as_ref()).await,
+                Err(e) => {
+                    tracing::warn!(database = name, "could not drain buffered ingest: {e}");
+                    return;
+                }
+            }
+            DbSchemaState::Current { version }
+        } else {
+            DbSchemaState::Pending { version }
+        };
+        let mut states = self.schema_state.lock().await;
+        if behind(states.get(name)) {
+            states.insert(name.to_string(), state);
+        }
+    }
+
+    async fn drain(&self, name: &str) -> Result<Option<writer::Drained>, String> {
+        let mut client = self.connect_raw(name).await?;
+        let drained = writer::drain_pending(&mut client).await?;
+        if let Some(span) = &drained {
+            schema::refresh_rollup_span(&client, span).await?;
+        }
+        Ok(drained)
+    }
+
     async fn repair_rollup_if_incomplete(&self, name: &str) {
         let client = match self.connect_raw(name).await {
             Ok(c) => c,
@@ -408,6 +631,13 @@ impl Databases {
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(database = name, "could not check the rollup: {e}"),
+        }
+    }
+
+    async fn buffer_left(&self, name: &str) -> bool {
+        match self.connect_raw(name).await {
+            Ok(client) => writer::has_pending(&client).await.unwrap_or(true),
+            Err(_) => true,
         }
     }
 
@@ -452,6 +682,10 @@ impl Databases {
             Err(e) => tracing::error!(database = name, "rollup refresh failed: {e}"),
         }
         result
+    }
+
+    pub fn auto_migrate(&self) -> bool {
+        self.config.auto_migrate
     }
 
     pub fn default_database(&self) -> &str {
@@ -507,17 +741,20 @@ impl Databases {
         Ok(row.get(0))
     }
 
-    /// Create a capture database (idempotent) and bring it to the current
-    /// schema. Safe on a database that already exists and is behind.
+    /// Create a capture database (idempotent) and give it the current schema.
+    /// One that already exists and is behind is left to wait for its
+    /// migration unless automatic migration is on: initialising is not
+    /// migrating.
     pub async fn create_database(&self, name: &str) -> Result<(), String> {
         if !valid_database_name(name) {
             return Err(format!("invalid database name '{name}'"));
         }
-        {
+        let created = {
             // Scoped: migrate_one takes this same lock, and holding it across
             // that call would deadlock.
             let _guard = self.create_lock.lock().await;
-            if !self.database_exists(name).await? {
+            let exists = self.database_exists(name).await?;
+            if !exists {
                 let client = self.connect_raw("postgres").await?;
                 // CREATE DATABASE is non-transactional; name is validated above.
                 client
@@ -526,8 +763,19 @@ impl Databases {
                     .map_err(|e| format!("CREATE DATABASE {name} failed: {e}"))?;
                 tracing::info!("created database '{name}'");
             }
+            !exists
+        };
+        if created || self.config.auto_migrate {
+            return self.migrate_one(name).await;
         }
-        self.migrate_one(name).await
+        match self.probe_version(name).await? {
+            Some(version) if version != schema::SCHEMA_VERSION => {
+                self.set_state(name, DbSchemaState::Pending { version })
+                    .await;
+                Ok(())
+            }
+            at => self.migrate_from(name, at).await,
+        }
     }
 
     /// Drop a capture database (admin). Refuses the default database (it holds
@@ -542,6 +790,8 @@ impl Databases {
             return Err("cannot delete the default database".into());
         }
         self.pools.lock().await.remove(name);
+        self.buffer_pools.lock().await.remove(name);
+        self.buffered.lock().await.remove(name);
         self.schema_state.lock().await.remove(name);
         self.rollup_rebuild.lock().await.remove(name);
         if !self.database_exists(name).await? {
@@ -575,6 +825,7 @@ impl Databases {
                 "database '{name}' does not exist"
             )));
         }
+        self.recheck_if_behind(name).await;
         self.pool_if_current(name).await
     }
 
@@ -599,13 +850,16 @@ impl Databases {
             {
                 // Claimed under the lock, so concurrent requests see it busy
                 // rather than each starting a retry of their own.
-                states.insert(
-                    name.to_string(),
-                    DbSchemaState::Migrating {
-                        since: Instant::now(),
-                    },
-                );
+                states.insert(name.to_string(), DbSchemaState::migrating());
                 true
+            }
+            Some(DbSchemaState::Pending { version }) => {
+                return Err(format!(
+                    "database '{name}' is at schema v{version} and waiting to be migrated \
+                     to v{}: Migrate now on the admin UI's Databases page, or \
+                     POST /v1/databases/{name}/migrate",
+                    schema::SCHEMA_VERSION
+                ));
             }
             Some(state) => {
                 return Err(format!(
@@ -634,8 +888,8 @@ impl Databases {
     }
 
     /// Resolve a database for ingest/import: existing, or auto-created when
-    /// the config allows. Returns the pool.
-    pub async fn ensure_database(&self, name: &str, allow_create: bool) -> Result<Pool, DbError> {
+    /// the config allows, and able to take a batch now.
+    pub async fn ensure_database(&self, name: &str, allow_create: bool) -> Result<(), DbError> {
         if !valid_database_name(name) {
             return Err(DbError::Refused(format!("invalid database name '{name}'")));
         }
@@ -647,7 +901,7 @@ impl Databases {
             }
             self.create_database(name).await?;
         }
-        self.pool(name).await
+        self.route(name).await.map(|_| ())
     }
 }
 
@@ -683,6 +937,250 @@ pub(crate) mod tests {
         }
     }
 
+    /// Over a throwaway TimescaleDB on `WIRETAP_TEST_PG_PORT`, the superuser's
+    /// password in `WIRETAP_TEST_PG_PASSWORD`. The tests using it are ignored
+    /// by default; run them with `--ignored`.
+    pub(crate) fn live_databases(auto_migrate: bool) -> Databases {
+        let env = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("set {name}"));
+        let mut config = config_at(env("WIRETAP_TEST_PG_PORT").parse().unwrap(), auto_migrate);
+        config.pg_password = Secret::new(env("WIRETAP_TEST_PG_PASSWORD"));
+        Databases::new(Arc::new(config))
+    }
+
+    async fn fresh_database(prefix: &str) -> String {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("{prefix}_{stamp}");
+        // One at a time: on a fresh cluster, two first runs race to create the
+        // role the schema grants to.
+        static CREATING: Mutex<()> = Mutex::const_new(());
+        let _creating = CREATING.lock().await;
+        live_databases(true).create_database(&name).await.unwrap();
+        name
+    }
+
+    pub(crate) async fn run(name: &str, sql: &str) {
+        let client = live_databases(true).connect_raw(name).await.unwrap();
+        client.batch_execute(sql).await.unwrap();
+    }
+
+    /// A capture database stamped one version behind. Each migration re-runs
+    /// over its own work, so the newest one takes it to current with nothing
+    /// of its own to do: what is left is the runner's.
+    pub(crate) async fn behind_database(prefix: &str) -> String {
+        let name = fresh_database(prefix).await;
+        let behind = schema::SCHEMA_VERSION - 1;
+        run(
+            &name,
+            &format!("UPDATE public.schema_version SET version = {behind}"),
+        )
+        .await;
+        name
+    }
+
+    /// A database in v3's shape, with `days` of CAN frames, `per_day` to a
+    /// day's chunk, the older half compressed.
+    pub(crate) async fn seeded_v3_database(prefix: &str, days: u32, per_day: u32) -> String {
+        let name = fresh_database(prefix).await;
+        run(
+            &name,
+            &format!(
+                "DROP MATERIALIZED VIEW public.capture_frame_hourly CASCADE;
+                 DROP VIEW public.can_fd_frame_bytes, public.can_frame_bytes, public.can_frame;
+                 ALTER TABLE public.capture_frame
+                   DROP CONSTRAINT capture_frame_protocol_columns_check,
+                   DROP COLUMN flags,
+                   ADD COLUMN extended boolean NOT NULL DEFAULT false,
+                   ADD COLUMN is_fd boolean NOT NULL DEFAULT false,
+                   ADD COLUMN dir text NOT NULL DEFAULT 'rx';
+                 INSERT INTO public.capture_frame
+                   (ts, protocol, id, dlc, data_bytes, bus, extended, is_fd, dir)
+                 SELECT now() - make_interval(secs => i * 86400.0 / {per_day}), 'can',
+                        256 + i % 4, 8, '\\x0102030405060708', 0, i % 5 = 0, false,
+                        CASE WHEN i % 3 = 0 THEN 'tx' ELSE 'rx' END
+                   FROM generate_series(1, {days} * {per_day}) i;
+                 SELECT compress_chunk(c) FROM show_chunks('public.capture_frame',
+                   older_than => now() - INTERVAL '{} days') c;
+                 UPDATE public.schema_version SET version = 3;",
+                days / 2
+            ),
+        )
+        .await;
+        name
+    }
+
+    /// `n` CAN frames of `id`, a millisecond apart from `from_us`.
+    pub(crate) fn frames(id: u32, from_us: i64, n: i64) -> Vec<FrameRow> {
+        use wiretap_protocol::ingest::RecordKind;
+        (0..n)
+            .map(|i| FrameRow::new(from_us + i * 1000, RecordKind::Can, id, 0, 0, vec![1, 2]))
+            .collect()
+    }
+
+    /// Rows of `id` in `capture_frame`, and how many distinct timestamps.
+    pub(crate) async fn archived(name: &str, id: u32) -> (i64, i64) {
+        let client = live_databases(true).connect_raw(name).await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT count(*), count(DISTINCT ts) FROM public.capture_frame WHERE id = $1",
+                &[&(id as i32)],
+            )
+            .await
+            .unwrap();
+        (row.get(0), row.get(1))
+    }
+
+    pub(crate) async fn buffer_exists(name: &str) -> bool {
+        let client = live_databases(true).connect_raw(name).await.unwrap();
+        writer::has_pending(&client).await.unwrap()
+    }
+
+    pub(crate) async fn until_label(dbs: &Databases, name: &str, label: &str) {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                let now = state_of(dbs, name).await;
+                assert!(
+                    !matches!(now, DbSchemaState::Failed { .. }) || label == "failed",
+                    "{now:?}"
+                );
+                if now.label() == label {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{name} never reached {label}"));
+    }
+
+    pub(crate) async fn version_on_disk(dbs: &Databases, name: &str) -> Option<i32> {
+        dbs.probe_version(name).await.unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_database_migrated_by_hand_is_served_without_a_restart() {
+        let name = behind_database("handrun").await;
+        let dbs = live_databases(false);
+        dbs.migrate_all().await;
+        assert_eq!(state_of(&dbs, &name).await.label(), "pending");
+        assert!(
+            dbs.pool(&name).await.is_err(),
+            "a behind database was served"
+        );
+        assert_eq!(
+            state_of(&dbs, &name).await.label(),
+            "pending",
+            "a request migrated it with WIRETAP_AUTO_MIGRATE off"
+        );
+        dbs.write_rows(&name, &frames(0x7A0, 1_700_000_000_000_000, 5))
+            .await
+            .unwrap();
+
+        let by_hand = dbs.connect_raw(&name).await.unwrap();
+        schema::migrate(&by_hand, Some(schema::SCHEMA_VERSION - 1))
+            .await
+            .unwrap();
+
+        let served = dbs.pool(&name).await;
+        assert!(served.is_ok(), "{}", served.err().unwrap());
+        assert_eq!(state_of(&dbs, &name).await.label(), "current");
+        assert_eq!(archived(&name, 0x7A0).await, (5, 5));
+        assert!(!buffer_exists(&name).await);
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_new_database_is_initialised_but_an_existing_one_behind_waits() {
+        let dbs = live_databases(false);
+        let new = format!("fresh_{}", std::process::id());
+        dbs.create_database(&new).await.unwrap();
+        assert_eq!(state_of(&dbs, &new).await.label(), "current");
+        assert_eq!(
+            version_on_disk(&dbs, &new).await,
+            Some(schema::SCHEMA_VERSION)
+        );
+
+        let behind = behind_database("waits").await;
+        dbs.create_database(&behind).await.unwrap();
+        assert_eq!(state_of(&dbs, &behind).await.label(), "pending");
+        let refused = dbs.pool(&behind).await.err().unwrap().to_string();
+        assert!(refused.contains("waiting to be migrated"), "{refused}");
+        assert_eq!(
+            version_on_disk(&dbs, &behind).await,
+            Some(schema::SCHEMA_VERSION - 1)
+        );
+        for name in [&new, &behind] {
+            dbs.delete_database(name).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn ingest_during_a_migration_lands_once_after_it_and_reads_stay_refused() {
+        let name = seeded_v3_database("during", 12, 24).await;
+        let dbs = live_databases(false);
+        dbs.migrate_all().await;
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = tokio::spawn({
+            let (dbs, name, stop) = (dbs.clone(), name.clone(), stop.clone());
+            async move {
+                let mut sent = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let from = 1_700_000_000_000_000 + sent * 1000;
+                    dbs.write_rows(&name, &frames(0x7B0, from, 10))
+                        .await
+                        .unwrap();
+                    sent += 10;
+                }
+                sent
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        dbs.start_migration(&name).await.unwrap();
+        assert!(
+            dbs.pool(&name).await.is_err(),
+            "a migrating database was served"
+        );
+        until_label(&dbs, &name, "current").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let sent = writer.await.unwrap();
+
+        assert!(sent > 0);
+        assert_eq!(archived(&name, 0x7B0).await, (sent, sent));
+        assert!(!buffer_exists(&name).await);
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_buffer_left_by_a_crash_is_drained_at_startup() {
+        let name = behind_database("crashed").await;
+        let before = live_databases(false);
+        before.migrate_all().await;
+        before
+            .write_rows(&name, &frames(0x7C0, 1_700_000_000_000_000, 7))
+            .await
+            .unwrap();
+        let client = before.connect_raw(&name).await.unwrap();
+        schema::migrate(&client, Some(schema::SCHEMA_VERSION - 1))
+            .await
+            .unwrap();
+        assert!(buffer_exists(&name).await);
+
+        let restarted = live_databases(false);
+        restarted.migrate_all().await;
+        assert_eq!(state_of(&restarted, &name).await.label(), "current");
+        assert_eq!(archived(&name, 0x7C0).await, (7, 7));
+        assert!(!buffer_exists(&name).await);
+        restarted.delete_database(&name).await.unwrap();
+    }
+
     fn failed_ago(ago: Duration) -> DbSchemaState {
         DbSchemaState::Failed {
             version: 1,
@@ -709,7 +1207,7 @@ pub(crate) mod tests {
         (dbs, server)
     }
 
-    async fn state_of(dbs: &Databases, name: &str) -> DbSchemaState {
+    pub(crate) async fn state_of(dbs: &Databases, name: &str) -> DbSchemaState {
         dbs.schema_states().await[name].clone()
     }
 
@@ -758,12 +1256,10 @@ pub(crate) mod tests {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
-        dbs.schema_state.lock().await.insert(
-            "archive".into(),
-            DbSchemaState::Migrating {
-                since: Instant::now(),
-            },
-        );
+        dbs.schema_state
+            .lock()
+            .await
+            .insert("archive".into(), DbSchemaState::migrating());
         drop(pools);
 
         let answer = caller.await.unwrap();

@@ -4,10 +4,9 @@
 -- capture_frame, gains `protocol` and the Modbus addressing columns, and the old
 -- CAN-only names come back as views so nothing outside this repo breaks.
 --
--- **The gateway applies this itself**, on start, to every capture database it
--- finds behind. This file is also runnable by hand for an operator who wants to
--- snapshot a large archive first, and is how you migrate when the gateway is
--- started with WIRETAP_AUTO_MIGRATE=false:
+-- **The gateway applies this itself** to a capture database behind, at Migrate
+-- now or, with WIRETAP_AUTO_MIGRATE=true, on start. This file is also runnable
+-- by hand for an operator who wants to snapshot a large archive first:
 --
 --     psql -U postgres -d <db> -f 0001_capture_frame.sql
 --

@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use deadpool_postgres::Pool;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -25,9 +24,9 @@ use wiretap_protocol::ingest::*;
 
 use crate::catalogs::Catalogs;
 use crate::config::Config;
-use crate::db::{Databases, DbError};
+use crate::db::{Databases, DbError, WriteError};
 use crate::keys::KeyStore;
-use writer::{copy_rows, FrameRow};
+use writer::FrameRow;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct IngestSessionInfo {
@@ -97,7 +96,7 @@ pub struct IngestServer {
 
 /// What a HELLO established, held for the life of the connection.
 struct Session {
-    pool: Pool,
+    database: String,
     id: u64,
     daemon_id: String,
     devices: Vec<Device>,
@@ -323,16 +322,13 @@ impl IngestServer {
             (None, requested) => requested.to_string(),
         };
 
-        let pool = match self.dbs.ensure_database(&database, true).await {
-            Ok(pool) => pool,
-            Err(e) => {
-                tracing::warn!("ingest client {peer}: database '{database}': {e}");
-                return Err(match e {
-                    DbError::Refused(_) => HELLO_BAD_DATABASE,
-                    DbError::Unavailable(_) => HELLO_UNAVAILABLE,
-                });
-            }
-        };
+        if let Err(e) = self.dbs.ensure_database(&database, true).await {
+            tracing::warn!("ingest client {peer}: database '{database}': {e}");
+            return Err(match e {
+                DbError::Refused(_) => HELLO_BAD_DATABASE,
+                DbError::Unavailable(_) => HELLO_UNAVAILABLE,
+            });
+        }
 
         let assignments = if hello.daemon_id.is_empty() {
             Vec::new()
@@ -361,7 +357,7 @@ impl IngestServer {
         );
         Ok((
             Session {
-                pool,
+                database,
                 id: session_id,
                 daemon_id: hello.daemon_id.clone(),
                 devices: hello.devices.clone(),
@@ -387,8 +383,9 @@ impl IngestServer {
         })
     }
 
-    /// Write one batch to Postgres, then ACK. The client only treats frames as
-    /// delivered once they are durably stored; a DB failure yields ACK_OVERLOADED
+    /// Write one batch to Postgres, then ACK; while its database is behind or
+    /// migrating, to its buffer. The client only treats frames as delivered
+    /// once they are durably stored; a DB failure yields ACK_OVERLOADED
     /// so the device caches and retries (no frames are buffered in gateway RAM),
     /// unless no retry could store it (see [`writer::refused_the_rows`]).
     async fn handle_batch(&self, incoming: IncomingBatch, session: &Session) -> u8 {
@@ -396,7 +393,7 @@ impl IngestServer {
         let rows = rows(incoming);
         let count = rows.len() as u64;
 
-        match copy_rows(&session.pool, &rows).await {
+        match self.dbs.write_rows(&session.database, &rows).await {
             Ok(()) => {
                 if let Some(s) = self.sessions.inner.lock().await.get_mut(&session.id) {
                     s.info.frames += count;
@@ -406,7 +403,10 @@ impl IngestServer {
             }
             Err(e) => {
                 tracing::warn!("ingest write failed (seq {seq}): {e}");
-                ack_for_copy_error(e.code.as_ref())
+                match e {
+                    WriteError::Copy(e) => ack_for_copy_error(e.code.as_ref()),
+                    WriteError::Db(_) => ACK_OVERLOADED,
+                }
             }
         }
     }
@@ -760,14 +760,8 @@ mod tests {
         );
 
         let server = server(unreachable_databases(true));
-        let pool = Pool::builder(deadpool_postgres::Manager::new(
-            server.config.pg_dsn("wiretap").parse().unwrap(),
-            tokio_postgres::NoTls,
-        ))
-        .build()
-        .unwrap();
         let session = Session {
-            pool,
+            database: "wiretap".into(),
             id: 0,
             daemon_id: String::new(),
             devices: Vec::new(),

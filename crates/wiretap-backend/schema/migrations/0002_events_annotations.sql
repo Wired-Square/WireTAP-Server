@@ -6,9 +6,8 @@
 -- `source`, `key`, `value_json`, `meta` — that nothing ever read or wrote, so
 -- it is empty on every deployment. Reshaped in place rather than given a twin.
 --
--- **The gateway applies this itself**, on start, to every capture database it
--- finds behind. Also runnable by hand, and how you migrate when the gateway is
--- started with WIRETAP_AUTO_MIGRATE=false:
+-- **The gateway applies this itself** to a capture database behind, at Migrate
+-- now or, with WIRETAP_AUTO_MIGRATE=true, on start. Also runnable by hand:
 --
 --     psql -U postgres -d <db> -f 0002_events_annotations.sql
 --

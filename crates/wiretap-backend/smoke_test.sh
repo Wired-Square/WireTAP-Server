@@ -360,6 +360,29 @@ if [ -n "${PGHOST:-}" ]; then
     [ "$code" = "503" ]; check "a query PostgreSQL fails -> 503" $?
     curl -fsS -X DELETE -H "$A" "$BASE/v1/databases/$PROBE_DB" >/dev/null
 
+    # A database the gateway has never seen, stamped a version behind, then
+    # migrated through the admin API whatever WIRETAP_AUTO_MIGRATE says.
+    MIG_DB="smoke_migrate_$(date +%s)"
+    psql -U postgres -d postgres -qc "CREATE DATABASE $MIG_DB" \
+        && psql -U postgres -d "$MIG_DB" -q -v ON_ERROR_STOP=1 -f "$(dirname "$0")/schema/init_schema.sql" >/dev/null 2>&1 \
+        && psql -U postgres -d "$MIG_DB" -qc "UPDATE public.schema_version SET version = version - 1"
+    check "a database stamped a version behind" $?
+    resp=$(curl -s -w '\n%{http_code}' -X POST -H "$A" "$BASE/v1/databases/$MIG_DB/migrate")
+    [ "${resp##*$'\n'}" = "200" ] && printf '%s' "${resp%$'\n'*}" | grep -q '"status":"started"'
+    check "migrate -> 200 started" $?
+    for _ in $(seq 1 60); do
+        curl -fsS -H "$A" "$BASE/v1/databases" | python3 -c 'import sys,json;d=[d for d in json.load(sys.stdin)["databases"] if d["name"]==sys.argv[1]][0];sys.exit(d["schema_state"]!="current")' "$MIG_DB" && break
+        sleep 1
+    done
+    [ "$(psql -U postgres -d "$MIG_DB" -tAc "SELECT max(version) FROM public.schema_version")" = \
+      "$(curl -fsS -H "$A" "$BASE/v1/databases" | python3 -c 'import sys,json;print(json.load(sys.stdin)["schema_version"])')" ]
+    check "the migrated database reaches the current version" $?
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$A" "$BASE/v1/databases/$MIG_DB/migrate")
+    [ "$code" = "409" ]; check "migrate a current database -> 409" $?
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$A" "$BASE/v1/databases/smoke_no_such_db/migrate")
+    [ "$code" = "404" ]; check "migrate a missing database -> 404" $?
+    curl -fsS -X DELETE -H "$A" "$BASE/v1/databases/$MIG_DB" >/dev/null
+
     if [ -n "${cat_sha:-}" ]; then
         meta() { psql -U postgres -d "${WIRETAP_DEFAULT_DB:-wiretap}" -tAc "$1"; }
         meta "DELETE FROM wiretap_meta.catalog_assignment_history WHERE daemon_id = '$CAT_DAEMON';

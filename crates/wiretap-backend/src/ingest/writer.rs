@@ -14,6 +14,7 @@ use chrono::DateTime;
 use deadpool_postgres::Pool;
 use futures_util::SinkExt;
 use tokio_postgres::error::SqlState;
+use tokio_postgres::{Client, CopyInSink, GenericClient};
 use wiretap_model::Protocol;
 use wiretap_protocol::can::CanFlags;
 use wiretap_protocol::ingest::{RecordFields, RecordKind, ID_ARB_MASK};
@@ -160,26 +161,162 @@ impl From<CopyError> for crate::sql::QueryError {
     }
 }
 
+/// The columns this build writes. The gateway writes its own current shape, so
+/// a migration must end at a `capture_frame` that takes these.
+const COLUMNS: &str = "ts, protocol, id, flags, dlc, data_bytes, bus, unit, func, crc_valid";
+
+/// Where a batch waits while its database is behind or migrating: `COLUMNS`,
+/// typed as `capture_frame` types them, and nothing a drain does not need.
+const CREATE_PENDING: &str = "CREATE TABLE IF NOT EXISTS public.capture_frame_pending (
+    ts timestamptz NOT NULL, ingest_ts timestamptz NOT NULL DEFAULT now(),
+    protocol text NOT NULL, id integer NOT NULL, flags smallint NOT NULL,
+    dlc smallint NOT NULL, data_bytes bytea NOT NULL, bus integer NOT NULL,
+    unit smallint, func smallint, crc_valid boolean)";
+
+/// Advisory lock keys. Every buffered write holds `BUFFER_LOCK` shared and the
+/// drain holds it exclusively, so no batch lands in a buffer already drained.
+const BUFFER_LOCK: i64 = 0x5754_4150_0001;
+const CREATE_PENDING_LOCK: i64 = 0x5754_4150_0002;
+
+fn pool_error(e: impl std::fmt::Display) -> CopyError {
+    CopyError {
+        code: None,
+        message: format!("pool: {e}"),
+    }
+}
+
 /// COPY a slice of rows into public.capture_frame.
 ///
 /// **The base table, not the `can_frame` view.** The view exists so readers on
 /// the pre-2026-09-10 name keep working, and PostgreSQL cannot COPY into one —
 /// pointing this at it fails with `cannot copy to view`.
-///
 pub async fn copy_rows(pool: &Pool, batch: &[FrameRow]) -> Result<(), CopyError> {
     let text = copy_text(batch)?;
-    let client = pool.get().await.map_err(|e| CopyError {
-        code: None,
-        message: format!("pool: {e}"),
-    })?;
+    let client = pool.get().await.map_err(pool_error)?;
     let sink = client
-        .copy_in(
-            "COPY public.capture_frame \
-             (ts, protocol, id, flags, dlc, data_bytes, bus, unit, func, crc_valid) \
-             FROM STDIN",
-        )
+        .copy_in(&copy_into("public.capture_frame"))
         .await
         .map_err(CopyError::postgres("copy_in"))?;
+    send_copy(sink, text).await
+}
+
+/// Where `buffer_rows` put a batch.
+#[derive(Debug, PartialEq)]
+pub enum Written {
+    Buffered,
+    /// The database reached this build's schema meanwhile.
+    Live,
+}
+
+/// Buffer a batch for a database behind this build's schema, deciding under
+/// the drain's lock, so a batch either lands before the drain or finds the
+/// database current and goes to `capture_frame`.
+pub async fn buffer_rows(pool: &Pool, batch: &[FrameRow]) -> Result<Written, CopyError> {
+    let text = copy_text(batch)?;
+    let mut client = pool.get().await.map_err(pool_error)?;
+    let tx = client
+        .transaction()
+        .await
+        .map_err(CopyError::postgres("begin"))?;
+    tx.execute("SELECT pg_advisory_xact_lock_shared($1)", &[&BUFFER_LOCK])
+        .await
+        .map_err(CopyError::postgres("buffer lock"))?;
+    let current = crate::schema::detect_version(&*tx)
+        .await
+        .map_err(pool_error)?
+        == Some(crate::schema::SCHEMA_VERSION);
+    let table = if current {
+        "public.capture_frame"
+    } else {
+        // Serialised, because two concurrent `CREATE TABLE IF NOT EXISTS` can
+        // both find it missing and one then fails.
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&CREATE_PENDING_LOCK])
+            .await
+            .map_err(CopyError::postgres("create lock"))?;
+        tx.batch_execute(CREATE_PENDING)
+            .await
+            .map_err(CopyError::postgres("create buffer"))?;
+        "public.capture_frame_pending"
+    };
+    let sink = tx
+        .copy_in(&copy_into(table))
+        .await
+        .map_err(CopyError::postgres("copy_in"))?;
+    send_copy(sink, text).await?;
+    tx.commit().await.map_err(CopyError::postgres("commit"))?;
+    Ok(if current {
+        Written::Live
+    } else {
+        Written::Buffered
+    })
+}
+
+/// What a drain moved: rows, and the first and last `ts` among them.
+#[derive(Debug)]
+pub struct Drained {
+    pub rows: u64,
+    pub first: std::time::SystemTime,
+    pub last: std::time::SystemTime,
+}
+
+pub async fn has_pending(client: &impl GenericClient) -> Result<bool, String> {
+    client
+        .query_one(
+            "SELECT to_regclass('public.capture_frame_pending') IS NOT NULL",
+            &[],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|e| format!("buffer check: {e}"))
+}
+
+/// Move a buffer into `capture_frame` and drop it, in one transaction. Only
+/// for a database already at this build's schema.
+pub async fn drain_pending(client: &mut Client) -> Result<Option<Drained>, String> {
+    let pg = |what: &'static str| move |e: tokio_postgres::Error| format!("drain {what}: {e}");
+    if !has_pending(client).await? {
+        return Ok(None);
+    }
+    let tx = client.transaction().await.map_err(pg("begin"))?;
+    tx.execute("SELECT pg_advisory_xact_lock($1)", &[&BUFFER_LOCK])
+        .await
+        .map_err(pg("lock"))?;
+    // Asked again under the lock: another drain may have got there first.
+    if !has_pending(&tx).await? {
+        return Ok(None);
+    }
+    let span = tx
+        .query_one(
+            "SELECT min(ts), max(ts) FROM public.capture_frame_pending",
+            &[],
+        )
+        .await
+        .map_err(pg("span"))?;
+    let rows = tx
+        .execute(
+            &format!(
+                "INSERT INTO public.capture_frame (ingest_ts, {COLUMNS}) \
+                 SELECT ingest_ts, {COLUMNS} FROM public.capture_frame_pending"
+            ),
+            &[],
+        )
+        .await
+        .map_err(|e| format!("drain: {}", crate::schema::db_error_detail(&e)))?;
+    tx.batch_execute("DROP TABLE public.capture_frame_pending")
+        .await
+        .map_err(pg("drop"))?;
+    tx.commit().await.map_err(pg("commit"))?;
+    Ok(match (span.get(0), span.get(1)) {
+        (Some(first), Some(last)) => Some(Drained { rows, first, last }),
+        _ => None,
+    })
+}
+
+fn copy_into(table: &str) -> String {
+    format!("COPY {table} ({COLUMNS}) FROM STDIN")
+}
+
+async fn send_copy(sink: CopyInSink<Bytes>, text: String) -> Result<(), CopyError> {
     futures_util::pin_mut!(sink);
     sink.send(Bytes::from(text))
         .await
@@ -277,6 +414,33 @@ mod tests {
             "{line}"
         );
         assert!(line.ends_with("feff\t3\t\\N\t\\N\t\\N\n"), "{line}");
+    }
+
+    /// The buffer holds what the writer writes, typed as `capture_frame` types
+    /// it, or the drain's INSERT … SELECT fails after a migration.
+    #[test]
+    fn the_buffer_has_the_shape_the_writer_writes() {
+        let init = include_str!("../../schema/init_schema.sql");
+        let table = &init[init
+            .find("CREATE TABLE IF NOT EXISTS public.capture_frame (")
+            .unwrap()..];
+        let typed = |sql: &str, column: &str| {
+            sql.lines().find_map(|line| {
+                let mut words = line.split_whitespace();
+                (words.next() == Some(column)).then(|| {
+                    words
+                        .next()
+                        .unwrap()
+                        .trim_end_matches([',', ')'])
+                        .to_string()
+                })
+            })
+        };
+        for column in COLUMNS.split(", ").chain(["ingest_ts"]) {
+            let ours = typed(&CREATE_PENDING.replace(", ", ",\n"), column);
+            assert!(ours.is_some(), "the buffer has no {column}");
+            assert_eq!(ours, typed(table, column), "{column}");
+        }
     }
 
     #[test]
