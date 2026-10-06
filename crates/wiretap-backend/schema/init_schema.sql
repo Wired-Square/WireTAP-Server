@@ -29,6 +29,9 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'wiretap') THEN
     CREATE ROLE wiretap NOLOGIN;
   END IF;
+-- Another database's first run, migrated beside this one, created it meanwhile.
+EXCEPTION WHEN unique_violation OR duplicate_object THEN
+  NULL;
 END $$;
 
 -- ----------------------------------------

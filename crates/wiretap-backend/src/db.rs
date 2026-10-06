@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_postgres::NoTls;
 
 use crate::config::Config;
@@ -171,9 +171,11 @@ impl std::fmt::Display for DbError {
 pub struct Databases {
     config: Arc<Config>,
     pools: Arc<Mutex<HashMap<String, Pool>>>,
-    /// Serialises CREATE DATABASE *and* migration races between concurrent
-    /// first connections — two callers must not both run `ALTER TABLE … RENAME`.
+    /// Serialises CREATE DATABASE between concurrent first connections.
     create_lock: Arc<Mutex<()>>,
+    /// One per database, held for the whole of its migration, so two runs
+    /// never overlap on one database and runs on different ones never wait.
+    migration_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     schema_state: Arc<Mutex<HashMap<String, DbSchemaState>>>,
     /// Databases whose hourly rollup is being materialised, and since when.
     /// Deliberately *not* a `DbSchemaState`: a rebuild does not change what
@@ -194,6 +196,7 @@ impl Databases {
             config,
             pools: Arc::new(Mutex::new(HashMap::new())),
             create_lock: Arc::new(Mutex::new(())),
+            migration_locks: Arc::new(Mutex::new(HashMap::new())),
             schema_state: Arc::new(Mutex::new(HashMap::new())),
             rollup_rebuild: Arc::new(Mutex::new(HashMap::new())),
             buffer_pools: Arc::new(Mutex::new(HashMap::new())),
@@ -268,12 +271,21 @@ impl Databases {
         self.migrate_from(name, None).await
     }
 
-    /// The migration proper, given the version the caller found. Split from
+    async fn migration_lock(&self, name: &str) -> Arc<Mutex<()>> {
+        self.migration_locks
+            .lock()
+            .await
+            .entry(name.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// The migration, given the version the caller found. Split from
     /// [`Self::migrate_one`] so the sweep's probe pass is not thrown away and
     /// asked again for a database already current. One behind is asked again
     /// under the lock: a run queued behind another may find it finished.
     async fn migrate_from(&self, name: &str, at: Option<i32>) -> Result<(), String> {
-        let _guard = self.create_lock.lock().await;
+        let guard = self.migration_lock(name).await.lock_owned().await;
         let at = match at {
             Some(schema::SCHEMA_VERSION) => at,
             _ => match self.probe_version(name).await {
@@ -285,6 +297,15 @@ impl Databases {
                 }
             },
         };
+        self.migrate_holding(guard, name, at).await
+    }
+
+    async fn migrate_holding(
+        &self,
+        _lock: OwnedMutexGuard<()>,
+        name: &str,
+        at: Option<i32>,
+    ) -> Result<(), String> {
         // A database already at the current version is *not* marked `Migrating`:
         // that would evict its pool and refuse its reads on every sweep. But the
         // schema is still re-applied, because `apply_capture_schema` is
@@ -306,7 +327,7 @@ impl Databases {
             }
             // Into the hypertable before anything reads it, and in every run:
             // a gateway that died between a migration and its drain left the
-            // buffer behind.
+            // buffer behind, or between a drain and its refresh, the span.
             let drained = writer::drain_pending(&mut client).await?;
             // A rollup the migration left uncovered MUST be backfilled before
             // the maintenance policy runs, and before this database serves a
@@ -334,9 +355,8 @@ impl Databases {
                     "the migration left the rollup uncovered; rebuilding it"
                 );
                 schema::refresh_rollup(&client).await?;
-            } else if let Some(span) = &drained {
-                schema::refresh_rollup_span(&client, span).await?;
             }
+            writer::refresh_drained(&client).await?;
             if migrating {
                 schema::report_progress(&client, "done", None).await;
             }
@@ -355,7 +375,7 @@ impl Databases {
                         "schema migrated"
                     );
                 }
-                self.note_drained(name, drained.as_ref()).await;
+                self.note_drained(name, *drained).await;
                 self.set_state(name, DbSchemaState::current()).await;
             }
             Err(e) => {
@@ -372,11 +392,11 @@ impl Databases {
         result.map(|_| ())
     }
 
-    async fn note_drained(&self, name: &str, drained: Option<&writer::Drained>) {
-        if let Some(drained) = drained {
+    async fn note_drained(&self, name: &str, rows: u64) {
+        if rows > 0 {
             tracing::info!(
                 database = name,
-                rows = drained.rows,
+                rows,
                 "drained the ingest buffered while it was behind"
             );
         }
@@ -472,8 +492,8 @@ impl Databases {
                 // hypertables in them would be vandalism, not migration.
                 Ok(None) => continue,
                 Ok(Some(v)) => {
-                    // Current with a buffer a crash left: not served until the
-                    // loop below has drained it.
+                    // Current with a buffer, or a drained span, a crash left:
+                    // not served until the loop below has finished it.
                     if v == schema::SCHEMA_VERSION && !self.buffer_left(name).await {
                         self.set_state(name, DbSchemaState::Current { version: v })
                             .await;
@@ -549,6 +569,11 @@ impl Databases {
             _ => Ok(()),
         };
         refuse_settled(&*self.schema_state.lock().await)?;
+        let Ok(lock) = self.migration_lock(name).await.try_lock_owned() else {
+            return Err(MigrateRefusal::Conflict(format!(
+                "database '{name}' is migrating"
+            )));
+        };
         // Already current on disk, migrated by hand: the run below is then the
         // cheap one that drains its buffer and serves it.
         let at = self.probe_version(name).await?;
@@ -564,7 +589,7 @@ impl Databases {
         // Owned by the process, for the reason `require_current` gives.
         let this = self.clone();
         let owned = name.to_string();
-        tokio::spawn(async move { this.migrate_from(&owned, at).await });
+        tokio::spawn(async move { this.migrate_holding(lock, &owned, at).await });
         Ok(())
     }
 
@@ -590,7 +615,7 @@ impl Databases {
         };
         let state = if version == schema::SCHEMA_VERSION {
             match self.drain(name).await {
-                Ok(drained) => self.note_drained(name, drained.as_ref()).await,
+                Ok(drained) => self.note_drained(name, drained).await,
                 Err(e) => {
                     tracing::warn!(database = name, "could not drain buffered ingest: {e}");
                     return;
@@ -606,12 +631,10 @@ impl Databases {
         }
     }
 
-    async fn drain(&self, name: &str) -> Result<Option<writer::Drained>, String> {
+    async fn drain(&self, name: &str) -> Result<u64, String> {
         let mut client = self.connect_raw(name).await?;
         let drained = writer::drain_pending(&mut client).await?;
-        if let Some(span) = &drained {
-            schema::refresh_rollup_span(&client, span).await?;
-        }
+        writer::refresh_drained(&client).await?;
         Ok(drained)
     }
 
@@ -643,7 +666,7 @@ impl Databases {
 
     async fn buffer_left(&self, name: &str) -> bool {
         match self.connect_raw(name).await {
-            Ok(client) => writer::has_pending(&client).await.unwrap_or(true),
+            Ok(client) => writer::drain_owed(&client).await.unwrap_or(true),
             Err(_) => true,
         }
     }
@@ -757,8 +780,6 @@ impl Databases {
             return Err(format!("invalid database name '{name}'"));
         }
         let created = {
-            // Scoped: migrate_one takes this same lock, and holding it across
-            // that call would deadlock.
             let _guard = self.create_lock.lock().await;
             let exists = self.database_exists(name).await?;
             if !exists {
@@ -801,6 +822,7 @@ impl Databases {
         self.buffered.lock().await.remove(name);
         self.schema_state.lock().await.remove(name);
         self.rollup_rebuild.lock().await.remove(name);
+        self.migration_locks.lock().await.remove(name);
         if !self.database_exists(name).await? {
             return Ok(());
         }
@@ -1201,6 +1223,98 @@ pub(crate) mod tests {
         restarted.delete_database(&name).await.unwrap();
     }
 
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_long_migration_holds_up_neither_a_new_database_nor_another_migration() {
+        let slow = seeded_v3_database("slow", 40, 25_000).await;
+        let beside = behind_database("beside").await;
+        let dbs = live_databases(false);
+        sweep(&dbs).await;
+        dbs.start_migration(&slow).await.unwrap();
+
+        let new = format!("{beside}_new");
+        tokio::time::timeout(Duration::from_secs(5), dbs.create_database(&new))
+            .await
+            .expect("creating a database waited for the migration")
+            .unwrap();
+        dbs.start_migration(&beside).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            until_label(&dbs, &beside, "current"),
+        )
+        .await
+        .expect("a second database's migration waited for the first");
+        assert_eq!(
+            state_of(&dbs, &slow).await.label(),
+            "migrating",
+            "the slow migration finished first, so this proved nothing"
+        );
+        let again = dbs.start_migration(&slow).await;
+        assert!(
+            matches!(&again, Err(MigrateRefusal::Conflict(m)) if m.ends_with("is migrating")),
+            "{again:?}"
+        );
+
+        until_label(&dbs, &slow, "current").await;
+        for name in [&slow, &beside, &new] {
+            dbs.delete_database(name).await.unwrap();
+        }
+    }
+
+    /// Rollup rows stored for the hour `frames(_, 1_700_000_000_000_000, _)` is in.
+    async fn materialised_at_1_700_000_000(name: &str) -> i64 {
+        let client = live_databases(true).connect_raw(name).await.unwrap();
+        client
+            .query_one(
+                &format!(
+                    "SELECT count(*) FROM {} \
+                      WHERE bucket = date_trunc('hour', to_timestamp(1700000000))",
+                    rollup_table(name).await
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_span_drained_before_a_crash_is_refreshed_by_the_next_start() {
+        let name = behind_database("crashed_drain").await;
+        let dbs = live_databases(false);
+        sweep(&dbs).await;
+        dbs.write_rows(&name, &frames(0x7EB, 1_700_000_000_000_000, 4))
+            .await
+            .unwrap();
+        let mut by_hand = dbs.connect_raw(&name).await.unwrap();
+        schema::migrate(&by_hand, Some(schema::SCHEMA_VERSION - 1))
+            .await
+            .unwrap();
+        // A rollup that covers the archive from its first frame, so the hole
+        // the drain leaves is in the middle, where `rollup_status` cannot see it.
+        by_hand
+            .batch_execute(
+                "INSERT INTO public.capture_frame (ts, protocol, id, flags, dlc, data_bytes, bus)
+                 VALUES ('2022-01-01', 'can', 1, 0, 1, '\\x01', 0)",
+            )
+            .await
+            .unwrap();
+        schema::refresh_rollup(&by_hand).await.unwrap();
+        // The drain commits, and the gateway dies before its refresh.
+        let _ = writer::drain_pending(&mut by_hand).await.unwrap();
+        assert_eq!(materialised_at_1_700_000_000(&name).await, 0);
+
+        let restarted = live_databases(false);
+        sweep(&restarted).await;
+        assert_eq!(state_of(&restarted, &name).await.label(), "current");
+        assert!(
+            materialised_at_1_700_000_000(&name).await > 0,
+            "the drained span was never materialised"
+        );
+        restarted.delete_database(&name).await.unwrap();
+    }
+
     async fn rollup_table(name: &str) -> String {
         let client = live_databases(true).connect_raw(name).await.unwrap();
         client
@@ -1348,6 +1462,10 @@ pub(crate) mod tests {
             ..Databases::new(Arc::new(config_at(port, true)))
         };
         (dbs, server)
+    }
+
+    pub(crate) async fn mark_migrating(dbs: &Databases, name: &str) {
+        dbs.set_state(name, DbSchemaState::migrating()).await;
     }
 
     pub(crate) async fn state_of(dbs: &Databases, name: &str) -> DbSchemaState {

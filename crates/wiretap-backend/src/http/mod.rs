@@ -503,6 +503,15 @@ async fn delete_database(
             format!("database '{db}' is being ingested — stop the device first"),
         ));
     }
+    if matches!(
+        state.dbs.schema_states().await.get(&db),
+        Some(db::DbSchemaState::Migrating { .. })
+    ) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("database '{db}' is migrating"),
+        ));
+    }
     state
         .dbs
         .delete_database(&db)
@@ -828,6 +837,10 @@ async fn import_capture(
         .ensure_database(&db, q.create)
         .await
         .map_err(not_found)?;
+    let pool = match state.dbs.pool(&db).await {
+        Ok(pool) => pool,
+        Err(e) => return Err(refused_import(&state.dbs, &db, e).await),
+    };
 
     let mut rows: Vec<FrameRow> = Vec::with_capacity(IMPORT_CHUNK_ROWS);
     let mut imported: u64 = 0;
@@ -836,15 +849,9 @@ async fn import_capture(
         pending.drain(..read);
         let chunk = next_chunk().await?;
         if rows.len() >= IMPORT_CHUNK_ROWS || (chunk.is_none() && !rows.is_empty()) {
-            state
-                .dbs
-                .write_rows(&db, &rows)
+            crate::ingest::writer::copy_rows(&pool, &rows)
                 .await
-                .map_err(|e| match e {
-                    db::WriteError::Db(db::DbError::Refused(m)) => not_found(m),
-                    db::WriteError::Db(db::DbError::Unavailable(m)) => unavailable(m),
-                    db::WriteError::Copy(e) => sql::QueryError::from(e).into(),
-                })?;
+                .map_err(sql::QueryError::from)?;
             imported += rows.len() as u64;
             rows.clear();
         }
@@ -862,6 +869,23 @@ async fn import_capture(
         imported,
         elapsed_ms: t0.elapsed().as_millis() as u64,
     }))
+}
+
+/// An import is not buffered: unlike a capture server, its client is a person
+/// who can migrate the database first.
+async fn refused_import(dbs: &db::Databases, name: &str, e: db::DbError) -> ApiError {
+    use db::DbSchemaState::*;
+    let conflict = |m: String| ApiError(StatusCode::CONFLICT, m);
+    match dbs.schema_states().await.get(name) {
+        Some(Migrating { .. }) => conflict(format!("database '{name}' is migrating")),
+        Some(Pending { .. } | Failed { .. }) => conflict(format!(
+            "database '{name}' is waiting for migration; migrate it first"
+        )),
+        _ => match e {
+            db::DbError::Refused(m) => not_found(m),
+            db::DbError::Unavailable(m) => unavailable(m),
+        },
+    }
 }
 
 fn import_rows(buf: &[u8], rows: &mut Vec<FrameRow>) -> Result<usize, String> {
@@ -1373,6 +1397,63 @@ mod tests {
             assert!(listed.get(field).is_some(), "no {field}: {listed}");
         }
         dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn an_import_into_a_database_behind_or_migrating_is_refused() {
+        let name = db::tests::behind_database("import_waits").await;
+        let dbs = db::tests::live_databases(false);
+        db::tests::sweep(&dbs).await;
+        let at = gateway(dbs.clone()).await;
+        let body = import_body(&[(
+            CanFrame::data(0, 0x123, false, false, false, vec![1]),
+            false,
+        )]);
+        let path = format!("/v1/db/{name}/import");
+        let import = || {
+            send_to(
+                at,
+                "POST",
+                &path,
+                Some("bootstrap"),
+                "application/x-wiretap-frames",
+                &body,
+            )
+        };
+
+        let (status, err) = import().await;
+        assert_eq!(status, 409, "{err}");
+        assert_eq!(
+            err["error"],
+            format!("database '{name}' is waiting for migration; migrate it first")
+        );
+        db::tests::mark_migrating(&dbs, &name).await;
+        let (status, err) = import().await;
+        assert_eq!(status, 409, "{err}");
+        assert_eq!(err["error"], format!("database '{name}' is migrating"));
+        assert!(
+            !db::tests::buffer_exists(&name).await,
+            "the import was buffered"
+        );
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_database_is_not_deleted_while_it_migrates() {
+        let dbs = db::tests::unreachable_databases(true);
+        db::tests::mark_migrating(&dbs, "archive").await;
+        let at = gateway(dbs).await;
+        let (status, body) = request_to(
+            at,
+            "DELETE",
+            "/v1/databases/archive",
+            Some("bootstrap"),
+            None,
+        )
+        .await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"], "database 'archive' is migrating");
     }
 
     fn assign(content: &str, provenance: serde_json::Value) -> serde_json::Value {

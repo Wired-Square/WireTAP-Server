@@ -110,7 +110,9 @@ Times cross the wire as microseconds since the epoch, as `time-bounds` and
 BRS and ESI, stored as ingest stores them. A body without the header, from an
 older desktop, or of another version is a 400 saying why. **Upgrade every
 gateway before a desktop that sends version 2**: an older gateway misreads it
-without an error.
+without an error. An import into a database behind the schema or migrating is
+not buffered as ingest is: it is a 409 saying so, until the database is
+migrated.
 
 A database is created when: an admin creates it in the UI / API; an ingest
 client names an unknown one in its HELLO (auto-create, when enabled); or a
@@ -119,7 +121,7 @@ capture import targets one with `?create=true`. Auto-create is gated by
 
 An admin can **delete** a capture database (UI Delete button or
 `DELETE /v1/databases/{db}`), after confirmation. It's refused while a device is
-actively ingesting into it (409) and for the default/meta database
+actively ingesting into it or migrating (409), and for the default/meta database
 (`WIRETAP_DEFAULT_DB`, which holds the API-key store).
 
 ## Capture daemons and their catalogues
@@ -163,8 +165,8 @@ What the admin UI uses, and the stable hook for other clients.
 `POST /v1/databases/{db}/migrate` (admin) starts migrating one database to the
 gateway's schema and answers at once: 200 `{"status":"started"}`; 409 if it is
 current, already migrating, or holds no capture schema; 404 if it does not
-exist. A database migrated by hand is also started this way, and the run then
-only drains its buffer.
+exist. Other databases may migrate at the same time. A database migrated by
+hand is also started this way, and the run then only drains its buffer.
 
 `GET /v1/databases` reports each database's state, with these fields beside
 the rest:
@@ -245,10 +247,12 @@ Two things to know when it does:
   window and advance the watermark past the gap, leaving `inventory` silently
   under-reporting the archive's history.
 - **A database refuses reads while it migrates, and buffers its ingest.** A
-  batch for a database behind or migrating is acknowledged and stored in
-  `capture_frame_pending`, in the shape the gateway writes; it is moved into
-  `capture_frame` and the rollup refreshed over it before the database serves
-  again. A buffer a crash left behind is drained on the next start.
+  batch from a capture server for a database behind or migrating is
+  acknowledged and stored in `capture_frame_pending`, in the shape the gateway
+  writes; it is moved into `capture_frame` and the rollup refreshed over it
+  before the database serves again. A buffer, or a drained span not yet
+  refreshed, that a crash left behind is finished on the next start. A capture
+  import is refused instead.
 - **An archive whose rollup does not reach back to its first frame is repaired
   on start**, whatever put it that way — a restored backup, an older build, or a
   maintenance run that materialised a recent window over an empty aggregate. That

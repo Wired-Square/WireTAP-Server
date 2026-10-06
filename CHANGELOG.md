@@ -49,7 +49,9 @@ All notable changes to this project are documented here. Entries go under
 - **Ingest is buffered while a database migrates.** A batch for a database
   behind or migrating is acknowledged into `capture_frame_pending` and moved
   into `capture_frame` before the database serves again, after a crash too.
-  Only reads are refused meanwhile.
+  Only reads are refused meanwhile, and a capture import, which answers 409
+  until the database is migrated. Databases migrate independently, and one
+  cannot be deleted while it migrates.
 - **The archive keeps a CAN FD frame's BRS and ESI.** `/frames` serves
   `is_rtr`, `is_brs` and `is_esi` beside `is_fd`. The analytical queries,
   `payloads`, `inventory` and the hourly rollup leave remote frames out.

@@ -262,7 +262,8 @@ const REFRESH_SQL: &str =
 /// Materialise the rollup over the hours a drain wrote into.
 pub async fn refresh_rollup_span(
     client: &Client,
-    span: &crate::ingest::writer::Drained,
+    first: std::time::SystemTime,
+    last: std::time::SystemTime,
 ) -> Result<(), String> {
     let at = |t: std::time::SystemTime| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339();
     refresh(
@@ -271,8 +272,8 @@ pub async fn refresh_rollup_span(
             "CALL refresh_continuous_aggregate('public.capture_frame_hourly', \
                date_trunc('hour', '{}'::timestamptz), \
                date_trunc('hour', '{}'::timestamptz) + INTERVAL '1 hour')",
-            at(span.first),
-            at(span.last)
+            at(first),
+            at(last)
         ),
     )
     .await

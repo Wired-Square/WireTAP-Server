@@ -67,7 +67,10 @@ export default function App() {
 
 /** Names every database waiting for an operator's Migrate now, on every tab. */
 function MigrationBanner({ onOpen }: { onOpen: (name: string) => void }) {
-  const { databases } = useDatabases();
+  // Polled while one waits too, so a migration started elsewhere shows.
+  const { databases } = useDatabases(
+    (d) => d.schema_state === "pending" || d.schema_state === "migrating",
+  );
   const waiting = databases.filter(canMigrate);
   if (waiting.length === 0) return null;
   return (

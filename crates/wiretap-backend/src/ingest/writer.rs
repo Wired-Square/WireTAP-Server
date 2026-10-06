@@ -267,14 +267,6 @@ pub async fn buffer_rows(pool: &Pool, batch: &[FrameRow]) -> Result<Written, Cop
     })
 }
 
-/// What a drain moved: rows, and the first and last `ts` among them.
-#[derive(Debug)]
-pub struct Drained {
-    pub rows: u64,
-    pub first: std::time::SystemTime,
-    pub last: std::time::SystemTime,
-}
-
 pub async fn has_pending(client: &impl GenericClient) -> Result<bool, String> {
     client
         .query_one(
@@ -286,12 +278,28 @@ pub async fn has_pending(client: &impl GenericClient) -> Result<bool, String> {
         .map_err(|e| format!("buffer check: {e}"))
 }
 
-/// Move a buffer into `capture_frame` and drop it, in one transaction. Only
-/// for a database already at this build's schema.
-pub async fn drain_pending(client: &mut Client) -> Result<Option<Drained>, String> {
+/// Whether a buffer, or the span of one drained since, still waits for
+/// [`drain_pending`] or [`refresh_drained`].
+pub async fn drain_owed(client: &Client) -> Result<bool, String> {
+    client
+        .query_one(
+            "SELECT to_regclass('public.capture_frame_pending') IS NOT NULL \
+                 OR to_regclass('public.capture_frame_drained') IS NOT NULL",
+            &[],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|e| format!("buffer check: {e}"))
+}
+
+/// Move a buffer into `capture_frame` and drop it, in one transaction, which
+/// also records the span it covered for [`refresh_drained`]: a gateway that
+/// dies between the two leaves the span behind rather than a hole in the
+/// rollup. Only for a database already at this build's schema.
+pub async fn drain_pending(client: &mut Client) -> Result<u64, String> {
     let pg = |what: &'static str| move |e: tokio_postgres::Error| format!("drain {what}: {e}");
     if !has_pending(client).await? {
-        return Ok(None);
+        return Ok(0);
     }
     let tx = client.transaction().await.map_err(pg("begin"))?;
     tx.execute("SELECT pg_advisory_xact_lock($1)", &[&BUFFER_LOCK])
@@ -299,15 +307,16 @@ pub async fn drain_pending(client: &mut Client) -> Result<Option<Drained>, Strin
         .map_err(pg("lock"))?;
     // Asked again under the lock: another drain may have got there first.
     if !has_pending(&tx).await? {
-        return Ok(None);
+        return Ok(0);
     }
-    let span = tx
-        .query_one(
-            "SELECT min(ts), max(ts) FROM public.capture_frame_pending",
-            &[],
-        )
-        .await
-        .map_err(pg("span"))?;
+    tx.batch_execute(
+        "CREATE TABLE IF NOT EXISTS public.capture_frame_drained (
+           first timestamptz NOT NULL, last timestamptz NOT NULL);
+         INSERT INTO public.capture_frame_drained
+           SELECT min(ts), max(ts) FROM public.capture_frame_pending HAVING count(*) > 0",
+    )
+    .await
+    .map_err(pg("span"))?;
     let rows = tx
         .execute(
             &format!(
@@ -322,10 +331,37 @@ pub async fn drain_pending(client: &mut Client) -> Result<Option<Drained>, Strin
         .await
         .map_err(pg("drop"))?;
     tx.commit().await.map_err(pg("commit"))?;
-    Ok(match (span.get(0), span.get(1)) {
-        (Some(first), Some(last)) => Some(Drained { rows, first, last }),
-        _ => None,
-    })
+    Ok(rows)
+}
+
+/// Materialise the rollup over every span drained and not yet refreshed, then
+/// forget them.
+pub async fn refresh_drained(client: &Client) -> Result<(), String> {
+    let pg = |e: tokio_postgres::Error| format!("drained span: {e}");
+    let recorded = client
+        .query_one(
+            "SELECT to_regclass('public.capture_frame_drained') IS NOT NULL",
+            &[],
+        )
+        .await
+        .map_err(pg)?;
+    if !recorded.get::<_, bool>(0) {
+        return Ok(());
+    }
+    let span = client
+        .query_one(
+            "SELECT min(first), max(last) FROM public.capture_frame_drained",
+            &[],
+        )
+        .await
+        .map_err(pg)?;
+    if let (Some(first), Some(last)) = (span.get(0), span.get(1)) {
+        crate::schema::refresh_rollup_span(client, first, last).await?;
+    }
+    client
+        .batch_execute("DROP TABLE IF EXISTS public.capture_frame_drained")
+        .await
+        .map_err(pg)
 }
 
 fn copy_into(table: &str) -> String {
