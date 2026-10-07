@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS public.capture_frame (
   ingest_ts   timestamptz NOT NULL DEFAULT now(), -- ingest time
   protocol    text        NOT NULL DEFAULT 'can'  -- which wire this came off
                 CHECK (protocol IN ('can', 'modbus', 'serial')),
-  id          integer     NOT NULL,               -- CAN arbitration id, Modbus register, serial frame id
+  id          integer     NOT NULL,               -- CAN arbitration id; Modbus `unit << 8 | func`; serial frame id
   dlc         smallint    NOT NULL                -- CAN: length code 0..15, a remote frame's requested; bytes off any other wire, 0..256 Modbus
                 CHECK (dlc >= 0 AND dlc <= 256),
   data_bytes  bytea       NOT NULL,               -- raw payload; empty for a remote frame
