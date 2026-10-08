@@ -20,7 +20,7 @@ die() {
 }
 
 # appliance.toml's extra_debs, installed with the package.
-EXTRA_DEBS=''
+EXTRA_DEBS='target/debian/extra/wiretap-server_*_arm64.deb'
 
 # Runs `$1 <file> <pattern>` for the one file each of EXTRA_DEBS matches, and
 # stops on a pattern matching none or several.

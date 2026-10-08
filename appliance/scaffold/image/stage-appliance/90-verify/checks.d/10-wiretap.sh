@@ -1,4 +1,4 @@
-# What 10-wiretap installs, and the CAN and radio state a card ships in.
+# wiretap-server and can-utils, and the CAN and radio state a card ships in.
 
 WIRETAP_STATUS=var/lib/dpkg/status
 WIRETAP_EXTENDED=var/lib/apt/extended_states
@@ -18,7 +18,7 @@ wiretap_installed() { wiretap_paragraph "$R/$WIRETAP_STATUS" "$1" '(^|\n)Status:
 
 check() {
 	if ! wiretap_installed wiretap-server; then
-		fail WIRETAP-01 "dpkg does not have wiretap-server installed - 10-wiretap did not run, or the install failed"
+		fail WIRETAP-01 "dpkg does not have wiretap-server installed - is it in appliance.toml's extra_debs?"
 	elif [ ! -x "$R/$WIRETAP_BIN" ]; then
 		fail WIRETAP-01 "/$WIRETAP_BIN is missing or not executable"
 	else

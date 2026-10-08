@@ -19,7 +19,7 @@ fetching it, and the rest of CI is unaffected.
 | `frontend` | its browser half: the chassis's shell and Settings screens |
 | `appliance.toml` | the system identity the scaffold is rendered from |
 | `scaffold/` | the package and image scripts, mostly chassis-owned |
-| `scripts/stage-wiretap-server.sh` | puts `wiretap-server`'s package into the image |
+| `scripts/stage-wiretap-server.sh` | puts `wiretap-server`'s package where the image's `extra_debs` finds it |
 
 ## Changing the scaffold
 
@@ -73,7 +73,7 @@ card joins only when enrolled from the Network screen. Then:
 
 ```sh
 (cd .. && packaging/make-deb.sh --arch arm64)   # wiretap-server, into ../target/deb/
-scripts/stage-wiretap-server.sh                 # copies it into the image's 10-wiretap substage
+scripts/stage-wiretap-server.sh                 # copies it into target/debian/extra/
 scaffold/packaging/make-deb.sh --target image   # wiretap-appliance, as above
 scaffold/image/build-remote.sh                  # builds there, fetches the .img.xz into scaffold/image/deploy/
 ```

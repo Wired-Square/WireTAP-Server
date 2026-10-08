@@ -58,6 +58,9 @@ bluetooth = false
 # through the git-ignored `scaffold/image/config.local`; see the example beside
 # it.
 
+# wiretap-server, copied here by scripts/stage-wiretap-server.sh.
+extra_debs = ["target/debian/extra/wiretap-server_*_arm64.deb"]
+
 # Tailscale on the image, unenrolled, against Tailscale's own control server.
 # Cards join by themselves once `TAILSCALE_AUTH_KEY` is in `config.local`, or
 # when an administrator enrols one from the Network screen.

@@ -12,6 +12,9 @@ All notable changes to this project are documented here. Entries go under
   phase. The banner counts the databases waiting and offers one Fix button.
 - **A card also answers on `wiretap.local`, and its console login screen shows
   how to reach it**, from the appliance chassis `v0.1.4`.
+- **The card image installs `wiretap-server` through the chassis's `extra_debs`**
+  instead of a substage of its own. `scripts/stage-wiretap-server.sh` now copies
+  the package to `appliance/target/debian/extra/`.
 
 ## [0.1.10] — 2026-10-06
 
