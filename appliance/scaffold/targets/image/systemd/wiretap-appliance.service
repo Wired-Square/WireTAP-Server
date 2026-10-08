@@ -94,11 +94,13 @@ Environment=WIRETAP_APPLIANCE_REDIRECT_PORT=80
 
 # **The deployment**, which the daemon learns nowhere else and this package's
 # target decides: whether it administers this box (`privilege`), whether a box
-# with no accounts offers the first one to a browser, and whether journald keeps
-# its log on disk (`journal`). A run without these lines has all three off.
+# with no accounts offers the first one to a browser, whether journald keeps
+# its log on disk (`journal`), and the `.local` label it also answers to
+# (`local_alias`, blank for none). A run without these lines has all four off.
 Environment=WIRETAP_APPLIANCE_PRIVILEGE=host-admin
 Environment=WIRETAP_APPLIANCE_ONBOARDING=browser
 Environment=WIRETAP_APPLIANCE_JOURNAL=persistent
+Environment=WIRETAP_APPLIANCE_LOCAL_ALIAS=wiretap
 
 # **`0751`, and this one is asserted rather than enforced — read this before
 # changing it.** systemd chowns `StateDirectory=` and `RuntimeDirectory=` to

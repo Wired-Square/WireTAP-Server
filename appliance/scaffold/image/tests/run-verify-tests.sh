@@ -75,6 +75,14 @@ good() {
 	printf '#!/bin/sh\n' > "$T/usr/libexec/$NAME-firstboot"
 	chmod 0755 "$T/usr/bin/$BINARY" "$T/usr/libexec/$NAME-firstboot"
 	printf '%s\n' "$HOSTNAME_PREFIX" > "$T/etc/hostname"
+	mkdir -p "$T/etc/issue.d" "$T/etc/NetworkManager/dispatcher.d"
+	printf 'Debian GNU/Linux 13 \\n \\l\n\n' > "$T/etc/issue"
+	cp "$STAGE/00-appliance/files/console.issue" "$T/etc/issue.d/$NAME.issue"
+	ln -s "/run/$NAME-addresses.issue" "$T/etc/issue.d/${NAME}_addresses.issue"
+	install -m 0755 "$STAGE/00-appliance/files/console-addresses.sh" "$T/usr/libexec/$NAME-console-addresses"
+	install -m 0755 "$STAGE/00-appliance/files/console-hostname.sh" "$T/etc/NetworkManager/dispatcher.d/90-$NAME-console"
+	cp "$STAGE/00-appliance/files/console.service" "$T/usr/lib/systemd/system/$NAME-console.service"
+	ln -s "/usr/lib/systemd/system/$NAME-console.service" "$T/etc/systemd/system/multi-user.target.wants/"
 
 	if [ "$WIFI" = 0 ]; then wireless=false; else wireless=true; fi
 	printf '[main]\nNetworkingEnabled=true\nWirelessEnabled=%s\nWWANEnabled=true\n' "$wireless" > "$T/var/lib/NetworkManager/NetworkManager.state"
@@ -82,6 +90,10 @@ good() {
 	[ "$LINK_LOCAL" = 0 ] || cp "$STAGE/00-appliance/files/link-local.conf" "$T/etc/NetworkManager/conf.d/10-$NAME-link-local.conf"
 	[ "$JOURNAL_PERSISTENT" = 0 ] || cp "$SCAFFOLD/targets/image/debian/journald.conf" "$T$JOURNALD_DROPIN"
 	[ "$HOST_ADMIN" = 0 ] || printf 'AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2 %s/ssh/%%u\n' "$CONFIG_DIR" > "$T/etc/ssh/sshd_config.d/50-$NAME.conf"
+	if [ "$HATS" = 1 ]; then
+		mkdir -p "$T${BOOT_FIRMWARE_DROPIN%/*}"
+		printf '[Service]\nReadWritePaths=-/boot/firmware\n' > "$T$BOOT_FIRMWARE_DROPIN"
+	fi
 	[ "$ROOT_KEY" = 0 ] || printf '%s\n' "$KEY" > "$T/root/.ssh/authorized_keys"
 	[ "$FIRST_USER_KEY" = 0 ] || printf '%s\n' "$KEY" > "$T/home/$U/.ssh/authorized_keys"
 	if [ "$PASSWORDLESS_SUDO" = 1 ]; then
@@ -319,6 +331,9 @@ if [ "$LINK_LOCAL" = 1 ]; then
 		"rm -f etc/NetworkManager/conf.d/10-$NAME-link-local.conf"
 	case_run VERIFY-13 "the link-local default says something else" \
 		"printf '[connection]\nipv4.link-local=1\n' > etc/NetworkManager/conf.d/10-$NAME-link-local.conf"
+	if [ "$RELEASE" = bookworm ]; then other=4; else other=3; fi
+	case_run VERIFY-13 "the link-local default another release takes ($other)" \
+		"printf '[connection]\nipv4.link-local=$other\n' > etc/NetworkManager/conf.d/10-$NAME-link-local.conf"
 else
 	case_run VERIFY-13 "a link-local default on a product that turned it off" \
 		"printf '[connection]\nipv4.link-local=3\n' > etc/NetworkManager/conf.d/10-$NAME-link-local.conf"
@@ -388,6 +403,76 @@ case_run VERIFY-23 "apt marks the package automatically installed" \
 	"mkdir -p var/lib/apt && printf 'Package: libfoo\nAuto-Installed: 0\n\nPackage: $PACKAGE\nArchitecture: arm64\nAuto-Installed: 1\n' > var/lib/apt/extended_states"
 case_pass "VERIFY-23 lets apt mark other packages, and this one manual" \
 	"mkdir -p var/lib/apt && printf 'Package: $PACKAGE-dbg\nAuto-Installed: 1\n\nPackage: $PACKAGE\nArchitecture: arm64\nAuto-Installed: 0\n' > var/lib/apt/extended_states"
+
+ISSUE="etc/issue.d/$NAME.issue"
+# The console screen rewritten by a filter: `issue_edit grep -v …`.
+issue_edit() { "$@" "$ISSUE" > "$ISSUE.new" && mv "$ISSUE.new" "$ISSUE"; }
+case_run VERIFY-24 "/etc/issue is missing, so agetty skips issue.d" \
+	'rm -f etc/issue'
+case_run VERIFY-24 "the console screen is missing" \
+	'rm -f "$ISSUE"'
+case_run VERIFY-24 "the console screen does not name the box" \
+	'issue_edit grep -vF "https://\n.local"'
+if [ "$LOCAL_ALIAS" = 1 ]; then
+	case_run VERIFY-24 "the console screen does not name the alias" \
+		'issue_edit grep -vF "https://$HOSTNAME_PREFIX.local"'
+else
+	case_run VERIFY-24 "the console screen names an alias nobody publishes" \
+		'printf "  https://%s.local\n" "$HOSTNAME_PREFIX" >> "$ISSUE"'
+fi
+if [ "$CONSOLE_ART" = 1 ]; then
+	case_run VERIFY-24 "the console screen lost its art" \
+		"issue_edit awk 'shown || /^Open in a browser/ { shown = 1; print }'"
+	case_run VERIFY-24 "a single backslash in the art, before an n" \
+		"issue_edit awk 'NR == 1 { print \"a \\\\n b\" } { print }'"
+	case_pass "VERIFY-24 accepts a doubled backslash in the art, which agetty prints as one" \
+		"issue_edit awk 'NR == 1 { print \"a \\\\\\\\n b\" } { print }'"
+else
+	case_run VERIFY-24 "art above the console screen nobody asked for" \
+		"issue_edit awk 'NR == 1 { print \"( o.o )\" } { print }'"
+fi
+DISPATCHER="etc/NetworkManager/dispatcher.d/90-$NAME-console"
+case_run VERIFY-25 "Raspberry Pi OS's IP.issue, which prints the first address of any interface" \
+	"printf 'My IP address is \\\\4 \\\\6\n\n' > etc/issue.d/IP.issue"
+case_run VERIFY-25 "an address agetty picks from a named interface" \
+	"printf 'eth0 \\\\4{eth0}\n' > etc/issue.d/zz-more.issue"
+case_pass "VERIFY-25 accepts a doubled backslash before a 4, which prints as text" \
+	"printf '\\\\\\\\4 is a digit\n' > etc/issue.d/zz-more.issue"
+case_run VERIFY-25 "the address lines are not linked into issue.d" \
+	"rm -f etc/issue.d/${NAME}_addresses.issue"
+case_run VERIFY-25 "the address lines are linked from somewhere else" \
+	"ln -sfn /run/elsewhere.issue etc/issue.d/${NAME}_addresses.issue"
+case_run VERIFY-25 "the rename hook is missing from dispatcher.d" \
+	'rm -f "$DISPATCHER"'
+case_run VERIFY-25 "the rename hook is writable by its group, so NetworkManager skips it" \
+	'chmod 0775 "$DISPATCHER"'
+case_run VERIFY-25 "the rename hook is not executable" \
+	'chmod 0644 "$DISPATCHER"'
+# Only root can hand a file to another owner.
+if [ "$(id -u)" = 0 ]; then
+	case_run VERIFY-25 "the rename hook is not root's" \
+		'chown 1 "$DISPATCHER"'
+fi
+case_run VERIFY-25 "the address watcher's unit is missing beside its wants link" \
+	"rm -f usr/lib/systemd/system/$NAME-console.service"
+case_run VERIFY-25 "the address watcher is not enabled" \
+	"rm -f etc/systemd/system/multi-user.target.wants/$NAME-console.service"
+case_run VERIFY-25 "the address script is missing" \
+	"rm -f usr/libexec/$NAME-console-addresses"
+
+case_run VERIFY-26 "config.txt names HATs before any card has booted" \
+	"printf '# BEGIN %s HATs\n[all]\n# rtc\ndtoverlay=i2c-rtc,ds3231\n# END %s HATs\n' '$NAME' '$NAME' >> boot/firmware/config.txt"
+case_pass "VERIFY-26 leaves an overlay a product substage added outside the block" \
+	"printf 'dtoverlay=i2c-rtc,ds3231\n' >> boot/firmware/config.txt"
+if [ "$HATS" = 1 ]; then
+	case_run VERIFY-26 "the daemon's sandbox is not opened to the boot partition" \
+		"rm -f .$BOOT_FIRMWARE_DROPIN"
+	case_run VERIFY-26 "the drop-in opens it without the -, so a box without one would not start the daemon" \
+		"printf '[Service]\nReadWritePaths=/boot/firmware\n' > .$BOOT_FIRMWARE_DROPIN"
+else
+	case_run VERIFY-26 "the boot partition is opened to a daemon without hats" \
+		"mkdir -p .${BOOT_FIRMWARE_DROPIN%/*} && printf '[Service]\nReadWritePaths=-/boot/firmware\n' > .$BOOT_FIRMWARE_DROPIN"
+fi
 
 case_run VERIFY-15 "a Tailscale node was made on the build host" \
 	"mkdir -p var/lib/tailscale && printf '{}\n' > var/lib/tailscale/tailscaled.state"

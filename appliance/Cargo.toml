@@ -14,14 +14,14 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 
 [workspace.dependencies]
 # One tag on every line: two would be two checkouts and two `Store` types.
-appliance-backup = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.1" }
-appliance-backup-host = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.1" }
-appliance-build-id = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.1" }
-appliance-config = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.1" }
-appliance-host = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.1" }
-appliance-server = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.1" }
-appliance-store = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.1" }
-appliance-types = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.1" }
+appliance-backup = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.4" }
+appliance-backup-host = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.4" }
+appliance-build-id = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.4" }
+appliance-config = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.4" }
+appliance-host = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.4" }
+appliance-server = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.4" }
+appliance-store = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.4" }
+appliance-types = { git = "https://github.com/Wired-Square/wslib-appliance-rs.git", tag = "v0.1.4" }
 
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }

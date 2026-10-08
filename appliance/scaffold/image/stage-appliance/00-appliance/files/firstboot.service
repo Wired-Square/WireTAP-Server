@@ -13,8 +13,12 @@ Before=wiretap-appliance.service
 # ahead of any networking at all: this unit takes the default dependencies and
 # so is ordered after `basic.target`, and whether that composes with
 # `network-pre.target` is a question nothing here has run on a board. Ordering
-# against the two units that actually read the name is enough and is checkable.
+# against the units that actually read the name is enough and is checkable.
 Before=avahi-daemon.service
+# And before the console's login screen, which shows the name.
+Before=getty-pre.target
+# getty-pre.target is passive: wanted, or the ordering against it holds nothing.
+Wants=getty-pre.target
 # Its own marker rather than the hostname, so an operator who deliberately
 # renames the box does not get it renamed back on the next boot.
 #

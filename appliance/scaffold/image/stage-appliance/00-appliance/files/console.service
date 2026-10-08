@@ -1,0 +1,26 @@
+# Chassis-owned. Keeps the console login screen's address lines current.
+[Unit]
+Description=Console login screen addresses for wiretap-appliance
+Before=getty-pre.target
+# getty-pre.target is passive: wanted, or the ordering against it holds nothing.
+Wants=getty-pre.target
+
+[Service]
+ExecStartPre=/usr/libexec/wiretap-appliance-console-addresses
+# Once more after the monitor has subscribed, for a change between the two.
+ExecStart=/bin/sh -c 'ip -o monitor address link | { sleep 1; /usr/libexec/wiretap-appliance-console-addresses; while read -r _; do /usr/libexec/wiretap-appliance-console-addresses; done; }'
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -208,6 +208,10 @@ image)
     ;;
 esac
 
+# The boot partition's drop-in is the chassis's; its name is not the product's.
+[ ! -e "$SCAFFOLD/systemd/$NAME.service.d/50-boot-firmware.conf" ] ||
+    die "$SCAFFOLD/systemd/$NAME.service.d/50-boot-firmware.conf is the chassis's own drop-in name — rename it"
+
 # The unit's real drop-ins, which ship; the `.sample` beside them does not. The
 # name is held to a character set before the build, because a newline or a
 # backslash in one is a name md5sums cannot carry — and a package-shipped
@@ -406,6 +410,8 @@ image)
     install -D -m 0644 "$TARGET_SCAFFOLD/debian/journald.conf" "$STAGE/usr/lib/systemd/journald.conf.d/95-wiretap-appliance-persistent.conf"
     ;;
 esac
+
+# No target sets hats, so none opens the boot partition.
 
 # ---------------------------------------------------------------------------
 # /usr/share/doc

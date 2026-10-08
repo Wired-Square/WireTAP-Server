@@ -19,6 +19,25 @@ die() {
     exit 1
 }
 
+# appliance.toml's extra_debs, installed with the package.
+EXTRA_DEBS=''
+
+# Runs `$1 <file> <pattern>` for the one file each of EXTRA_DEBS matches, and
+# stops on a pattern matching none or several.
+each_extra_deb() {
+    set -f
+    for pattern in $EXTRA_DEBS; do
+        set +f
+        one_extra_deb "$1" "$pattern" $pattern
+    done
+    set +f
+}
+one_extra_deb() {
+    [ "$#" = 3 ] || die "extra_debs: $2 matches $(($# - 2)) files; remove all but the one to install"
+    [ -f "$3" ] || die "extra_debs: $2 matches no file"
+    "$1" "$3" "$2"
+}
+
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SCAFFOLD=$(dirname -- "$HERE")
 cd -- "$(dirname -- "$SCAFFOLD")"
@@ -46,6 +65,7 @@ command -v git >/dev/null || die "git is not on PATH"
 DEB=$(ls -t target/debian/image/"${DEB_PACKAGE}"_*_arm64.deb 2>/dev/null | head -1)
 [ -n "$DEB" ] ||
     die "no arm64 package in target/debian/image — run scaffold/packaging/make-deb.sh --target image first"
+each_extra_deb true
 
 # **Pinned to a ref rather than tracking a branch.** pi-gen's stages change, and
 # an image that built last month and does not today is a day spent bisecting
@@ -62,9 +82,18 @@ fi
 rm -rf "$HERE/pi-gen/stage-appliance"
 cp -a "$HERE/stage-appliance" "$HERE/pi-gen/stage-appliance"
 
-# The package the stage installs, staged where the chroot can see it.
+# The package the stage installs, and its extra_debs, staged where the chroot
+# can see them.
 mkdir -p "$HERE/pi-gen/stage-appliance/00-appliance/files"
 cp "$DEB" "$HERE/pi-gen/stage-appliance/00-appliance/files/appliance.deb"
+EXTRAS="$HERE/pi-gen/stage-appliance/00-appliance/files/extra-debs"
+stage_extra_deb() {
+    [ "${1##*/}" != appliance.deb ] || die "extra_debs: $1 is named appliance.deb, which is the package's own name in the stage"
+    [ ! -e "$EXTRAS/${1##*/}" ] || die "extra_debs: two files are named ${1##*/}"
+    mkdir -p "$EXTRAS"
+    cp "$1" "$EXTRAS/"
+}
+each_extra_deb stage_extra_deb
 
 # config.local's fleet key, staged below and removed when this script ends,
 # unless it is killed with SIGKILL. dash runs an EXIT trap on `exit` but not

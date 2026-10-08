@@ -353,14 +353,16 @@ if [ "$JOURNAL_PERSISTENT" = 1 ]; then
 fi
 
 # --- VERIFY-13: the link-local address as appliance.toml says ------------------
+# `3`, always on, where NetworkManager has no `fallback`; `4` elsewhere.
 LL="$R/etc/NetworkManager/conf.d/10-$NAME-link-local.conf"
+if [ "$RELEASE" = bookworm ]; then LL_MODE=3; else LL_MODE=4; fi
 if [ "$LINK_LOCAL" = 1 ]; then
 	if [ ! -f "$LL" ]; then
 		fail VERIFY-13 "10-$NAME-link-local.conf is missing - a box on a bare cable would have no address"
-	elif ! grep -qE '^ipv4\.link-local=3[[:space:]]*$' "$LL"; then
-		fail VERIFY-13 "10-$NAME-link-local.conf does not set ipv4.link-local=3"
+	elif ! grep -qE "^ipv4\.link-local=$LL_MODE[[:space:]]*\$" "$LL"; then
+		fail VERIFY-13 "10-$NAME-link-local.conf does not set ipv4.link-local=$LL_MODE, which $RELEASE takes"
 	else
-		ok VERIFY-13 "every connection takes a 169.254 address beside its lease"
+		ok VERIFY-13 "every connection takes a 169.254 address (ipv4.link-local=$LL_MODE)"
 	fi
 elif [ -e "$LL" ]; then
 	fail VERIFY-13 "10-$NAME-link-local.conf is present, but appliance.toml says link_local = false"
@@ -556,6 +558,74 @@ if awk -v p="Package: $PACKAGE" 'BEGIN { RS = "" }
 	fail VERIFY-23 "$PACKAGE is marked automatically installed in /var/lib/apt/extended_states - export-image's --auto-remove would purge it from the image"
 else
 	ok VERIFY-23 "$PACKAGE is not marked automatically installed"
+fi
+
+# Standard input without agetty's escaped backslashes, so each `\` left starts
+# an escape.
+unescaped() { sed 's/\\\\//g'; }
+
+# --- VERIFY-24: the console login screen says how to reach the box --------------
+# agetty reads /etc/issue.d only beside an /etc/issue.
+ISSUE="$R/etc/issue.d/$NAME.issue"
+FIRST_LINE='Open in a browser on the same network:'
+first=$(head -n 1 "$ISSUE" 2>/dev/null)
+if [ ! -f "$R/etc/issue" ]; then
+	fail VERIFY-24 "/etc/issue is missing, and agetty reads /etc/issue.d only beside it"
+elif [ ! -f "$ISSUE" ]; then
+	fail VERIFY-24 "/etc/issue.d/$NAME.issue is missing - the console would not say how to reach the box"
+elif ! grep -qxF '  https://\n.local' "$ISSUE"; then
+	fail VERIFY-24 "$NAME.issue does not name the box by its own name, https://<hostname>.local"
+elif [ "$LOCAL_ALIAS" = 1 ] && ! grep -qxF "  https://$HOSTNAME_PREFIX.local" "$ISSUE"; then
+	fail VERIFY-24 "$NAME.issue does not name https://$HOSTNAME_PREFIX.local, which appliance.toml's local_alias publishes"
+elif [ "$LOCAL_ALIAS" = 0 ] && grep -qF "https://$HOSTNAME_PREFIX.local" "$ISSUE"; then
+	fail VERIFY-24 "$NAME.issue names https://$HOSTNAME_PREFIX.local, but appliance.toml does not set local_alias"
+elif [ "$CONSOLE_ART" = 1 ] && [ "$first" = "$FIRST_LINE" ]; then
+	fail VERIFY-24 "$NAME.issue has no art above its lines, but appliance.toml names console_art"
+elif [ "$CONSOLE_ART" = 0 ] && [ "$first" != "$FIRST_LINE" ]; then
+	fail VERIFY-24 "$NAME.issue has something above its lines, but appliance.toml names no console_art"
+elif awk -v first="$FIRST_LINE" '$0 == first { exit } { print }' "$ISSUE" | unescaped | grep -q '\\'; then
+	fail VERIFY-24 "the art in $NAME.issue holds a single backslash, which agetty reads as an escape"
+else
+	ok VERIFY-24 "the console names the box, and draws the art appliance.toml asks for"
+fi
+
+# --- VERIFY-25: the console's addresses are the watcher's alone ----------------
+# agetty's own `\4` and `\6` print the first address of an interface, which can
+# be a tailnet's, or a 169.254 one beside the lease. NetworkManager runs a
+# dispatcher script only if root owns it and nobody else may write it.
+DISPATCHER="$R/etc/NetworkManager/dispatcher.d/90-$NAME-console"
+WATCHER="$NAME-console.service"
+escaped=""
+for f in "$R/etc/issue" "$R"/etc/issue.d/*.issue "$R/usr/lib/issue" "$R"/usr/lib/issue.d/*.issue; do
+	[ -f "$f" ] && unescaped < "$f" | grep -q '\\[46]' && escaped="$escaped ${f#"$R"}"
+done
+read -r dispatcher_mode _ dispatcher_owner _ <<EOF
+$(ls -lnd "$DISPATCHER" 2>/dev/null)
+EOF
+if [ -n "$escaped" ]; then
+	fail VERIFY-25 "an address agetty picks itself, which can be a tailnet's or a 169.254 one beside the lease:$escaped"
+elif [ "$(readlink "$R/etc/issue.d/${NAME}_addresses.issue")" != "/run/$NAME-addresses.issue" ]; then
+	fail VERIFY-25 "/etc/issue.d/${NAME}_addresses.issue is not a link to /run/$NAME-addresses.issue - the console would show no address"
+elif ! case "$dispatcher_mode" in -??x?[!w]??[!w]?*) true ;; *) false ;; esac ||
+	[ "$dispatcher_owner" != "${root_owner% *}" ]; then
+	fail VERIFY-25 "90-$NAME-console is missing from dispatcher.d, or is not executable, root's and writable by root alone - a rename would not reach the console"
+elif [ ! -x "$R/usr/libexec/$NAME-console-addresses" ] || [ ! -f "$R/usr/lib/systemd/system/$WATCHER" ] || ! enabled "$WATCHER"; then
+	fail VERIFY-25 "$WATCHER or the script it runs is not installed and enabled - the console would show no address"
+else
+	ok VERIFY-25 "$WATCHER writes the console's addresses, and nothing else prints one"
+fi
+
+# --- VERIFY-26: no HAT is fitted yet, and only a daemon with HATs may say which is ---
+# The block is the HATs screen's on the box that has them; an image that
+# carries one tells every card's firmware of hardware it may not have.
+if grep -qxF "# BEGIN $NAME HATs" "$R/boot/firmware/config.txt" 2>/dev/null; then
+	fail VERIFY-26 "config.txt already names HATs, between '# BEGIN $NAME HATs' and its END - remove the block from the image"
+elif [ "$HATS" = 1 ] && ! grep -qxE 'ReadWritePaths=-/boot/firmware[[:space:]]*' "$R$BOOT_FIRMWARE_DROPIN" 2>/dev/null; then
+	fail VERIFY-26 "$BOOT_FIRMWARE_DROPIN is missing or does not open /boot/firmware - the HATs screen could not write config.txt"
+elif [ "$HATS" = 0 ] && [ -e "$R$BOOT_FIRMWARE_DROPIN" ]; then
+	fail VERIFY-26 "$BOOT_FIRMWARE_DROPIN opens the boot partition, but appliance.toml does not set hats"
+else
+	ok VERIFY-26 "config.txt holds no HATs block, and the daemon may write it only with hats"
 fi
 
 # --- A product's own checks ------------------------------------------------------

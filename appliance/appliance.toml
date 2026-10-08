@@ -47,6 +47,8 @@ locale = "en_AU.UTF-8"
 timezone = "Australia/Sydney"
 wpa_country = "AU"
 link_local = true
+# A card usually stands alone, so it also answers on wiretap.local.
+local_alias = true
 # Both radios off until somebody turns one on from the Network screen. Soft,
 # as the chassis does it: never a disable-wifi or disable-bt overlay.
 wifi = false

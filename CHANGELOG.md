@@ -10,6 +10,8 @@ All notable changes to this project are documented here. Entries go under
 - **A migration's progress is easier to read.** Time taken shows as `2h 33m
   20s`, the time left as a badge beside it, and the chunk count beside the
   phase. The banner counts the databases waiting and offers one Fix button.
+- **A card also answers on `wiretap.local`, and its console login screen shows
+  how to reach it**, from the appliance chassis `v0.1.4`.
 
 ## [0.1.10] — 2026-10-06
 

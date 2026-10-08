@@ -1,8 +1,8 @@
 #!/bin/bash -e
 # Chassis-owned. Installs wiretap-appliance into the image, sets sshd's policy, the
-# link-local default and the radios, installs Tailscale where appliance.toml
-# asks for it, arranges first boot, and names libnss-mdns in nsswitch where its
-# own postinst did not.
+# console login screen, the link-local default and the radios, installs
+# Tailscale where appliance.toml asks for it, arranges first boot, and names
+# libnss-mdns in nsswitch where its own postinst did not.
 #
 # **Everything here runs on the build host, in a chroot.** Nothing in this file
 # may produce an identity: a key, a certificate or a name made here is one every
@@ -24,8 +24,25 @@ install -D -m 0755 files/firstboot.sh \
 install -D -m 0644 files/sshd.conf \
 	"${ROOTFS_DIR}/etc/ssh/sshd_config.d/00-wiretap-appliance.conf"
 
-# A 169.254 address beside the lease, so a box on a bare cable still answers
-# on `wiretap-appliance-<serial>.local`. A conf.d default rather than a keyfile: it
+# **The console login screen**, which agetty reads from /etc/issue.d after
+# /etc/issue, in name order: the names, then the address lines the watcher
+# writes under /run, linked from a name that sorts after the first. Raspberry
+# Pi OS's own IP.issue prints whichever address agetty finds first, which can
+# be a tailnet's, so it is diverted.
+install -D -m 0644 files/console.issue "${ROOTFS_DIR}/etc/issue.d/wiretap-appliance.issue"
+ln -sfn /run/wiretap-appliance-addresses.issue "${ROOTFS_DIR}/etc/issue.d/wiretap-appliance_addresses.issue"
+install -D -m 0755 files/console-addresses.sh "${ROOTFS_DIR}/usr/libexec/wiretap-appliance-console-addresses"
+install -D -m 0755 -o root -g root files/console-hostname.sh \
+	"${ROOTFS_DIR}/etc/NetworkManager/dispatcher.d/90-wiretap-appliance-console"
+install -D -m 0644 files/console.service \
+	"${ROOTFS_DIR}/usr/lib/systemd/system/wiretap-appliance-console.service"
+on_chroot << 'EOF'
+dpkg-divert --local --rename --divert /etc/issue.d/IP.issue.diverted --add /etc/issue.d/IP.issue
+systemctl enable wiretap-appliance-console.service
+EOF
+
+# A 169.254 address, so a box on a bare cable with no lease still answers
+# on `wiretap-<serial>.local`. A conf.d default rather than a keyfile: it
 # applies to every connection, including the one an operator adds later.
 install -D -m 0644 files/link-local.conf \
 	"${ROOTFS_DIR}/etc/NetworkManager/conf.d/10-wiretap-appliance-link-local.conf"
@@ -101,25 +118,37 @@ EOF
 
 # **Not `/tmp`, and not `/run`.** `on_chroot` mounts a fresh tmpfs over both
 # before it chroots, so a file staged there from the host is invisible to the
-# commands below and `dpkg -i` fails with "cannot access archive". Nothing in
-# pi-gen's own stages ever stages a file through either path, which is the tell.
-DEB_IN_ROOTFS=/var/cache/wiretap-appliance-install.deb
-install -D -m 0644 files/appliance.deb "${ROOTFS_DIR}${DEB_IN_ROOTFS}"
+# commands below and the install finds nothing to install. Nothing in pi-gen's
+# own stages ever stages a file through either path, which is the tell.
+# Readable by `_apt`, which apt reads a local archive as.
+DEBS_IN_ROOTFS=/var/cache/wiretap-appliance-install
+rm -rf "${ROOTFS_DIR}${DEBS_IN_ROOTFS}"
+install -d -m 0755 "${ROOTFS_DIR}${DEBS_IN_ROOTFS}"
+install -m 0644 files/appliance.deb "${ROOTFS_DIR}${DEBS_IN_ROOTFS}/"
+if [ -d files/extra-debs ]; then
+	install -m 0644 files/extra-debs/*.deb "${ROOTFS_DIR}${DEBS_IN_ROOTFS}/"
+fi
 
-# **A real dpkg install, not an unpack.** The maintainer scripts are the whole
-# point: postinst creates the account and the group, and gives /etc/wiretap-appliance the
+# **A real install, not an unpack, and one apt transaction** for the package
+# and appliance.toml's extra_debs, so apt resolves the dependencies between
+# them and fetches the rest. The maintainer scripts are the whole point:
+# postinst creates the account and the group, and gives /etc/wiretap-appliance the
 # group ownership systemd will not. DPKG_ROOT is deliberately unset here — this
 # *is* the target filesystem from inside the chroot — so postinst's
 # deb-systemd-helper block runs and the unit is enabled in the image. Its
 # systemctl block is skipped on its own, because a chroot has no
-# /run/systemd/system.
+# /run/systemd/system. apt marks each package it was named manually installed,
+# so export-image's `--auto-remove` keeps them. `--reinstall` because pi-gen
+# reruns this on a kept rootfs, where a rebuild at the same version would
+# otherwise keep the old package; no Recommends, as `dpkg -i` installed none.
 #
 # **The prose lives out here, not inside the heredoc.** The delimiter is
-# unquoted so that ${DEB_IN_ROOTFS} expands on the host, which means the host
+# unquoted so that ${DEBS_IN_ROOTFS} expands on the host, which means the host
 # shell also reads everything else in there — and a backtick in a comment is a
 # command substitution it will run, as root, before the chroot ever sees it.
 on_chroot << EOF
-dpkg -i ${DEB_IN_ROOTFS}
+cd ${DEBS_IN_ROOTFS}
+apt-get install -y --reinstall --no-install-recommends ./*.deb
 systemctl enable wiretap-appliance-firstboot.service
 EOF
 
@@ -148,9 +177,9 @@ fi
 
 # **Removed from the host side.** A `rm` inside the heredoc would run against
 # the chroot, which is the same filesystem — but doing it here is what makes it
-# visible that the package must not survive into the image, and it still works
+# visible that the packages must not survive into the image, and it still works
 # if the chroot step is ever changed to a mount namespace of its own.
-rm -f "${ROOTFS_DIR}${DEB_IN_ROOTFS}"
+rm -rf "${ROOTFS_DIR}${DEBS_IN_ROOTFS}"
 
 # **`.local` names resolve on the box too**, so a product can reach a peer by
 # the name a laptop reaches this box by. libnss-mdns's own postinst rewrites the

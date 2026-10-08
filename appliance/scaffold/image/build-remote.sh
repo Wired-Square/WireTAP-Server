@@ -7,10 +7,10 @@
 #
 # Chassis-owned, and rewritten unconditionally by every render. pi-gen wants
 # Debian, root and loop devices, so the image is not built on a laptop: this
-# sends `scaffold/` and the arm64 package — never the source tree — and runs
-# `build-image.sh` there under sudo, detached, following its log. The box is
-# `BUILD_HOST`, `BUILD_USER` and `BUILD_DIR`, from the environment or from
-# `config.local` beside this.
+# sends `scaffold/`, the arm64 package and its extra_debs — never the source
+# tree — and runs `build-image.sh` there under sudo, detached, following its
+# log. The box is `BUILD_HOST`, `BUILD_USER` and `BUILD_DIR`, from the
+# environment or from `config.local` beside this.
 set -eu
 # The fleet key, as `op run` puts it in the environment, taken before
 # config.local is sourced so the environment wins, and out of the environment
@@ -58,6 +58,25 @@ build_box() {
     esac
     only "$BUILD_DIR" ._/- || die "BUILD_DIR may hold only A-Z, a-z, 0-9, ., _, / and -"
     TARGET="$BUILD_USER@$BUILD_HOST"
+}
+
+# appliance.toml's extra_debs, installed with the package.
+EXTRA_DEBS=''
+
+# Runs `$1 <file> <pattern>` for the one file each of EXTRA_DEBS matches, and
+# stops on a pattern matching none or several.
+each_extra_deb() {
+    set -f
+    for pattern in $EXTRA_DEBS; do
+        set +f
+        one_extra_deb "$1" "$pattern" $pattern
+    done
+    set +f
+}
+one_extra_deb() {
+    [ "$#" = 3 ] || die "extra_debs: $2 matches $(($# - 2)) files; remove all but the one to install"
+    [ -f "$3" ] || die "extra_debs: $2 matches no file"
+    "$1" "$3" "$2"
 }
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -149,6 +168,7 @@ fi
 # is a second and not a round trip.
 DEB=$(ls -t target/debian/image/"${DEB_PACKAGE}"_*_arm64.deb 2>/dev/null | head -1)
 [ -n "$DEB" ] || die "no target/debian/image/${DEB_PACKAGE}_*_arm64.deb — run scaffold/packaging/make-deb.sh --target image first"
+each_extra_deb true
 
 connect
 box "$TARGET" 'command -v git >/dev/null && command -v sudo >/dev/null && command -v pgrep >/dev/null' ||
@@ -171,6 +191,14 @@ rsync -az --delete -e "$RSH" \
     --exclude 'image/stage-appliance/00-appliance/files/appliance.deb' \
     "$SCAFFOLD/" "$TARGET:$BUILD_DIR/scaffold/"
 rsync -a -e "$RSH" "$DEB" "$TARGET:$BUILD_DIR/target/debian/image/"
+# Each extra .deb where the box's build-image.sh looks for it, the pattern's
+# earlier matches there removed first, since a second match is refused.
+send_extra_deb() {
+    dir=$(dirname -- "$1")
+    box "$TARGET" "mkdir -p '$BUILD_DIR/$dir' && rm -f '$BUILD_DIR'/$2"
+    rsync -a -e "$RSH" "$1" "$TARGET:$BUILD_DIR/$dir/"
+}
+each_extra_deb send_extra_deb
 # config.local may hold the fleet key, so it lands readable by its owner alone
 # whatever its mode here. Not `rsync --chmod`, which macOS's openrsync ignores.
 # The environment's key follows the file, so it wins, and goes through stdin:
