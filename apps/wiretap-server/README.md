@@ -42,6 +42,46 @@ change that would stop the daemon starting a 422. An accepted change is
 answered once the daemon has restarted on it, with the settings it now runs
 on. A daemon that is not running is shown as such, not as an error.
 
+## The package
+
+`wiretap-server-ui`, a `.deb` that depends on `wiretap-server` and leaves that
+package as it is. The chassis renders it from [appliance.toml](appliance.toml)
+into `scaffold/` (`appliance-xtask packaging render`; `packaging diff` says
+whether anything there was edited). Two files there are this repository's own:
+`debian/copyright`, and the unit's drop-in
+`systemd/wiretap-server-ui.service.d/10-daemon-socket.conf`.
+
+```sh
+(cd frontend && npm ci && npm run build)
+CARGO_BUILD_TARGET=aarch64-unknown-linux-musl scaffold/packaging/make-deb.sh --target deb
+```
+
+That needs the cross environment below, and writes
+`target/debian/deb/wiretap-server-ui_<version>_<arch>.deb`.
+
+It runs as its own user, `wiretap-server-ui`, in its own group. The drop-in
+adds the daemon's group, `wiretap`, to the unit and to nothing else, which is
+what opens `/run/wiretap-server/control.sock` to it. Its own control socket,
+`/run/wiretap-server-ui/wiretap-server-ui.sock`, can change the daemon's
+settings, and is 0660 in that group of one, so only root reaches it, never more
+than the daemon's group. It serves HTTPS on 8443 with a certificate it makes on
+first start, and keeps its accounts in `/var/lib/wiretap-server-ui`, which only
+a purge removes. Make the first account as root:
+
+```sh
+sudo curl -s --unix-socket /run/wiretap-server-ui/wiretap-server-ui.sock \
+  http://localhost/api/users -X POST -H 'content-type: application/json' \
+  -d '{"username":"…","password":"…","role":"admin"}'
+```
+
+then sign in at `https://<host>:8443/`.
+
+[tests/deb-lifecycle.sh](tests/deb-lifecycle.sh) installs both packages,
+changes a setting through the UI, upgrades each, then removes and purges them,
+asserting at each step. Run it somewhere disposable, such as the container
+[packaging/tests/deb-lifecycle.sh](../../packaging/tests/deb-lifecycle.sh)
+describes, with `/usr/sbin/policy-rc.d` removed.
+
 ## Running it on a development machine
 
 Build the browser half once, in `frontend/`:

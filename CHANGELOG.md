@@ -56,6 +56,13 @@ All notable changes to this project are documented here. Entries go under
   `WIRETAP_SERVER_UI_APP_SOCKET` and `_CONSOLE_UID` set, an ApplianceOS
   console's proxy. Anyone signed in reads; only an admin changes, and a
   change is answered once the daemon has restarted on it.
+- **`wiretap-server-ui` as a package**, depending on `wiretap-server`, which
+  is unchanged. The chassis renders it from `apps/wiretap-server/appliance.toml`.
+  It runs as its own user in its own group, with the daemon's group added by
+  its unit alone, so its control socket is root's; it serves HTTPS on 8443 and
+  keeps its accounts in `/var/lib/wiretap-server-ui` until a purge.
+  `apps/wiretap-server/tests/deb-lifecycle.sh` installs, upgrades, removes and
+  purges the pair.
 
 ### Changed
 

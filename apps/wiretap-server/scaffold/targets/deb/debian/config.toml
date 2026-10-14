@@ -1,0 +1,28 @@
+# wiretap-server-ui's bootstrap settings: what the daemon reads before its database is
+# open. A dpkg conffile — an edit here survives an upgrade, and an upgrade that
+# changes this file asks before replacing an edited one. Restart the service
+# after an edit.
+#
+# Every line is commented, so this file sets nothing. The package's listeners
+# are in /usr/share/wiretap-server-ui/config.toml, which an upgrade replaces; uncomment
+# a key here and give it a value to override the package's. The environment
+# outranks both files, and the daemon logs a setting answered in the
+# environment and here.
+
+# The address both listeners bind, as a quoted string.
+# bind_address =
+
+# The port the HTTPS listener serves on. Below 1024 needs nothing else: the
+# unit holds the capability.
+# https_port =
+
+# The port plain HTTP is redirected to HTTPS from; 0 is no redirect listener.
+# redirect_port = 0
+
+# The certificate pair. The daemon makes its own at first start, at the paths
+# below. To supply yours, name both halves here and keep them in
+# /etc/wiretap-server-ui/, owned root:wiretap-server-ui, the key 0640. A named pair the
+# daemon cannot load refuses to start rather than being replaced.
+# [tls]
+# cert = "/var/lib/wiretap-server-ui/cert.pem"
+# key = "/var/lib/wiretap-server-ui/key.pem"

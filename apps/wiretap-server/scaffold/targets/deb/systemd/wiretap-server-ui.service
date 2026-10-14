@@ -1,0 +1,173 @@
+# The wiretap-server-ui appliance.
+#
+# **Chassis-owned. `appliance-xtask packaging render` rewrites this file
+# unconditionally, every time.** An edit here is lost at the next render, and the
+# loss shows up as a box behaving differently from the one beside it.
+#
+# Change a drop-in instead — `wiretap-server-ui.service.d/*.conf`, which nothing in the
+# chassis writes. There is a worked example in that directory.
+#
+# A directive that wants to differ *per product* rather than per deployment is a
+# knob missing from `appliance.toml`, not a hand-edit here.
+
+[Unit]
+Description=The wiretap-server-ui appliance
+# The daemon binds a listener before it can serve anything, so it wants a
+# configured interface rather than merely a running network stack.
+# `network-online.target` is the one that waits, and `Wants=` is what pulls it
+# into the transaction — ordering after a target nothing has asked for is
+# ordering after nothing at all.
+Wants=network-online.target
+After=network-online.target
+# Ordering only: nothing here pulls the target in, so a box whose clock never
+# synchronises still starts. Enabling `systemd-time-wait-sync.service` makes this
+# wait for the clock, and on a LAN with no reachable server waits indefinitely.
+After=time-sync.target
+
+[Service]
+# `exec` rather than `simple`: systemd holds the job open until the binary has
+# actually been executed, so a unit that cannot exec — a missing binary, a bad
+# interpreter — fails at `systemctl start` instead of reporting success and
+# dying immediately afterwards.
+#
+# **Not `notify`, and the difference is worth knowing before you order anything
+# against this unit.** Nothing in the chassis calls `sd_notify`, so "started"
+# here means the process is running, not that the TLS listener answers. A
+# consumer's own unit that must wait for the port has to wait for the port.
+Type=exec
+ExecStart=/usr/bin/wiretap-server-ui
+User=wiretap-server-ui
+Group=wiretap-server-ui
+Restart=always
+# **This unit never gives up, and never reports `failed` either.** systemd's
+# default start limiter is 5 starts in 10 seconds, so a 5 second delay yields
+# about two — the burst is never reached, the unit never enters `failed`, and
+# `systemctl is-failed` and any `OnFailure=` never fire. For an appliance on a
+# shelf that is the right trade: a box that keeps trying comes back when the cause
+# goes away, and a box that has given up needs somebody to drive to it.
+# `always` rather than `on-failure`: exit 0 and a death by TERM, INT or HUP are
+# clean to systemd, so `on-failure` would leave a `pkill`ed daemon down.
+# `systemctl stop` still stays stopped.
+RestartSec=5s
+
+# systemd gives every service a soft limit of 1024 open files, and Rust does not
+# raise it. Every listener caps what it accepts, the control socket's too, but
+# nothing caps whatever a product opens beside them. The failure is
+# `accept` spinning on EMFILE rather than a crash, so it reads as a hang rather
+# than as a limit.
+LimitNOFILE=16384
+
+# **The paths are declared here and in no other place.** `appliance-config`
+# defaults from systemd's own `CONFIGURATION_DIRECTORY`, `STATE_DIRECTORY` and
+# `RUNTIME_DIRECTORY`, which is what lets `ExecStart` stay a bare binary with no
+# arguments. A path repeated on a command line is one dpkg rewrites on every
+# upgrade, and one more place for the two spellings to disagree.
+ConfigurationDirectory=wiretap-server-ui
+StateDirectory=wiretap-server-ui
+RuntimeDirectory=wiretap-server-ui
+
+# **No `Environment=` for the listeners.** The environment would outrank
+# `config.toml`, the operator's file. The package's own values are in the file
+# named here, read beneath it. A port below 1024 needs nothing more: the
+# capability is below.
+Environment=WIRETAP_SERVER_UI_PACKAGE_CONFIG=/usr/share/wiretap-server-ui/config.toml
+
+# **`0751`, and this one is asserted rather than enforced — read this before
+# changing it.** systemd chowns `StateDirectory=` and `RuntimeDirectory=` to
+# `User=`/`Group=`, and systemd.exec(5) says it deliberately does *not* keep
+# that up for `ConfigurationDirectory=`: a directory that already exists is
+# left as it is, and systemd only logs that the mode differs. The package makes
+# it before the unit ever starts, so that is the case every start meets.
+#
+# Two consequences:
+#
+#  - **`0700` would lock an unprivileged daemon out of its own configuration.**
+#    Owned by root at mode `0700`, the daemon is "other" and cannot even traverse
+#    the directory `config.toml` lives in.
+#  - **The package has to make it `root:<group>`.** The mode alone cannot; only the
+#    maintainer scripts can, and until they do this directive is a statement of
+#    intent systemd will not enforce.
+#
+# What the group gains is the ability to read `config.toml`, which holds no
+# secret the package put there — so this does not weaken the socket story. What
+# everyone gains is traversal and nothing more.
+#
+# **The TLS pair is not in here by default.** It defaults under
+# `StateDirectory=` below, because a daemon that makes its own certificate has
+# to be able to *write* it and this directory is read-only to the daemon.
+# An operator who supplies their own may put it here and name it under `[tls]`;
+# nothing in the package sets a mode on either file, so that mode is theirs —
+# and at `0751` the directory does not shield a key left readable, so `0640`.
+ConfigurationDirectoryMode=0751
+# `0700`, because the database inside is `0600` so that the same group cannot
+# read the session signing secret or the password hashes directly. The mode on
+# the directory is the outer half of that; `appliance-store` sets the inner half
+# on every open.
+StateDirectoryMode=0700
+# `0750`, and this one is a grant rather than a restriction. The control socket
+# in this directory is `0660` owned by the appliance's group, and a process
+# cannot open a socket in a directory it may not traverse — so the group bit
+# here is half of the mechanism that makes the socket the way back in.
+RuntimeDirectoryMode=0750
+# Anything the daemon creates itself is owner-only. The two files that matter
+# set their own modes explicitly; this covers everything nobody thought about.
+UMask=0077
+
+# ---------------------------------------------------------------------------
+# The sandbox
+# ---------------------------------------------------------------------------
+# Every directive below is one a consumer can widen with a drop-in, and the
+# example beside this file says how. They are set here because the default for
+# an appliance on somebody else's network should be the narrow one — a product
+# that needs more says so, in its own repository, where a reviewer can see it.
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+# Blocks the whole of `/dev` bar a minimal set. **This is the directive a
+# hardware-facing product turns off** — a serial- or CAN-attached appliance widens
+# it in its own drop-in, rather than every appliance inheriting the widest case.
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+# A rename after start does not reach this unit's copy of the name — the
+# certificate's names, a backup's header and About's hostname read it at the
+# time — until it restarts.
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+# `ProcSubset=pid` is deliberately **not** here, and it is the one obvious
+# hardening directive this unit leaves off. It hides everything in `/proc` that
+# is not a process, which includes `meminfo`, `stat` and `cpuinfo` — the three
+# things a product's own health screen reads. Setting it would make the narrow
+# default correct for the chassis and wrong for most things built on it.
+
+# The mandatory four, merged with whatever the product declared. **AF_NETLINK is
+# the one that gets left off**: without it `getifaddrs` returns nothing at all, so
+# an interface list comes back empty and reads as a missing NIC rather than as a
+# sandbox hiding it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# CAP_NET_BIND_SERVICE always, then whatever the product declared.
+#
+# Granted and bounded, which are two different questions. The bounding set is
+# the ceiling on what this unit may ever hold; `AmbientCapabilities=` is what
+# actually puts a capability in the hands of a process that is not root.
+# Granting without bounding leaves the ceiling wherever the service manager
+# left it.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

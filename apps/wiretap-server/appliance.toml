@@ -1,0 +1,40 @@
+# wiretap-server-ui's system identity, rendered into `scaffold/` by
+# `appliance-xtask packaging render`. The reasoning behind each field is in the
+# chassis's `scaffold/appliance.toml.example`; this file is the values.
+#
+# `name` and `env_prefix` must match `NAME` and `ENV_PREFIX` in
+# `crates/wiretap-server-ui/src/main.rs`; nothing checks that they do.
+#
+# Only the package is rendered. The image is hand-written beside this file,
+# because it carries the daemon and a supervisor as well as this binary.
+
+name = "wiretap-server-ui"
+binary = "wiretap-server-ui"
+# Its own group, so its control socket, which can change the daemon's
+# settings, is no wider than the daemon's group. The daemon's group comes from
+# the drop-in's SupplementaryGroups=.
+user = "wiretap-server-ui"
+group = "wiretap-server-ui"
+
+config_dir = "/etc/wiretap-server-ui"
+state_dir = "/var/lib/wiretap-server-ui"
+runtime_dir = "/run/wiretap-server-ui"
+socket = "/run/wiretap-server-ui/wiretap-server-ui.sock"
+env_prefix = "WIRETAP_SERVER_UI"
+
+address_families = []
+capabilities = []
+
+[package]
+section = "admin"
+maintainer = "Alex Ferrara <alex@wiredsquare.com>"
+description = "web UI for the WireTAP capture daemon"
+depends = ["init-system-helpers (>= 1.54)", "adduser", "ca-certificates", "wiretap-server"]
+suggests = []
+ui_dist = "frontend/dist"
+# Just under a known-good static build; raise it when the real size moves.
+min_binary_bytes = 9_000_000
+
+[targets.deb]
+bind_address = "0.0.0.0"
+https_port = 8443

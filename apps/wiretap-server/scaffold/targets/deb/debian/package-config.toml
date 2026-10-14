@@ -1,0 +1,6 @@
+# wiretap-server-ui's package values, read beneath
+# /etc/wiretap-server-ui/config.toml. Owned by the package and replaced on every
+# upgrade: set a key in that file instead.
+
+bind_address = "0.0.0.0"
+https_port = 8443
