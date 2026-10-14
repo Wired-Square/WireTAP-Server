@@ -238,19 +238,35 @@ mod tests {
     /// the Python server's file instead, which is a different document.
     const SHIPPED: &str = include_str!("../../../packaging/wiretap-server.toml");
 
-    /// The file the package installs must parse and resolve to the documented
-    /// defaults. Everything in it is commented out except `iface`, deliberately,
-    /// so this is mostly a check that the one live key survives and that nothing
-    /// else in the file is a key this schema no longer knows.
+    /// The file the package installs must parse and set nothing: every key in
+    /// it is commented out, so it pins nothing a UI could otherwise change.
     #[test]
-    fn the_shipped_config_parses_with_no_unknown_keys() {
+    fn the_shipped_config_parses_and_sets_nothing() {
         let cfg = FileConfig::parse(SHIPPED).expect("shipped config parses");
-        assert_eq!(cfg.server.iface.as_deref(), Some("can0"));
+        assert_eq!(cfg, FileConfig::default());
+    }
+
+    /// Each commented key, uncommented, is one this schema knows.
+    #[test]
+    fn the_shipped_configs_commented_keys_are_all_known() {
+        let uncommented: String = SHIPPED
+            .lines()
+            .map(|l| match l.strip_prefix("# ") {
+                Some(t) if t == "[[device]]" => t,
+                Some(kv)
+                    if kv.split_once(" = ").is_some_and(|(k, _)| {
+                        !k.is_empty() && k.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    }) =>
+                {
+                    kv
+                }
+                _ => l,
+            })
+            .map(|l| l.to_owned() + "\n")
+            .collect();
+        let cfg = FileConfig::parse(&uncommented).expect("uncommented, it parses");
         assert_eq!(cfg.unknown_keys(), Vec::<String>::new());
-        assert!(
-            !cfg.retired_postgres_sink(),
-            "the shipped file must not enable it"
-        );
+        assert_eq!(cfg.server.iface.as_deref(), Some("can0"));
     }
 
     #[test]

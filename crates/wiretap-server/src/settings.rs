@@ -10,6 +10,8 @@
 //! `packaging/wiretap-server.toml`, the one this repo ships, states it
 //! correctly. `--check-config` exists so the result is inspectable rather than
 //! argued about either way.
+//!
+//! A UI's settings, [`crate::ui`], sit beneath both.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,7 @@ use wiretap_protocol::ingest::{self as proto, valid_daemon_id, valid_database_na
 use crate::catalogues::Catalogues;
 use crate::cli::Cli;
 use crate::source::bus_for_index;
+use crate::ui::UiConfig;
 
 /// Apply a file value over a flag value, where the file speaks.
 fn over<T>(dst: &mut T, src: Option<T>) {
@@ -660,8 +663,8 @@ impl Forward {
 /// Everything the server needs to run, with every source already applied.
 #[derive(Debug, Clone)]
 pub struct Settings {
-    /// Exactly what the flags and the file named: `[server].iface` sugar
-    /// first, then each `[[device]]`. Nothing is implied by a file.
+    /// The sugar first, then each `[[device]]`, from the one layer that named
+    /// devices; `can0` when none did.
     pub devices: Vec<Device>,
     pub host: String,
     pub port: u16,
@@ -796,11 +799,14 @@ pub enum Warning {
     NoForwardSink,
     /// Forwarding, but with no credential to authenticate with.
     ForwardKeyMissing,
+    /// `ui.toml` could not be read, or would have stopped the start, so the
+    /// UI's settings are not applied.
+    UiIgnored(String),
     /// `--test-pattern-enable` was given and the config file disarmed it.
     ///
-    /// Its own variant because the packaged config ships `enable = false` for
-    /// three sections that look identical, and this is the only one where that
-    /// beats the flag. Without a line saying so, the flag simply does nothing.
+    /// Its own variant because `enable = false` reads the same in three
+    /// sections, and this is the only one where it beats the flag. Without a
+    /// line saying so, the flag simply does nothing.
     TestPatternDisarmedByFile,
 }
 
@@ -815,6 +821,7 @@ impl fmt::Display for Warning {
                 )
             }
             Self::UnknownKey(k) => write!(f, "unknown config key, ignored: {k}"),
+            Self::UiIgnored(why) => write!(f, "the UI's settings are not applied: {why}"),
             Self::TestPatternDisarmedByFile => write!(
                 f,
                 "--test-pattern-enable was overridden by [test_pattern] enable = false in the \
@@ -859,6 +866,8 @@ pub struct Env {
     pub cache_path: Option<String>,
     /// `StateDirectory=` in the unit; `/var/lib/wiretap-server` in the package.
     pub state_dir: Option<String>,
+    /// `RuntimeDirectory=` in the unit, where the control socket goes.
+    pub runtime_dir: Option<String>,
     pub home: Option<String>,
     pub hostname: Option<String>,
 }
@@ -871,6 +880,7 @@ impl Env {
             forward_api_key: get("WIRETAP_FORWARD_TOKEN").map(Secret::new),
             cache_path: get("PG_CACHE_PATH"),
             state_dir: get("STATE_DIRECTORY"),
+            runtime_dir: get("RUNTIME_DIRECTORY"),
             home: get("HOME"),
             hostname: hostname(),
         }
@@ -893,25 +903,44 @@ fn short_name(hostname: &str) -> String {
     label.to_ascii_lowercase()
 }
 
-/// Read and parse a config file.
+/// Read and parse a config file, or `None` when there is none: the file is
+/// optional, and a start without one runs on the defaults.
 ///
-/// Lives here rather than in `main` so a future config reload over the control
-/// socket takes the same path, and so the failure modes are testable.
-pub fn load(path: &str) -> Result<FileConfig, SettingsError> {
-    let text = std::fs::read_to_string(path).map_err(|e| SettingsError::Io {
-        path: path.to_string(),
-        err: e.to_string(),
-    })?;
-    FileConfig::parse(&text).map_err(SettingsError::Parse)
+/// Lives here rather than in `main` so the control socket validates a change
+/// through the same path, and so the failure modes are testable.
+pub fn load(path: &str) -> Result<Option<FileConfig>, SettingsError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(SettingsError::Io {
+                path: path.to_string(),
+                err: e.to_string(),
+            })
+        }
+    };
+    FileConfig::parse(&text)
+        .map(Some)
+        .map_err(SettingsError::Parse)
 }
 
 impl Settings {
-    /// Apply flags, then the file over them, then the environment for secrets.
+    /// Apply the UI's settings, then flags over them, then the file over
+    /// those, then the environment for secrets above the UI's.
     pub fn resolve(
         cli: &Cli,
         file: Option<&FileConfig>,
+        ui: Option<&UiConfig>,
         env: &Env,
     ) -> Result<Resolved, SettingsError> {
+        let layered;
+        let cli = match ui {
+            Some(ui) => {
+                layered = ui.beneath(cli);
+                &layered
+            }
+            None => cli,
+        };
         // Refused before anything else: with the retired sink on, no other
         // setting can make the result correct.
         if cli.pg_enable || file.is_some_and(FileConfig::retired_postgres_sink) {
@@ -944,13 +973,30 @@ impl Settings {
             warnings.extend(f.unknown_keys().into_iter().map(Warning::UnknownKey));
             s.apply_file(cli, env, f)?;
         }
-        // The CAN sugar, in precedence order: `[server].iface`, then `-i`,
-        // then `can0` — but only with no file at all, as the Python's hand run
-        // behaved. A file's device set is what the file says.
-        let sugar = file
-            .and_then(|f| f.server.iface.as_deref())
-            .or(cli.iface.as_deref())
-            .unwrap_or(if file.is_some() { "" } else { "can0" });
+        // One layer names the whole device set: the file (`[server].iface`
+        // over `-i`, then its tables), else `-i`, else the UI, else `can0`.
+        let file_iface = file.and_then(|f| f.server.iface.as_deref());
+        let file_tables = file.map_or(&[][..], |f| &f.device);
+        let ui_tables: Vec<DeviceSection>;
+        let (sugar, tables) = match (
+            file_iface.or(cli.iface.as_deref()),
+            ui.and_then(|u| u.devices.as_ref()),
+        ) {
+            (Some(sugar), _) => (sugar, file_tables),
+            (None, _) if !file_tables.is_empty() => ("", file_tables),
+            (None, Some(devices)) => {
+                ui_tables = devices
+                    .iter()
+                    .enumerate()
+                    .map(|(index, d)| {
+                        d.table()
+                            .map_err(|what| SettingsError::Device { index, what })
+                    })
+                    .collect::<Result<_, _>>()?;
+                ("", &ui_tables[..])
+            }
+            (None, None) => ("can0", &[][..]),
+        };
 
         // `--pg-dir` last, and so above even the file: the Python resolved
         // `args.pg_dir or args.default_dir` in `main`, after the config merge
@@ -962,17 +1008,26 @@ impl Settings {
 
         // Env last, and only to fill a gap: an explicitly configured value
         // beats the environment, so a unit file's EnvironmentFile cannot
-        // silently override what an operator wrote down.
+        // silently override what an operator wrote down. The UI's fills
+        // only what the environment leaves.
         if let Some(i) = s.ingest.as_mut() {
             if i.token.is_empty() {
-                if let Some(t) = &env.ingest_token {
+                if let Some(t) = env
+                    .ingest_token
+                    .as_ref()
+                    .or(ui.and_then(|u| u.ingest.token.as_ref()))
+                {
                     i.token = t.clone();
                 }
             }
         }
         if let Some(fwd) = s.forward.as_mut() {
             if fwd.api_key.is_empty() {
-                if let Some(k) = &env.forward_api_key {
+                if let Some(k) = env
+                    .forward_api_key
+                    .as_ref()
+                    .or(ui.and_then(|u| u.forward.api_key.as_ref()))
+                {
                     fwd.api_key = k.clone();
                 }
             }
@@ -989,7 +1044,7 @@ impl Settings {
 
         // Devices last: their defaults — `can_fd`, the database, the bus
         // offset — are whatever every source above settled on.
-        s.devices = s.build_devices(&parse_ifaces(sugar), file.map_or(&[][..], |f| &f.device))?;
+        s.devices = s.build_devices(&parse_ifaces(sugar), tables)?;
 
         if cli.test_pattern_enable && s.test_pattern.is_none() {
             warnings.push(Warning::TestPatternDisarmedByFile);
@@ -1027,6 +1082,14 @@ impl Settings {
             self.log_level = parse_log_level(v)?;
         }
         over(&mut self.stats_interval, f.logging.stats_interval);
+
+        // `enable = false` turns off what the UI turned on, never a flag.
+        if f.ingest.enable == Some(false) && !cli.given("ingest_enable") {
+            self.ingest = None;
+        }
+        if f.forward.enable == Some(false) && !cli.given("forward_enable") {
+            self.forward = None;
+        }
 
         // A section turns its listener on, but its other keys apply whether or
         // not it did — so a file can carry settings for a listener the command
@@ -1389,12 +1452,11 @@ fn parse_log_level(s: &str) -> Result<LogLevel, SettingsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     fn cli(args: &[&str]) -> Cli {
         let mut v = vec!["wiretap-server"];
         v.extend_from_slice(args);
-        Cli::parse_from(v)
+        Cli::parse_args(v)
     }
 
     /// A host called `bench`, and nothing else set.
@@ -1407,7 +1469,7 @@ mod tests {
 
     fn resolve(args: &[&str], toml: Option<&str>) -> Result<Resolved, SettingsError> {
         let parsed = toml.map(|t| FileConfig::parse(t).expect("test config parses"));
-        Settings::resolve(&cli(args), parsed.as_ref(), &env())
+        Settings::resolve(&cli(args), parsed.as_ref(), None, &env())
     }
 
     /// The CAN interfaces, in bus order.
@@ -1584,13 +1646,13 @@ mod tests {
             forward_api_key: Some(Secret::new("from-env")),
             ..env()
         };
-        let r = Settings::resolve(&cli(&["--forward-enable"]), None, &env).unwrap();
+        let r = Settings::resolve(&cli(&["--forward-enable"]), None, None, &env).unwrap();
         assert_eq!(r.settings.forward.unwrap().api_key.expose(), "from-env");
 
         // An explicit value wins: an EnvironmentFile must not quietly replace
         // what an operator wrote in the config.
         let f = FileConfig::parse("[forward]\nenable = true\napi_key = \"from-file\"\n").unwrap();
-        let r = Settings::resolve(&cli(&[]), Some(&f), &env).unwrap();
+        let r = Settings::resolve(&cli(&[]), Some(&f), None, &env).unwrap();
         assert_eq!(r.settings.forward.unwrap().api_key.expose(), "from-file");
     }
 
@@ -1738,6 +1800,7 @@ mod tests {
         let r = Settings::resolve(
             &cli(&["--pg-cache-path", "/from/flag.db"]),
             Some(&file),
+            None,
             &env,
         )
         .unwrap();
@@ -1748,7 +1811,7 @@ mod tests {
 
         // An empty value is not a path: it means "wherever the default is".
         let file = FileConfig::parse("[forward]\nenable = true\ncache_path = \"\"\n").unwrap();
-        let r = Settings::resolve(&cli(&[]), Some(&file), &env).unwrap();
+        let r = Settings::resolve(&cli(&[]), Some(&file), None, &env).unwrap();
         assert_eq!(
             r.settings.forward.unwrap().batching.cache_path,
             Path::new("/var/lib/wiretap-server/cache.db")
@@ -1904,9 +1967,9 @@ mod tests {
             r.settings.test_pattern.is_none(),
             "a file that disarms beats a flag that arms"
         );
-        // The packaged config ships `enable = false` under three sections that
-        // look identical, and this is the only one where it beats the flag. A
-        // silently ineffective flag is the trap; the warning is the way out.
+        // `enable = false` reads the same in three sections, and this is the
+        // only one where it beats the flag. A silently ineffective flag is the
+        // trap; the warning is the way out.
         assert!(
             r.warnings.contains(&Warning::TestPatternDisarmedByFile),
             "and says so: {:?}",
@@ -1998,7 +2061,7 @@ mod tests {
              [ingest]\nenable = true\ntoken = \"also-secret\"\n",
         )
         .unwrap();
-        let r = Settings::resolve(&cli(&[]), Some(&f), &env()).unwrap();
+        let r = Settings::resolve(&cli(&[]), Some(&f), None, &env()).unwrap();
 
         let shown = r.settings.report(&Catalogues::default());
         assert!(!shown.contains("super-secret"), "{shown}");
@@ -2011,13 +2074,19 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_config_file_names_the_path() {
-        let err = load("/nonexistent/wiretap.toml").unwrap_err();
-        assert!(matches!(err, SettingsError::Io { .. }));
+    fn a_missing_config_file_is_no_file_and_an_unreadable_one_names_the_path() {
+        assert_eq!(load("/nonexistent/wiretap.toml"), Ok(None));
+        let r = Settings::resolve(&cli(&[]), None, None, &env()).unwrap();
+        assert_eq!(ifaces(&r.settings), ["can0"], "the defaults");
+
+        let dir = std::env::temp_dir();
+        let dir = dir.to_str().unwrap();
+        let err = load(dir).unwrap_err();
         assert!(
-            err.to_string().contains("/nonexistent/wiretap.toml"),
-            "{err}"
+            matches!(err, SettingsError::Io { .. }),
+            "a directory is unreadable"
         );
+        assert!(err.to_string().contains(dir), "{err}");
     }
 
     // --- devices --------------------------------------------------------
@@ -2267,7 +2336,7 @@ mod tests {
             ..env()
         };
         let file = FileConfig::parse(&format!("{SERIAL}[forward]\nenable = true\n")).unwrap();
-        let mut r = Settings::resolve(&cli(&[]), Some(&file), &by_hand).unwrap();
+        let mut r = Settings::resolve(&cli(&[]), Some(&file), None, &by_hand).unwrap();
         let path = catalogue_file("by-hand", DECLARES_0X60);
         let DeviceKind::Serial(line) = &mut r.settings.devices[0].kind else {
             panic!("a serial device");
@@ -2313,11 +2382,15 @@ mod tests {
         assert!(!r.warnings.contains(&Warning::NoCaptureSource));
     }
 
-    /// A file's device set is what it says: no `iface` key means no CAN,
-    /// even though a hand run with no file would capture `can0`.
+    /// The shipped file names no device, so a fresh install still captures
+    /// `can0`; a file that wants none says `iface = ""`.
     #[test]
-    fn a_file_without_iface_implies_no_can0() {
+    fn a_file_naming_no_device_leaves_the_default_can0() {
         let r = resolve(&[], Some("[logging]\nlevel = \"INFO\"\n")).unwrap();
+        assert_eq!(ifaces(&r.settings), ["can0"]);
+        assert_eq!(r.settings.devices[0].mode, Mode::Active);
+
+        let r = resolve(&[], Some("[server]\niface = \"\"\n")).unwrap();
         assert!(r.settings.devices.is_empty());
         assert!(r.warnings.contains(&Warning::NoCaptureSource));
 
@@ -2537,7 +2610,7 @@ mod tests {
             ..Env::default()
         };
         let file = FileConfig::parse(toml).unwrap();
-        let resolved = Settings::resolve(&cli(&[]), Some(&file), &env);
+        let resolved = Settings::resolve(&cli(&[]), Some(&file), None, &env);
         let forward = resolved.map_err(|e| e.to_string())?.settings.forward;
         Ok(forward.expect("[forward]").daemon_id)
     }
@@ -2574,7 +2647,7 @@ mod tests {
         }
         let unforwarded = Env::default();
         assert!(
-            Settings::resolve(&cli(&[]), None, &unforwarded).is_ok(),
+            Settings::resolve(&cli(&[]), None, None, &unforwarded).is_ok(),
             "nothing to name without [forward]"
         );
     }
@@ -2611,7 +2684,7 @@ mod tests {
             ..env()
         };
         let cfg = FileConfig::parse("[forward]\nenable = true\ndatabase = \"site\"\n").unwrap();
-        let f = Settings::resolve(&cli(&[]), Some(&cfg), &env)
+        let f = Settings::resolve(&cli(&[]), Some(&cfg), None, &env)
             .unwrap()
             .settings
             .forward
@@ -2675,5 +2748,117 @@ mod tests {
             .settings
             .rows(&Catalogues::default());
         assert!(rows.contains(&("devices", "(none)".to_string())));
+    }
+
+    // --- the UI's layer -------------------------------------------------
+
+    fn with_ui(
+        args: &[&str],
+        toml: Option<&str>,
+        ui: &str,
+        env: &Env,
+    ) -> Result<Resolved, SettingsError> {
+        let file = toml.map(|t| FileConfig::parse(t).expect("test config parses"));
+        let ui: UiConfig = ::toml::from_str(ui).expect("test ui.toml parses");
+        Settings::resolve(&cli(args), file.as_ref(), Some(&ui), env)
+    }
+
+    fn forward_host(r: Result<Resolved, SettingsError>) -> String {
+        r.unwrap().settings.forward.expect("forwarding").host
+    }
+
+    #[test]
+    fn the_ui_is_beneath_the_flags_and_the_file() {
+        let ui = "[forward]\nenable = true\nhost = \"ui\"\n";
+        assert_eq!(forward_host(with_ui(&[], None, ui, &env())), "ui");
+        assert_eq!(
+            forward_host(with_ui(&["--forward-host", "flag"], None, ui, &env())),
+            "flag"
+        );
+        let file = "[forward]\nhost = \"file\"\n";
+        assert_eq!(
+            forward_host(with_ui(&["--forward-host", "flag"], Some(file), ui, &env())),
+            "file",
+            "the file still beats the flag"
+        );
+        // A flag left at its default is not a flag that was given.
+        assert_eq!(
+            forward_host(with_ui(&["--forward-port", "1"], None, ui, &env())),
+            "ui"
+        );
+    }
+
+    #[test]
+    fn a_files_enable_false_turns_off_what_the_ui_turned_on_but_not_a_flag() {
+        let ui = "[forward]\nenable = true\n";
+        let off = "[forward]\nenable = false\n";
+        assert!(with_ui(&[], Some(off), ui, &env())
+            .unwrap()
+            .settings
+            .forward
+            .is_none());
+        assert!(with_ui(&["--forward-enable"], Some(off), ui, &env())
+            .unwrap()
+            .settings
+            .forward
+            .is_some());
+    }
+
+    #[test]
+    fn the_environment_beats_the_ui_for_a_secret() {
+        let ui = "[forward]\nenable = true\napi_key = \"from-ui\"\n";
+        let key = |args: &[&str], env: &Env| {
+            with_ui(args, None, ui, env)
+                .unwrap()
+                .settings
+                .forward
+                .unwrap()
+                .api_key
+                .expose()
+                .to_owned()
+        };
+        assert_eq!(key(&[], &env()), "from-ui");
+        let from_env = Env {
+            forward_api_key: Some(Secret::new("from-env")),
+            ..env()
+        };
+        assert_eq!(key(&[], &from_env), "from-env");
+        assert_eq!(
+            key(&["--forward-api-key", "from-flag"], &from_env),
+            "from-flag"
+        );
+    }
+
+    #[test]
+    fn the_ui_names_the_devices_only_when_nothing_above_it_does() {
+        let ui = "[[devices]]\ninterface = \"can1\"\nfd = true\n";
+        let r = with_ui(&[], None, ui, &env()).unwrap();
+        assert_eq!(ifaces(&r.settings), ["can1"]);
+        assert_eq!(r.settings.devices[0].mode, Mode::Passive, "never active");
+        assert!(r.settings.devices[0].fd());
+
+        let r = with_ui(&["-i", "can2"], None, ui, &env()).unwrap();
+        assert_eq!(ifaces(&r.settings), ["can2"], "a flag pins the set");
+        let r = with_ui(&[], Some("[server]\niface = \"can3\"\n"), ui, &env()).unwrap();
+        assert_eq!(ifaces(&r.settings), ["can3"], "so does the file");
+
+        let r = with_ui(
+            &["--ingest-enable", "--forward-enable"],
+            None,
+            "devices = []\n",
+            &env(),
+        )
+        .unwrap();
+        assert!(r.settings.devices.is_empty(), "an empty list is none");
+    }
+
+    #[test]
+    fn a_ui_device_must_be_a_can_interface() {
+        let ui = "[[devices]]\ninterface = \"/dev/ttyUSB0\"\n";
+        let err = with_ui(&[], None, ui, &env()).unwrap_err();
+        assert!(
+            matches!(&err, SettingsError::Device { index: 0, what } if what.contains("not a CAN interface")),
+            "{err}"
+        );
     }
 }

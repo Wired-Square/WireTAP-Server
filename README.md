@@ -38,7 +38,9 @@ wiretap-server --iface can0,can1 \
 ```
 
 Or put it in a file — `packaging/wiretap-server.toml` is the annotated reference,
-installed to `/etc/wiretap-server/` by the package:
+installed to `/etc/wiretap-server/` by the package with every key commented
+out. The file is optional: a `-C` naming one that does not exist runs on the
+defaults, which capture `can0` unless a file, `-i` or the UI names devices.
 
 ```toml
 [server]
@@ -56,7 +58,40 @@ wiretap-server -C /etc/wiretap-server/wiretap-server.toml
 **Values in the config file override command-line flags**, not the other way
 round. That is deliberate — deployed units pass both — and
 `wiretap-server --check-config` prints what a given combination actually resolves
-to, so it never has to be argued about.
+to, and where each setting a UI may change comes from, so it never has to be
+argued about.
+
+### Settings from a UI
+
+A UI on the same host changes settings through the daemon's control socket,
+`$RUNTIME_DIRECTORY/control.sock` (`/run/wiretap-server/control.sock` under the
+packaged unit) or `--control-socket`. The daemon writes them to
+`$STATE_DIRECTORY/ui.toml` (or `--ui-config`), **beneath** the config file and
+the flags: a setting either of those makes, or an environment variable's secret,
+is pinned, and the UI shows where. Only the devices (CAN, and always passive),
+`[forward]`'s gateway, key, database, enable and batching, `[ingest]`'s enable,
+port and token, and the log level can be set this way. Nothing that transmits,
+moves the cache or names the daemon can.
+
+- `GET /v1/status`: the version, uptime, each device's state and frame count,
+  the forward link per database (connected, last acknowledgement, frames in the
+  disk cache), and the ingest and GVRET clients.
+- `GET /v1/settings`: each such setting's value, source (`default`, `ui`,
+  `file`, `env` or `flag`), whether it is pinned and where. A secret is shown
+  only as set or unset.
+- `PUT /v1/settings`: a JSON object of keys as `GET` names them, `null` to
+  clear one. A pinned key is a 409 and any other key a 400. The change is
+  resolved as a start would resolve it, and one that would stop the start is a
+  422 that writes nothing. Otherwise the daemon writes `ui.toml`, answers 202,
+  shuts down as on `SIGTERM` and executes itself again on the same PID, so no
+  supervisor's restart delay applies. If that fails it exits 75, for systemd
+  (or a container's restart policy) to start it on the change.
+
+**The socket has no authentication of its own.** It is created 0660 in the
+daemon's group, in a directory only that group can enter: anyone in the group
+can change these settings. A `ui.toml` that cannot be read, or that would stop
+the daemon starting, is ignored with a warning rather than keeping the daemon
+down, since the socket is the only way to repair it.
 
 ### CAN interfaces
 

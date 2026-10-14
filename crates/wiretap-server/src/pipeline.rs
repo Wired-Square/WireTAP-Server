@@ -16,11 +16,11 @@
 use std::io;
 #[cfg(target_os = "linux")]
 use std::io::Write as _;
-#[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 
+use tokio::sync::Notify;
 #[cfg(target_os = "linux")]
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
@@ -38,6 +38,7 @@ use crate::archive::Archives;
 use crate::catalogues::Catalogues;
 #[cfg(target_os = "linux")]
 use crate::console;
+use crate::control::Control;
 #[cfg(target_os = "linux")]
 use crate::gvret;
 use crate::ingest;
@@ -46,6 +47,9 @@ use crate::settings::Device;
 use crate::settings::{Mode, Settings, TestPattern};
 #[cfg(target_os = "linux")]
 use crate::source::{bus_count, index_for_bus, raw::RawTap, serial_tap, socketcan, Transmit};
+#[cfg(target_os = "linux")]
+use crate::status::DeviceStatus;
+use crate::status::Live;
 #[cfg(target_os = "linux")]
 use crate::testpattern;
 
@@ -156,10 +160,40 @@ impl std::fmt::Display for RunError {
     }
 }
 
-/// Start whatever this configuration asks for, and run until a signal.
-pub async fn run(settings: &Settings) -> Result<(), RunError> {
+/// Why [`run`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    Signal,
+    /// The control socket wrote new settings, which take effect when the
+    /// daemon starts again.
+    ToApply,
+}
+
+/// What would stop a start with these settings, short of opening anything.
+pub fn check(settings: &Settings) -> Result<(), RunError> {
     if settings.devices.is_empty() && settings.ingest.is_none() {
         return Err(RunError::NothingToDo);
+    }
+    if settings.ingest.is_some() && settings.forward.is_none() {
+        return Err(RunError::IngestNeedsForward);
+    }
+    if cfg!(not(target_os = "linux")) && !settings.devices.is_empty() {
+        return Err(RunError::NoDeviceCapture);
+    }
+    Ok(())
+}
+
+/// Start whatever this configuration asks for, and run until a signal or the
+/// control socket stops it.
+pub async fn run(settings: &Settings, control: Option<Control>) -> Result<Stopped, RunError> {
+    check(settings)?;
+    let live = Arc::new(Live::new(settings));
+    let applied = Arc::new(Notify::new());
+    if let Some(control) = control {
+        let server = control
+            .bind()
+            .map_err(|(addr, err)| RunError::Bind { addr, err })?;
+        tokio::spawn(server.serve(settings.clone(), Arc::clone(&live), Arc::clone(&applied)));
     }
 
     // The archives first: every device and every pushing device feeds one,
@@ -172,19 +206,20 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
             path: path.display().to_string(),
             err: err.to_string(),
         })?;
+    let _ = live.archives.set(archives.counters());
 
     let mut readers = JoinSet::new();
     if settings.devices.is_empty() {
         // No local hardware, so no sockets, no lines and no GVRET listener.
         info!("No devices configured; running ingest-only");
     } else {
-        start_devices(settings, &archives, &catalogues, &mut readers).await?;
+        start_devices(settings, &live, &archives, &catalogues, &mut readers).await?;
     }
 
     if let Some(ingest) = &settings.ingest {
-        let Some(archive) = archives.handle(settings.default_database()) else {
-            return Err(RunError::IngestNeedsForward);
-        };
+        let archive = archives
+            .handle(settings.default_database())
+            .expect("check refuses ingest without [forward]");
         let relays_raw_serial = settings.carries_raw_serial(settings.default_database());
         let server = ingest::Server::bind(ingest, archive, relays_raw_serial)
             .await
@@ -192,15 +227,19 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
                 addr: format!("{}:{}", ingest.host, ingest.port),
                 err,
             })?;
+        let _ = live.ingest_clients.set(server.clients());
         tokio::spawn(server.run());
     }
 
-    shutdown().await;
+    let stopped = tokio::select! {
+        () = shutdown() => Stopped::Signal,
+        () = applied.notified() => Stopped::ToApply,
+    };
     info!("Shutting down");
 
     // `TimeoutStopSec` in the unit is what gives the flush room.
     archives.shutdown(readers).await;
-    Ok(())
+    Ok(stopped)
 }
 
 #[cfg(target_os = "linux")]
@@ -210,13 +249,14 @@ pub async fn run(settings: &Settings) -> Result<(), RunError> {
 /// it and the console echo takes everything.
 async fn start_devices(
     settings: &Settings,
+    live: &Live,
     archives: &Archives,
     catalogues: &Catalogues,
     readers: &mut JoinSet<()>,
 ) -> Result<(), RunError> {
     let (frames, _) = broadcast::channel(FRAME_BACKLOG);
     if !settings.can_devices().is_empty() {
-        start_capture(settings, archives, frames.clone(), readers).await?;
+        start_capture(settings, live, archives, frames.clone(), readers).await?;
     }
     for (d, s) in settings.serial_devices() {
         let task = serial_tap::open(&d.interface, s).map_err(|err| RunError::OpenSerial {
@@ -236,6 +276,7 @@ async fn start_devices(
         let frames = frames.clone();
         readers.spawn(serial_tap::drain(
             d.interface.clone(),
+            live.device(&d.interface),
             task,
             catalogues
                 .subscribe(&d.interface)
@@ -261,6 +302,7 @@ async fn start_devices(
 #[cfg(not(target_os = "linux"))]
 async fn start_devices(
     _settings: &Settings,
+    _live: &Live,
     _archives: &Archives,
     _catalogues: &Catalogues,
     _readers: &mut JoinSet<()>,
@@ -284,6 +326,7 @@ struct Opened {
 /// listening.
 async fn start_capture(
     settings: &Settings,
+    live: &Live,
     archives: &Archives,
     frames: broadcast::Sender<Arc<Sample>>,
     readers: &mut JoinSet<()>,
@@ -325,6 +368,7 @@ async fn start_capture(
         addr: format!("{}:{}", settings.host, settings.port),
         err,
     })?;
+    let _ = live.gvret_clients.set(listener.clients());
 
     info!(
         "Listening on {}:{}  mode={}  ifaces={}  rates={}{}",
@@ -346,7 +390,7 @@ async fn start_capture(
 
     for (i, (o, task)) in opened.iter().zip(tasks).enumerate() {
         readers.spawn(read_loop(
-            task,
+            (task, live.device(&o.device.interface)),
             (buses.clone(), i),
             o.device.interface.clone(),
             o.device.bus,
@@ -429,7 +473,7 @@ fn join<T: std::fmt::Display>(parts: impl Iterator<Item = T>) -> String {
 /// the first read after it or a loss: an adapter's interface can be bound
 /// before `wiretap-can@` has set its bitrate.
 async fn read_loop(
-    mut task: CanTask,
+    (mut task, status): (CanTask, Arc<DeviceStatus>),
     (buses, index): (Arc<gvret::BusInfo>, usize),
     iface: String,
     bus: SourceId,
@@ -445,6 +489,7 @@ async fn read_loop(
     while let Some(event) = task.next_event().await {
         match event {
             CanEvent::Connected(_) => {
+                status.up();
                 reread_rate();
                 rate_stale = true;
                 if std::mem::take(&mut reopening) {
@@ -454,6 +499,8 @@ async fn read_loop(
                 opened = true;
             }
             CanEvent::Read(reads) => {
+                status.up();
+                status.read(reads.len() as u64);
                 if std::mem::take(&mut lost) {
                     info!("{iface}: reading again");
                 }
@@ -481,6 +528,7 @@ async fn read_loop(
                     1 => warn!("waiting for {iface}: {error}. Check `ip link show {iface}`"),
                     _ => {}
                 }
+                status.lost(opened);
                 // A read error keeps the socket, so nothing is reopened.
                 reopening = !matches!(error, CanError::Read(_));
                 lost = true;
@@ -593,7 +641,7 @@ mod tests {
     fn test_pattern_log(args: &[&str], toml: Option<&str>) -> Vec<String> {
         let cli = crate::cli::Cli::parse_from(["wiretap-server"].iter().chain(args));
         let file = toml.map(|t| wiretap_model::config::FileConfig::parse(t).unwrap());
-        let settings = Settings::resolve(&cli, file.as_ref(), &Default::default())
+        let settings = Settings::resolve(&cli, file.as_ref(), None, &Default::default())
             .unwrap()
             .settings;
         test_pattern_warnings(&settings, settings.test_pattern.as_ref().unwrap())

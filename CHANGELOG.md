@@ -27,9 +27,33 @@ All notable changes to this project are documented here. Entries go under
   `GET /v1/whoami` and, behind the console, asks for no key. The access log
   names a console user as `user=` where it names a key as `key=`. The TCP
   listeners, their base path and their keys are unchanged.
+- **The capture daemon takes settings from a UI, beneath the admin's.** A
+  UI's settings live in `$STATE_DIRECTORY/ui.toml` (or `--ui-config`), below
+  the config file and the flags, and an environment variable's secret beats
+  them too. Only the devices (CAN, always passive), the gateway and its key,
+  database and batching, the ingest listener's enable, port and token, and the
+  log level can be set there. `--check-config` lists each of these with its
+  source (`default`, `ui`, `file`, `env` or `flag`). A `ui.toml` that cannot
+  be read, or that would stop the start, is ignored with a warning.
+- **A control socket for that UI.** HTTP/JSON on
+  `$RUNTIME_DIRECTORY/control.sock` (or `--control-socket`), 0660 in the
+  daemon's group, with no other authentication. `GET /v1/status` reports the
+  devices, the forward link, and the ingest and GVRET clients;
+  `GET /v1/settings` each setting a UI may change, its source and whether it is
+  pinned, never a secret; `PUT /v1/settings` validates a change as a start
+  would, writes `ui.toml`, shuts down as on `SIGTERM` and executes the daemon
+  again on the same PID, or exits 75 for the supervisor if it cannot. The
+  packaged unit adds `RuntimeDirectory=` and `SuccessExitStatus=75`.
 
 ### Changed
 
+- **The capture daemon's config file is optional, and the shipped one sets
+  nothing.** A `-C` naming a missing file starts on the defaults and says so;
+  an unreadable or invalid one still stops the start. With no device named by
+  the file, `-i` or the UI, `can0` is captured, where a file naming none used
+  to capture nothing: a file that wants no CAN says `iface = ""`. The
+  installed `wiretap-server.toml` has every key commented out, so a fresh
+  install pins nothing. An existing `/etc` file is left as it is.
 - **The gateway image's health check asks `/healthz`** under
   `WIRETAP_BASE_PATH`, so the container is unhealthy while Postgres is
   unreachable. It asked `/v1/health` at the root, which answers 200 regardless.

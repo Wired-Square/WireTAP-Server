@@ -2679,12 +2679,17 @@ name = "wiretap-server"
 version = "0.1.10"
 dependencies = [
  "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "rusqlite",
+ "serde",
  "serde_json",
  "socketcan",
  "subtle",
  "tokio",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "wiretap-build-id",

@@ -159,6 +159,25 @@ chown -R "$USER:$USER" "$STATE_DIR" \
   on a cache it cannot write, and will say so."
 
 # --- the configuration file ----------------------------------------------
+# The reference each earlier release shipped, by md5. Each set iface = "can0" and
+# enable = false under [forward], [ingest] and [test_pattern], which a web UI
+# cannot change. An unedited copy is nobody's configuration, so it becomes this
+# release's reference, which sets nothing - except [test_pattern], carried over
+# because it alone disarms a --test-pattern-enable flag a drop-in may pass.
+OLD_REFERENCES="fc4529434cc9e01d63038a993c1f5f86 f0383e638a88630e4b9572017c7fcef7
+769a1aa95264351c206062835f6aa767 052d186b8d5edc0e48a59399cd68ab88
+99970e4874789bc47d97e1589af9b478 34da6fadd450e3139b224766e593a41b
+48d6a7731ff8248fd23ef4d117db0c7b"
+if [ -f "$CONFIG_TOML" ] \
+   && echo $OLD_REFERENCES | grep -qw "$(md5sum < "$CONFIG_TOML" | cut -d' ' -f1)"; then
+    sed '/^\[test_pattern\]$/a\
+# Carried over from the earlier release'"'"'s reference this file replaced.\
+enable = false' "$REFERENCE_TOML" > "$CONFIG_TOML.dpkg-new"
+    chmod 0644 "$CONFIG_TOML.dpkg-new"
+    mv "$CONFIG_TOML.dpkg-new" "$CONFIG_TOML"
+    say "replaced $CONFIG_TOML, an earlier release's unedited reference, with this one's"
+fi
+
 # The unit names this file explicitly, so it is how the daemon is configured.
 #
 # Not a dpkg conffile: a conffile prompts on upgrade, and the answer to "keep
@@ -309,7 +328,8 @@ elif [ "$displaced" -eq 1 ]; then
 else
     say "installed and enabled, not started."
     if [ "$wrote_config" -eq 1 ]; then
-        say "  Edit $CONFIG_TOML - at least [server] iface and [forward] - then:"
+        say "  It captures can0 and archives nowhere until [forward] is set in"
+        say "  $CONFIG_TOML. Then:"
     fi
     how_to_start
 fi

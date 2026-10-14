@@ -165,11 +165,11 @@ fn settings(iface: &str, port: u16, test_pattern: Option<TestPattern>) -> Settin
 async fn server_listening(
     settings: Settings,
 ) -> (
-    tokio::task::JoinHandle<Result<(), pipeline::RunError>>,
+    tokio::task::JoinHandle<Result<pipeline::Stopped, pipeline::RunError>>,
     TcpStream,
 ) {
     let port = settings.port;
-    let mut server = tokio::spawn(async move { pipeline::run(&settings).await });
+    let mut server = tokio::spawn(async move { pipeline::run(&settings, None).await });
     let mut client = tokio::select! {
         stopped = &mut server => panic!("the server stopped before listening: {stopped:?}"),
         client = connect(port) => client,
@@ -299,7 +299,7 @@ async fn the_pipeline_bridges_the_bus_to_a_gvret_client_and_back() {
     // runtime drops it. The handle is held rather than detached because every
     // way this can fail to start — vcan0 down, the port taken — would
     // otherwise surface as `connect` timing out, which names the wrong thing.
-    let mut server = tokio::spawn(async move { pipeline::run(&settings).await });
+    let mut server = tokio::spawn(async move { pipeline::run(&settings, None).await });
     let mut client = tokio::select! {
         stopped = &mut server => panic!("the server stopped before listening: {stopped:?}"),
         client = connect(port) => client,

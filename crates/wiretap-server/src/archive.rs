@@ -140,6 +140,12 @@ pub struct Counters {
     pub dropped: AtomicU64,
     pub cached: AtomicU64,
     pub cache_recovered: AtomicU64,
+    /// Whether the sink is connected, and when it last acknowledged a batch,
+    /// in Unix milliseconds; 0 is never.
+    pub connected: AtomicBool,
+    pub last_ack_ms: AtomicU64,
+    /// Frames waiting in the disk cache, as of the worker's last pass.
+    pub cache_pending: AtomicU64,
 }
 
 /// Bump a counter, returning what it held before. Relaxed throughout: these
@@ -414,6 +420,14 @@ impl Archives {
         Ok(Self(running))
     }
 
+    /// Each pipeline's database and its counters.
+    pub fn counters(&self) -> Vec<(String, Arc<Counters>)> {
+        self.0
+            .iter()
+            .map(|(db, r)| (db.clone(), r.frames.counters()))
+            .collect()
+    }
+
     /// The handle for a database, or `None` when nothing archives.
     pub fn handle(&self, database: &str) -> Option<Archive> {
         self.0
@@ -489,6 +503,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     pub async fn run(mut self) {
         let mut backoff = BACKOFF_START;
         loop {
+            self.report();
             self.maybe_log_stats();
             self.spill_if_queue_filling();
 
@@ -541,7 +556,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
             }
 
             if let Err(e) = self.sink.write_batch(&batch).await {
-                add(&self.counters.written, e.delivered as u64);
+                self.written(e.delivered);
                 if !self
                     .fail(e.cause, batch.split_off(e.delivered), &mut backoff)
                     .await
@@ -550,10 +565,29 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                 }
                 continue;
             }
-            add(&self.counters.written, batch.len() as u64);
+            self.written(batch.len());
         }
 
         self.shutdown_flush().await;
+    }
+
+    /// What the control socket shows. `count` is a field read.
+    fn report(&mut self) {
+        let c = &self.counters;
+        c.connected.store(self.connected, Ordering::Relaxed);
+        c.cache_pending
+            .store(self.cache.count().unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// The sink has stored `n` frames.
+    fn written(&self, n: usize) {
+        add(&self.counters.written, n as u64);
+        if n > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            self.counters.last_ack_ms.store(now, Ordering::Relaxed);
+        }
     }
 
     /// The periodic health line, from inside the loop rather than on a timer of
@@ -719,9 +753,8 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
             // Saying so is better than silently re-sending on the next pass.
             error!("disk cache delete error: {e}{}", self.tag);
         }
-        let n = delivered as u64;
-        add(&self.counters.written, n);
-        add(&self.counters.cache_recovered, n);
+        self.written(delivered);
+        add(&self.counters.cache_recovered, delivered as u64);
         written.map_err(|e| e.cause)?;
         debug!(
             "batch committed, cache_recovered={}{}",
