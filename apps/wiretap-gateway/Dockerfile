@@ -34,14 +34,18 @@ RUN set -eu; \
 FROM alpine:3.23.5
 RUN --mount=type=bind,from=postgres,source=/rundeps,target=/rundeps \
     apk add --no-cache $(cat /rundeps) icu-data-full nss_wrapper tzdata \
-    && install -d -o 10001 -g 0 -m 0770 /data /run/wiretap
+    && install -d -o 10001 -g 0 -m 0770 /data /run/wiretap /run/appliance
 COPY --from=postgres /usr/local /usr/local
 COPY --from=admin-ui /ui/dist /usr/share/wiretap-admin
 COPY wiretap-backend entrypoint.sh /usr/local/bin/
 
+# The console mounts the app's socket directory at /run/appliance.
 ENV LANG=en_US.utf8 \
     WIRETAP_PG_HOST=/run/wiretap \
-    WIRETAP_PG_USER=postgres
+    WIRETAP_PG_USER=postgres \
+    WIRETAP_APP_SOCKET=/run/appliance/app.sock \
+    WIRETAP_APP_BASE_PATH=/apps/wiretap-gateway \
+    WIRETAP_CONSOLE_UID=0
 
 ARG VERSION
 ARG MANIFEST
@@ -54,6 +58,7 @@ LABEL com.wiredsquare.appliance.manifest="${MANIFEST}" \
 VOLUME /data
 EXPOSE 8423 9323
 USER 10001:0
+# For plain Docker; ApplianceOS probes healthz over the app socket instead.
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=120s --start-interval=2s \
     CMD p="${WIRETAP_BASE_PATH#/}"; wget -q -O /dev/null "http://127.0.0.1:8423/${p:+${p%/}/}healthz" || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -32,7 +32,10 @@ Everything persistent is under `/data`, the image's only volume:
 | `/data/secrets/postgres-password` | generated on first start, mode 0600 |
 | `/data/secrets/admin-key` | generated on first start, mode 0600 |
 
-The first start logs where the admin key is, never the key. Read it with
+The first start logs where the admin key is, never the key. Opened from the
+ApplianceOS console, the admin UI needs no key: the console says who you are,
+and a console admin is the gateway's admin. Make keys for the desktop and the
+capture daemons in its Keys tab. Outside ApplianceOS, read the admin key with
 `docker exec <container> cat /data/secrets/admin-key`. Setting
 `WIRETAP_ADMIN_KEY` on the container uses that key instead.
 
@@ -47,8 +50,16 @@ Unix socket in `/run/wiretap`, never on TCP. On `SIGTERM` the gateway stops
 first, then Postgres with a fast shutdown. If either exits on its own, the
 other is stopped and the container exits 1, so a supervisor sees it down.
 
-The `HEALTHCHECK` asks the gateway's `/healthz`, under `WIRETAP_BASE_PATH`,
-which answers 200 only while Postgres does.
+The gateway listens on TCP 8423 (HTTP) and 9323 (ingest) at the root, for the
+desktop and the capture daemons, and on `/run/appliance/app.sock` under
+`/apps/wiretap-gateway`, for the console's proxy. The manifest declares
+`sockets.app`, so ApplianceOS mounts the app's socket directory there and
+probes `/apps/wiretap-gateway/healthz` over it. The image sets
+`WIRETAP_APP_SOCKET`, `WIRETAP_APP_BASE_PATH` and `WIRETAP_CONSOLE_UID=0`, the
+uid the console has inside the container.
+
+The `HEALTHCHECK`, for plain Docker, asks the gateway's `/healthz` on 8423,
+under `WIRETAP_BASE_PATH`, which answers 200 only while Postgres does.
 
 Postgres runs with these settings over the defaults:
 

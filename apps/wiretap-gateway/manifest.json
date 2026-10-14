@@ -2,6 +2,7 @@
   "schema": 1,
   "name": "wiretap-gateway",
   "arches": ["arm64", "amd64"],
+  "sockets": { "app": true },
   "network": "bridge",
   "volumes": [{ "name": "data", "at": "/data" }],
   "listeners": [
