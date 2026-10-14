@@ -963,6 +963,8 @@ pub(crate) mod tests {
             ingest_keepalive_secs: 30.0,
             ingest_max_batch_frames: 256,
             log_buffer: 0,
+            base_path: String::new(),
+            admin_dir: "/nonexistent".into(),
         }
     }
 

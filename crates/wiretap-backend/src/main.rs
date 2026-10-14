@@ -127,7 +127,11 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(&config.http_listen)
         .await
         .map_err(|e| format!("http bind {}: {e}", config.http_listen))?;
-    tracing::info!("http listening on {}", config.http_listen);
+    tracing::info!(
+        "http listening on {}{}",
+        config.http_listen,
+        config.base_path
+    );
 
     // Every other capture database, swept in the background — after the bind
     // above, so the admin UI and the healthcheck can answer while it runs and
@@ -139,7 +143,8 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
     // `with_connect_info` so the access log can name the peer.
     axum::serve(
         listener,
-        http::router(app_state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        http::router(app_state, &config)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await
     .map_err(|e| format!("http server: {e}"))

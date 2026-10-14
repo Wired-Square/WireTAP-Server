@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **The gateway serves under a base path.** `WIRETAP_BASE_PATH` (e.g.
+  `/apps/wiretap-gateway`) moves every HTTP route under it, the admin UI
+  included; unset, nothing moves. The admin UI now finds the API from its own
+  address. `GET /healthz` answers 200 only while Postgres is reachable.
+
 ### Changed
 
 - **A migration's progress is easier to read.** Time taken shows as `2h 33m

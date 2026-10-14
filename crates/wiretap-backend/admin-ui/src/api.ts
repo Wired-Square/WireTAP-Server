@@ -15,6 +15,13 @@ export function clearKey() {
   sessionStorage.removeItem(KEY_STORAGE);
 }
 
+/** The gateway's base path: everything before the SPA's own `/admin/`. */
+const API_BASE = (() => {
+  const path = location.pathname;
+  const admin = path.lastIndexOf("/admin/");
+  return admin < 0 ? "" : path.slice(0, admin);
+})();
+
 export async function api<T>(
   path: string,
   options: { method?: string; body?: unknown } = {},
@@ -23,7 +30,7 @@ export async function api<T>(
   const key = getKey();
   if (key) headers["Authorization"] = `Bearer ${key}`;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
-  const resp = await fetch(path, {
+  const resp = await fetch(API_BASE + path, {
     method: options.method ?? "GET",
     headers,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,

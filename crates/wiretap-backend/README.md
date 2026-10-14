@@ -200,10 +200,15 @@ for, and `auto_migrate`.
 | `WIRETAP_DEFAULT_DB` | `wiretap` | Default capture database |
 | `WIRETAP_AUTO_CREATE` | `true` | Allow ingest/import to auto-create databases |
 | `WIRETAP_AUTO_MIGRATE` | `false` | Off, a capture database behind the schema waits for **Migrate now**, refusing reads and buffering ingest; on, every one is migrated on start. A new database is initialised either way |
+| `WIRETAP_BASE_PATH` | — | Serve every HTTP route under this prefix, e.g. `/apps/wiretap-gateway` gives `/apps/wiretap-gateway/v1/…` and `/apps/wiretap-gateway/admin/`; anything outside it is a 404. Plain path segments only; empty serves at the root |
 | `RUST_LOG` | `wiretap_backend=info` | Log filter |
 
-Full list (listen addresses, ingest keepalive/batch caps, log buffer size) is in
-[src/config.rs](src/config.rs).
+Full list (listen addresses, ingest keepalive/batch caps, log buffer size, the
+admin UI's directory) is in [src/config.rs](src/config.rs).
+
+`GET /healthz` (under the base path) answers 200 while Postgres is reachable
+and 503 when it is not, for a supervisor's probe. `/v1/health` answers 200
+either way and says which.
 
 The Logging tab shows the newest `WIRETAP_LOG_BUFFER` records (2000) from
 memory; stdout remains the durable log.

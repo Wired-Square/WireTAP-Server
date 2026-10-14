@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, patch, post, put, MethodRouter};
 use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt;
@@ -24,6 +24,7 @@ use wiretap_protocol::import::{parse_header, parse_record, BODY_HEADER};
 use wiretap_protocol::ingest::RecordKind;
 
 use crate::catalogs::AssignError;
+use crate::config::Config;
 use crate::db;
 use crate::events;
 use crate::ingest::writer::FrameRow;
@@ -75,7 +76,7 @@ fn unavailable(msg: String) -> ApiError {
     ApiError(StatusCode::SERVICE_UNAVAILABLE, msg)
 }
 
-pub fn router(state: St) -> Router {
+pub fn router(state: St, config: &Config) -> Router {
     let authed = Router::new()
         // databases
         .route(
@@ -133,23 +134,34 @@ pub fn router(state: St) -> Router {
     // Admin SPA: static files with index.html fallback (client-side tabs).
     // Auth happens in the browser (the SPA stores an admin key and calls the
     // /v1/admin endpoints) — the static assets themselves are not secret.
-    let admin_dir = std::path::PathBuf::from(
-        std::env::var("WIRETAP_ADMIN_DIR").unwrap_or_else(|_| "/usr/share/wiretap-admin".into()),
-    );
-    let admin = tower_http::services::ServeDir::new(&admin_dir).fallback(
-        tower_http::services::ServeFile::new(admin_dir.join("index.html")),
-    );
+    let admin_dir = &config.admin_dir;
+    // Directories fall back to index.html rather than redirect: ServeDir builds
+    // its redirect from the path with the prefix already stripped.
+    let admin = tower_http::services::ServeDir::new(admin_dir)
+        .append_index_html_on_directories(false)
+        .fallback(tower_http::services::ServeFile::new(
+            admin_dir.join("index.html"),
+        ));
 
-    // The bundle is polled too: every SPA load pulls it.
+    // The bundle is polled too: every SPA load pulls it. The SPA loads its
+    // assets relative to `admin/`, so `admin` itself redirects there.
     let admin = Router::new()
-        .nest_service("/admin", admin)
+        .route("/admin", get(|| async { Redirect::permanent("admin/") }))
+        .nest_service("/admin/", admin)
         .layer(middleware::from_fn(mark_routine));
 
-    Router::new()
+    let routes = Router::new()
+        .route("/healthz", polled(get(healthz)))
         .route("/v1/health", polled(get(health)))
         .merge(authed)
-        .merge(admin)
-        // Outermost, so it wraps `auth_mw` and sees the 401s too.
+        .merge(admin);
+    let routes = if config.base_path.is_empty() {
+        routes
+    } else {
+        Router::new().nest(&config.base_path, routes)
+    };
+    // Outermost, so it wraps `auth_mw` and sees the 401s too.
+    routes
         .layer(middleware::from_fn(access_log_mw))
         .with_state(state)
 }
@@ -271,6 +283,14 @@ async fn health(State(state): State<St>) -> Json<Health> {
         db_ok,
         schema: schema_consensus(&state.dbs.schema_states().await),
     })
+}
+
+/// For a supervisor's probe: 2xx only while Postgres answers.
+async fn healthz(State(state): State<St>) -> StatusCode {
+    match state.dbs.connect_raw("postgres").await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 /// One word for how the whole deployment stands: the shared version when every
@@ -1215,6 +1235,10 @@ mod tests {
 
     /// The router over `dbs`, taking the key `bootstrap` as admin.
     async fn gateway(dbs: db::Databases) -> std::net::SocketAddr {
+        gateway_with(dbs, &db::tests::config_at(0, false)).await
+    }
+
+    async fn gateway_with(dbs: db::Databases, config: &Config) -> std::net::SocketAddr {
         let sessions = crate::ingest::Sessions::default();
         let state = Arc::new(AppState {
             keys: crate::keys::KeyStore::new(dbs.clone(), Some("bootstrap")),
@@ -1225,7 +1249,8 @@ mod tests {
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let app =
+            router(state, config).into_make_service_with_connect_info::<std::net::SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, app).await });
         addr
     }
@@ -1271,6 +1296,19 @@ mod tests {
         content_type: &str,
         body: &[u8],
     ) -> (u16, serde_json::Value) {
+        let (status, _, body) = exchange(at, method, path, key, content_type, body).await;
+        (status, serde_json::from_str(&body).unwrap_or_default())
+    }
+
+    /// The status, the head and the body.
+    async fn exchange(
+        at: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        content_type: &str,
+        body: &[u8],
+    ) -> (u16, String, String) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut stream = tokio::net::TcpStream::connect(at).await.unwrap();
         let auth = key.map_or(String::new(), |k| format!("Authorization: Bearer {k}\r\n"));
@@ -1285,7 +1323,92 @@ mod tests {
         stream.read_to_string(&mut response).await.unwrap();
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
         let status = head.split(' ').nth(1).unwrap().parse().unwrap();
-        (status, serde_json::from_str(body).unwrap_or_default())
+        (status, head.to_string(), body.to_string())
+    }
+
+    /// A gateway under `base_path` with an admin bundle of one `index.html`
+    /// and one asset, and an unreachable database.
+    async fn gateway_under(base_path: &str) -> std::net::SocketAddr {
+        let admin_dir = std::env::temp_dir().join(format!(
+            "wiretap-admin-{}-{}",
+            std::process::id(),
+            base_path.replace('/', "_")
+        ));
+        std::fs::create_dir_all(admin_dir.join("assets")).unwrap();
+        std::fs::write(admin_dir.join("index.html"), "the admin index").unwrap();
+        std::fs::write(admin_dir.join("assets/app.js"), "the admin script").unwrap();
+        let mut config = db::tests::config_at(0, false);
+        config.base_path = base_path.into();
+        config.admin_dir = admin_dir;
+        gateway_with(db::tests::unreachable_databases(false), &config).await
+    }
+
+    async fn get(at: std::net::SocketAddr, path: &str) -> (u16, String, String) {
+        exchange(at, "GET", path, None, "text/plain", b"").await
+    }
+
+    const BASE: &str = "/apps/wiretap-gateway";
+
+    #[tokio::test]
+    async fn without_a_base_path_the_routes_are_at_the_root() {
+        let at = gateway_under("").await;
+        assert_eq!(get(at, "/v1/health").await.0, 200);
+        assert_eq!(get(at, "/v1/databases").await.0, 401);
+        assert_eq!(get(at, "/admin/").await.2, "the admin index");
+        assert_eq!(get(at, &format!("{BASE}/v1/health")).await.0, 404);
+    }
+
+    #[tokio::test]
+    async fn with_a_base_path_every_route_moves_under_it() {
+        let at = gateway_under(BASE).await;
+        assert_eq!(get(at, &format!("{BASE}/v1/health")).await.0, 200);
+        assert_eq!(get(at, &format!("{BASE}/v1/databases")).await.0, 401);
+        assert_eq!(get(at, &format!("{BASE}/healthz")).await.0, 503);
+        for path in ["/", "/v1/health", "/v1/databases", "/healthz", "/admin/"] {
+            assert_eq!(get(at, path).await.0, 404, "{path} outside the base");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_admin_bundle_is_served_under_the_base() {
+        let at = gateway_under(BASE).await;
+        let admin = format!("{BASE}/admin");
+        assert_eq!(get(at, &format!("{admin}/")).await.2, "the admin index");
+        assert_eq!(
+            get(at, &format!("{admin}/assets/app.js")).await.2,
+            "the admin script"
+        );
+        assert_eq!(
+            get(at, &format!("{admin}/no-such-tab")).await.2,
+            "the admin index"
+        );
+        assert_eq!(
+            get(at, &format!("{admin}/assets")).await.2,
+            "the admin index"
+        );
+
+        let (status, head, _) = get(at, &admin).await;
+        assert_eq!(status, 308);
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("\r\nlocation: admin/\r\n"),
+            "{head}"
+        );
+    }
+
+    /// Unreachable here; the 200 side needs a live Postgres.
+    #[tokio::test]
+    async fn healthz_fails_while_the_database_is_unreachable() {
+        assert_eq!(get(gateway_under("").await, "/healthz").await.0, 503);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn healthz_passes_while_the_database_answers() {
+        let mut config = db::tests::config_at(0, false);
+        config.base_path = BASE.into();
+        let at = gateway_with(db::tests::live_databases(false), &config).await;
+        assert_eq!(get(at, &format!("{BASE}/healthz")).await.0, 200);
     }
 
     #[tokio::test]

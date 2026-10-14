@@ -3,6 +3,7 @@
 //! suitable for the shipped docker-compose stack.
 
 use std::env;
+use std::path::PathBuf;
 
 use wiretap_model::Secret;
 
@@ -30,6 +31,10 @@ pub struct Config {
     pub ingest_max_batch_frames: usize,
     /// Log records held in memory for the admin UI's Logging tab.
     pub log_buffer: usize,
+    /// Prefix every HTTP route is served under, e.g. `/apps/wiretap-gateway`;
+    /// empty serves at the root.
+    pub base_path: String,
+    pub admin_dir: PathBuf,
 }
 
 fn var_or(name: &str, default: &str) -> String {
@@ -41,6 +46,29 @@ fn parse_or<T: std::str::FromStr>(name: &str, default: T) -> T {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// `apps/x/` becomes `/apps/x`, and `/` or nothing the root. Only plain path
+/// segments: the result is nested into the router as a literal prefix.
+fn normalise_base_path(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_start_matches('/').trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let plain = |segment: &str| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
+    };
+    if !trimmed.split('/').all(plain) {
+        return Err(format!(
+            "WIRETAP_BASE_PATH {raw:?} must be plain path segments, like /apps/wiretap-gateway"
+        ));
+    }
+    Ok(format!("/{trimmed}"))
 }
 
 impl Config {
@@ -65,6 +93,8 @@ impl Config {
             ingest_keepalive_secs: parse_or("WIRETAP_INGEST_KEEPALIVE_SECS", 30.0),
             ingest_max_batch_frames: parse_or("WIRETAP_INGEST_MAX_BATCH_FRAMES", 256),
             log_buffer: parse_or("WIRETAP_LOG_BUFFER", 2000),
+            base_path: normalise_base_path(&var_or("WIRETAP_BASE_PATH", ""))?,
+            admin_dir: var_or("WIRETAP_ADMIN_DIR", "/usr/share/wiretap-admin").into(),
         })
     }
 
@@ -78,5 +108,41 @@ impl Config {
             self.pg_password.expose(),
             database
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalise_base_path;
+
+    #[test]
+    fn a_base_path_gains_a_leading_slash_and_loses_a_trailing_one() {
+        for (raw, want) in [
+            ("", ""),
+            ("/", ""),
+            ("  ", ""),
+            ("/apps/wiretap-gateway", "/apps/wiretap-gateway"),
+            ("apps/wiretap-gateway/", "/apps/wiretap-gateway"),
+            ("/v1.2_x~y/", "/v1.2_x~y"),
+        ] {
+            assert_eq!(normalise_base_path(raw).as_deref(), Ok(want), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_base_path_that_is_not_plain_segments_is_refused() {
+        for raw in [
+            "/apps//x",
+            "/apps/../x",
+            "/./x",
+            "/apps/{name}",
+            "/apps/*rest",
+            "/apps/x?y",
+            "/apps x",
+            "https://host/apps",
+            "/apps/%2e%2e",
+        ] {
+            assert!(normalise_base_path(raw).is_err(), "{raw:?} was accepted");
+        }
     }
 }
