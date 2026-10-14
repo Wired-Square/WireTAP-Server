@@ -58,6 +58,12 @@ entry() {
 		die "$image is not an app image"
 }
 
+# A scratch directory beside <out>, so that <out> appears whole, by a rename, or not at all.
+stage_beside() {
+	staging=$(mktemp -d "$1.XXXXXX")
+	trap 'rm -rf "$staging"' EXIT
+}
+
 pack() {
 	local out=$1 version image digest
 	shift
@@ -66,8 +72,7 @@ pack() {
 		version=${version##*[#@]}
 		set -- "$ROOT"/target/apps/wiretap-{gateway,server}-"$version"-{arm64,amd64}.tar
 	fi
-	staging=$(mktemp -d)
-	trap 'rm -rf "$staging"' EXIT
+	stage_beside "$out"
 	mkdir "$staging/images"
 	for image; do
 		[[ -f $image ]] || die "no $image; build it with apps/<name>/make-image.sh"
@@ -79,7 +84,8 @@ pack() {
 		if group_by([.manifest.name, .manifest.version, .arch]) | any(length > 1)
 		then error("two images are the same app, version and arch") else {schema: 1, source: $source, apps: .} end' \
 		"$staging/entries" >"$staging/index.json"
-	COPYFILE_DISABLE=1 tar --format ustar -cf "$out" -C "$staging" index.json images
+	COPYFILE_DISABLE=1 tar --format ustar -cf "$staging/archive.tar" -C "$staging" index.json images
+	mv "$staging/archive.tar" "$out"
 	echo "$out, unsigned: $(jq -r '[.apps[] | "\(.manifest.name) \(.manifest.version) \(.arch)"] | join(", ")' "$staging/index.json") from $SOURCE"
 }
 
@@ -87,14 +93,13 @@ sign() {
 	local unsigned=$1 out=$2 cert=$3 key=$4 chain=${5-}
 	openssl3
 	! tar -tf "$unsigned" | grep -x index.json.sig >/dev/null || die "$unsigned is signed already"
-	staging=$(mktemp -d)
-	trap 'rm -rf "$staging"' EXIT
+	stage_beside "$out"
 	tar -xf "$unsigned" -C "$staging" index.json
 	"$openssl" cms -sign -binary -md sha256 -nosmimecap -in "$staging/index.json" -signer "$cert" -inkey "$key" \
 		${chain:+-certfile "$chain"} -outform DER -out "$staging/index.json.sig"
-	cp "$unsigned" "$out.part"
-	COPYFILE_DISABLE=1 tar --format ustar -rf "$out.part" -C "$staging" index.json.sig
-	mv "$out.part" "$out"
+	cp "$unsigned" "$staging/archive.tar"
+	COPYFILE_DISABLE=1 tar --format ustar -rf "$staging/archive.tar" -C "$staging" index.json.sig
+	mv "$staging/archive.tar" "$out"
 	echo "$out, signed by $("$openssl" x509 -in "$cert" -noout -subject)"
 }
 
