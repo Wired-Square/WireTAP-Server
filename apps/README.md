@@ -61,3 +61,17 @@ apps/make-source.sh sign target/apps/wiretap-apps-unsigned.tar \
 
 The root and leaf last 30 days. Keep them under `target/`, which git ignores,
 and add `root.pem` to a test box only.
+
+## Checking against ApplianceOS
+
+```sh
+apps/check-source.sh <ApplianceOS checkout> [<unsigned.tar>]
+```
+
+It signs the archive with throwaway keys and runs
+[check-source.rs](check-source.rs) as a test inside a copy of the checkout's
+console, through the code a box runs: the archive reader, the signature
+check, the upload and install routes, and a fetch from a source's URL. It
+also proves that a tampered index, a root the box does not hold, and a leaf
+not for code signing are refused. It needs the private ApplianceOS repository
+and the chassis, so CI does not run it; `APPLIANCEOS_REV` picks the commit.
