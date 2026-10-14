@@ -965,6 +965,7 @@ pub(crate) mod tests {
             log_buffer: 0,
             base_path: String::new(),
             admin_dir: "/nonexistent".into(),
+            app_socket: None,
         }
     }
 

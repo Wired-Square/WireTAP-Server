@@ -1,11 +1,7 @@
 // Thin fetch wrapper. The admin key lives in sessionStorage for the life of
-// the tab; every call sends it as a Bearer token.
+// the tab; every call sends it as a Bearer token. Behind a console there is none.
 
 const KEY_STORAGE = "wiretap-admin-key";
-
-export function getKey(): string | null {
-  return sessionStorage.getItem(KEY_STORAGE);
-}
 
 export function setKey(key: string) {
   sessionStorage.setItem(KEY_STORAGE, key);
@@ -27,7 +23,7 @@ export async function api<T>(
   options: { method?: string; body?: unknown } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {};
-  const key = getKey();
+  const key = sessionStorage.getItem(KEY_STORAGE);
   if (key) headers["Authorization"] = `Bearer ${key}`;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   const resp = await fetch(API_BASE + path, {
@@ -59,6 +55,13 @@ export class ApiError extends Error {
   ) {
     super(message);
   }
+}
+
+/** Who `/v1/whoami` says is calling: a key, or a user an ApplianceOS console vouches for. */
+export interface Caller {
+  via: "key" | "console";
+  name: string;
+  role: KeySummary["role"];
 }
 
 export interface KeySummary {

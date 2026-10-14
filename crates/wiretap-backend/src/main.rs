@@ -140,6 +140,24 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
     // Databases behind the current version refuse reads until they are
     // migrated, and buffer their ingest meanwhile.
     tokio::spawn(async move { dbs.migrate_all().await });
+    if let Some(socket) = &config.app_socket {
+        let listener = http::bind_app_socket(&socket.path)
+            .map_err(|e| format!("app socket {}: {e}", socket.path.display()))?;
+        tracing::info!(
+            "app socket listening on {}, under {}, for console uid {}",
+            socket.path.display(),
+            socket.base_path,
+            socket.console_uid
+        );
+        let app = http::app_socket_router(app_state.clone(), &config, socket)
+            .into_make_service_with_connect_info::<http::SocketPeer>();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!("app socket failed: {e}");
+                std::process::exit(1);
+            }
+        });
+    }
     // `with_connect_info` so the access log can name the peer.
     axum::serve(
         listener,

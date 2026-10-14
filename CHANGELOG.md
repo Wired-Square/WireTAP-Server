@@ -16,6 +16,14 @@ All notable changes to this project are documented here. Entries go under
   with TimescaleDB 2.29.2, kept under the app's `/data` volume. It runs as any
   uid with no capabilities, generates its Postgres password and admin key on
   first start, and stops the gateway before the database.
+- **The gateway answers an ApplianceOS console.** With `WIRETAP_APP_SOCKET`
+  set it also serves on that Unix socket, under `WIRETAP_APP_BASE_PATH`, and a
+  request there from `WIRETAP_CONSOLE_UID` (0 by default) is the user the
+  console's `Appliance-Identity` header names: a console admin is a gateway
+  admin, and a viewer or operator reads. The admin UI asks the new
+  `GET /v1/whoami` and, behind the console, asks for no key. The access log
+  names a console user as `user=` where it names a key as `key=`. The TCP
+  listeners, their base path and their keys are unchanged.
 
 ### Changed
 

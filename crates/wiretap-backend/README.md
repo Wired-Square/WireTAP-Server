@@ -72,6 +72,19 @@ Create per-device `ingest` keys (optionally database-pinned) and per-user
 `read` keys from the admin UI. Keys can be **revoked** (instant, reversible),
 **restored**, or **permanently deleted**.
 
+`GET /v1/whoami` answers who a caller is (`via` `key` or `console`, `name`,
+`role`); the admin UI asks it to decide whether to ask for a key.
+
+### Behind an ApplianceOS console
+
+With `WIRETAP_APP_SOCKET` set, the gateway also serves every route on that Unix
+socket, under `WIRETAP_APP_BASE_PATH`, for the console's proxy. There a request
+from `WIRETAP_CONSOLE_UID` is the user its `Appliance-Identity` header names,
+and no key is asked for or read. A console `admin` or `hostadmin` is `admin`
+here, and a `viewer` or `operator` is `read`. Any other uid on the socket gets a
+401, and a malformed header a 400. The TCP listener ignores the header and
+still needs a key.
+
 ## Databases (one per capture)
 
 Independent captures (a vehicle, a site, a bench rig) each get their own
@@ -201,12 +214,15 @@ for, and `auto_migrate`.
 | `WIRETAP_AUTO_CREATE` | `true` | Allow ingest/import to auto-create databases |
 | `WIRETAP_AUTO_MIGRATE` | `false` | Off, a capture database behind the schema waits for **Migrate now**, refusing reads and buffering ingest; on, every one is migrated on start. A new database is initialised either way |
 | `WIRETAP_BASE_PATH` | — | Serve every HTTP route under this prefix, e.g. `/apps/wiretap-gateway` gives `/apps/wiretap-gateway/v1/…` and `/apps/wiretap-gateway/admin/`; anything outside it is a 404. Plain path segments only; empty serves at the root |
+| `WIRETAP_APP_SOCKET` | — | Also serve on this Unix socket (an absolute path) for an ApplianceOS console |
+| `WIRETAP_APP_BASE_PATH` | `/apps/wiretap-gateway` | The prefix the routes are under on the app socket |
+| `WIRETAP_CONSOLE_UID` | `0` | The uid whose requests on the app socket may assert a caller; not `65534` |
 | `RUST_LOG` | `wiretap_backend=info` | Log filter |
 
 Full list (listen addresses, ingest keepalive/batch caps, log buffer size, the
 admin UI's directory) is in [src/config.rs](src/config.rs).
 
-`GET /healthz` (under the base path) answers 200 while Postgres is reachable
+`GET /healthz` (under each listener's base path) answers 200 while Postgres is reachable
 and 503 when it is not, for a supervisor's probe. `/v1/health` answers 200
 either way and says which.
 
