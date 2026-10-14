@@ -9,7 +9,8 @@ COPY --chmod=0755 wiretap-server /usr/bin/wiretap-server
 RUN setcap cap_net_raw,cap_net_bind_service+ep /usr/bin/wiretap-server
 
 FROM alpine:3.23.5
-RUN install -d -o 10001 -g 0 -m 0770 /data /run/wiretap-server
+# Root's and sticky, so no other uid in group 0 can swap a per-uid socket directory.
+RUN install -d -o 10001 -g 0 -m 0770 /data && install -d -m 1770 /run/wiretap-server
 COPY --from=capabilities /usr/bin/wiretap-server /usr/bin/
 COPY --chmod=0755 wiretap-server-ui /usr/bin/
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/
