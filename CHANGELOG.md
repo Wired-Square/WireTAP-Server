@@ -39,6 +39,10 @@ All notable changes to this project are documented here. Entries go under
   `GET /v1/whoami` and, behind the console, asks for no key. The access log
   names a console user as `user=` where it names a key as `key=`. The TCP
   listeners, their base path and their keys are unchanged.
+- **A compose file for the capture daemon on Docker**,
+  `apps/wiretap-server/docker-compose.yml`: host networking, `NET_RAW` and
+  `NET_BIND_SERVICE` over `cap_drop: [ALL]`, a named volume on `/data`, and the
+  standalone UI with browser onboarding.
 - **The capture daemon takes settings from a UI, beneath the admin's.** A
   UI's settings live in `$STATE_DIRECTORY/ui.toml` (or `--ui-config`), below
   the config file and the flags, and an environment variable's secret beats

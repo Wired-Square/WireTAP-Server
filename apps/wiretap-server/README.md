@@ -219,3 +219,22 @@ The static `aarch64-unknown-linux-musl` build needs the cross environment in
 ```sh
 cargo build --release --locked --target aarch64-unknown-linux-musl
 ```
+
+## On Docker
+
+[docker-compose.yml](docker-compose.yml) runs the image with host networking,
+`NET_RAW` and `NET_BIND_SERVICE` over `cap_drop: [ALL]`, a named volume on
+`/data`, and the standalone UI:
+
+```sh
+docker load -i target/apps/wiretap-server-<version>-<arch>.tar
+WIRETAP_SERVER_VERSION=<version> docker compose -f apps/wiretap-server/docker-compose.yml up -d
+```
+
+It sets `WIRETAP_SERVER_UI_ONBOARDING=browser`, so the first person to reach
+`https://<host>:8443/` makes the admin account; remove it once that is you.
+The daemon's settings come from the UI, beneath the image's
+`/etc/wiretap-server/wiretap-server.toml`; mount a file of your own there to
+pin more, or to move the device-push listener back to 9323. The UI's own
+`WIRETAP_SERVER_UI_*` variables, such as `WIRETAP_SERVER_UI_HTTPS_PORT`, go in
+`environment:`.
