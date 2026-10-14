@@ -28,6 +28,9 @@ label and OCI version disagree, and two images of the same app, version and
 architecture. The index names the source `wiretap` (`SOURCE=` to change it);
 a box trusts it once its root is added in Apps › Sources under that name.
 
+A release builds the same archive, unsigned, as the workflow artefact
+`app-source-unsigned`, with its `index.json` and `SHA256SUMS`.
+
 ## Signing a release
 
 The source's key never reaches CI or this repository. A maintainer signs, on a

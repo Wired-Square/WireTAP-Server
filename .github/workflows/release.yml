@@ -1,5 +1,6 @@
 # Everything a tag publishes: the capture server's .deb files, and the
-# gateway's multi-architecture image.
+# gateway's multi-architecture image. It also builds the ApplianceOS apps'
+# unsigned source archive, a workflow artefact rather than a release asset.
 #
 # Draft first, as the desktop repo does it: every job uploads into a draft
 # release and a person publishes it.
@@ -279,3 +280,104 @@ jobs:
           # shellcheck disable=SC2086
           docker buildx imagetools create ${tags} ${refs}
           docker buildx imagetools inspect "${IMAGE}:${version}"
+
+  # The ApplianceOS apps, one native runner per architecture as the gateway
+  # image has, because both Dockerfiles run steps on the target platform. The
+  # UI in the server app needs the private chassis, and on arm64 its
+  # appliance-xtask for the Cortex-A53 erratum check.
+  app-images:
+    name: App images (${{ matrix.arch }})
+    needs: draft
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Reach the chassis
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.WSLIB_APPLIANCE_DEPLOYMENT_KEY }}
+
+      - name: Fetch the chassis over SSH
+        run: git config --global url."ssh://git@github.com/Wired-Square/wslib-appliance-rs".insteadOf "https://github.com/Wired-Square/wslib-appliance-rs"
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Install zig and cargo-zigbuild
+        uses: ./.github/actions/zig-toolchain
+
+      - name: Install appliance-xtask at the server app's chassis
+        if: matrix.arch == 'arm64'
+        run: |
+          rev="$(grep -om1 'wslib-appliance-rs\.git?[^#"]*#[0-9a-f]*' apps/wiretap-server/Cargo.lock | cut -d'#' -f2)"
+          cargo install --locked --git https://github.com/Wired-Square/wslib-appliance-rs.git --rev "$rev" appliance-xtask
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/wiretap-server/frontend/package-lock.json
+
+      - name: Install the server app's browser half
+        working-directory: apps/wiretap-server/frontend
+        run: npm ci
+
+      - name: Build both apps
+        run: |
+          apps/wiretap-gateway/make-image.sh ${{ matrix.arch }}
+          apps/wiretap-server/make-image.sh ${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: app-images-${{ matrix.arch }}
+          path: target/apps/*.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  # The archive is unsigned: the source's key never reaches CI. Signing it is
+  # a person's step, apps/README.md § Signing a release.
+  app-source:
+    name: App source (unsigned)
+    needs: app-images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: app-images-*
+          merge-multiple: true
+          path: target/apps
+
+      - name: Pack the archive
+        run: |
+          archive="target/source/wiretap-apps-${GITHUB_REF_NAME#v}-unsigned.tar"
+          mkdir -p target/source
+          apps/make-source.sh pack "$archive" target/apps/*.tar
+          tar -xf "$archive" -C target/source index.json
+          (cd target/source && sha256sum ./*.tar index.json | tee SHA256SUMS)
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: app-source-unsigned
+          path: target/source/
+          if-no-files-found: error

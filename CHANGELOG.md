@@ -91,6 +91,11 @@ All notable changes to this project are documented here. Entries go under
   `apps/wiretap-server/tests/deb-lifecycle.sh` installs, upgrades, removes and
   purges the pair.
 
+- **A release builds the ApplianceOS apps**: both apps' tarballs for both
+  architectures, and the unsigned source archive with its `index.json` and
+  checksums, as workflow artefacts. Signing stays a maintainer's step
+  (`apps/README.md`).
+
 ### Changed
 
 - **The capture daemon's config file is optional, and the shipped one sets
