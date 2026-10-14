@@ -544,7 +544,10 @@ async fn inventory(
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
     let entries = sql::inventory(&client, range.start, range.end, range.protocol).await?;
-    Ok(Json(InventoryResponse { entries }))
+    Ok(Json(InventoryResponse {
+        entries,
+        truncated: false,
+    }))
 }
 
 async fn frames(

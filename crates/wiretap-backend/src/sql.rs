@@ -851,7 +851,7 @@ pub async fn frames_batch(
     let mut args = Args::default();
     let mut sql = format!(
         "SELECT (EXTRACT(EPOCH FROM ts) * 1000000)::float8 AS ts_us, \
-         id, flags, dlc, data_bytes, bus \
+         id, flags, dlc, data_bytes, bus, crc_valid \
          FROM public.capture_frame {}",
         protocol_clause(&mut args, protocol)
     );
@@ -895,6 +895,7 @@ pub async fn frames_batch(
                 }
                 .to_owned(),
                 data_hex: hex::encode(data),
+                crc_valid: row.get("crc_valid"),
             }
         })
         .collect();

@@ -15,6 +15,11 @@ All notable changes to this project are documented here. Entries go under
 - **The card image installs `wiretap-server` through the chassis's `extra_debs`**
   instead of a substage of its own. `scripts/stage-wiretap-server.sh` now copies
   the package to `appliance/target/debian/extra/`.
+- **wslib-wiretap-rs moves from `v0.1.2` to `v0.10.2`.** `/frames` rows carry
+  `crc_valid` for Modbus. `/inventory` answers `truncated: false` and does not
+  honour `limit` yet. Assigning a catalogue now refuses the `cobs` and
+  `length_prefixed` encodings, and a serial header field that sets both `mask`
+  and `start_byte`.
 
 ## [0.1.10] — 2026-10-06
 
