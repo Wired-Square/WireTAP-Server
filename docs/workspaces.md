@@ -40,7 +40,8 @@ else does:
 
 `apps/wiretap-server/` has two more, the same as the first two: Server UI
 gates, and Server UI browser half (`npm run ci` there also runs its unit
-tests).
+tests). A third, Server app image, builds its amd64 image with
+`apps/wiretap-server/make-image.sh` and keeps nothing.
 
 Locally, `CARGO_NET_GIT_FETCH_WITH_CLI=true` has cargo fetch the private
 chassis with your own git and its credentials.

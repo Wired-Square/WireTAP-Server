@@ -642,3 +642,38 @@ jobs:
 
       - name: Typecheck, test and build
         run: npm run ci
+
+  # The capture daemon's app image, built and thrown away as the gateway's is.
+  # It carries the UI, so it needs the chassis too. amd64 only: the runner
+  # links it natively.
+  server-image:
+    name: Server app image
+    runs-on: ubuntu-latest
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - *reach
+      - *fetch
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Install zig and cargo-zigbuild
+        uses: ./.github/actions/zig-toolchain
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/wiretap-server/frontend/package-lock.json
+
+      - name: Install the browser half's lockfile
+        working-directory: apps/wiretap-server/frontend
+        run: npm ci
+
+      - name: Build it, keep nothing
+        run: apps/wiretap-server/make-image.sh amd64
