@@ -99,5 +99,5 @@ ARG WIRETAP_BUILD_ID=
 LABEL org.opencontainers.image.revision=${WIRETAP_BUILD_ID}
 EXPOSE 8423 9323
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
-    CMD curl -fsS http://localhost:8423/v1/health || exit 1
+    CMD p="${WIRETAP_BASE_PATH#/}"; curl -fsS -o /dev/null "http://localhost:8423/${p:+${p%/}/}healthz" || exit 1
 ENTRYPOINT ["wiretap-backend"]

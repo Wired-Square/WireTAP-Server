@@ -14,6 +14,9 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **The gateway image's health check asks `/healthz`** under
+  `WIRETAP_BASE_PATH`, so the container is unhealthy while Postgres is
+  unreachable. It asked `/v1/health` at the root, which answers 200 regardless.
 - **A migration's progress is easier to read.** Time taken shows as `2h 33m
   20s`, the time left as a badge beside it, and the chunk count beside the
   phase. The banner counts the databases waiting and offers one Fix button.
