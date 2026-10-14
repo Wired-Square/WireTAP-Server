@@ -11,6 +11,11 @@ All notable changes to this project are documented here. Entries go under
   `/apps/wiretap-gateway`) moves every HTTP route under it, the admin UI
   included; unset, nothing moves. The admin UI now finds the API from its own
   address. `GET /healthz` answers 200 only while Postgres is reachable.
+- **The gateway as an ApplianceOS app.** `apps/wiretap-gateway/make-image.sh`
+  builds one image per architecture holding the gateway and its own Postgres 16
+  with TimescaleDB 2.29.2, kept under the app's `/data` volume. It runs as any
+  uid with no capabilities, generates its Postgres password and admin key on
+  first start, and stops the gateway before the database.
 
 ### Changed
 
