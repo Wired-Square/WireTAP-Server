@@ -97,8 +97,15 @@ mod secret {
         v.as_ref().map(Secret::expose).serialize(s)
     }
 
+    /// Not a plain `String`, whose error quotes the value it was handed.
+    #[derive(Deserialize)]
+    #[serde(untagged, expecting = "a secret must be a string")]
+    enum Text {
+        Text(String),
+    }
+
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Secret>, D::Error> {
-        Ok(Option::<String>::deserialize(d)?.map(Secret::new))
+        Ok(Option::<Text>::deserialize(d)?.map(|Text::Text(s)| Secret::new(s)))
     }
 }
 
@@ -171,7 +178,15 @@ pub fn path(cli: &Cli, env: &Env) -> Option<PathBuf> {
 /// Read `ui.toml`. Absent is empty.
 pub fn load(path: &Path) -> Result<UiConfig, String> {
     match fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+        // Not toml's Display, which quotes the line: it may hold a secret, and
+        // this reaches the log and the control socket.
+        Ok(text) => toml::from_str(&text).map_err(|e| {
+            let line = e.span().map_or(String::new(), |s| {
+                let n = text.bytes().take(s.start).filter(|&b| b == b'\n').count();
+                format!(" line {}", n + 1)
+            });
+            format!("{}{line}: {}", path.display(), e.message())
+        }),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(UiConfig::default()),
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
@@ -236,9 +251,6 @@ pub fn resolve_at_start(
     let Some(why) = why else {
         return Ok((with?, ui));
     };
-    if ui == UiConfig::default() {
-        return Ok((with?, ui));
-    }
     let mut without = Settings::resolve(cli, file, None, env)?;
     if pipeline::check(&without.settings).is_err() {
         if let Ok(with) = with {
@@ -644,6 +656,27 @@ mod tests {
             fs::write(&path, bad).unwrap();
             assert!(load(&path).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_ui_toml_that_does_not_load_is_not_quoted() {
+        let dir = TempDir::new("ui-unquoted");
+        let path = dir.0.join("ui.toml");
+        fs::write(&path, "[forward]\napi_key = \"hunter2\nhost = 1\n").unwrap();
+        let why = load(&path).unwrap_err();
+        assert!(!why.contains("hunter2"), "{why}");
+        assert!(why.contains("line 2"), "{why}");
+
+        fs::write(&path, "[forward]\nunknown = 1\n").unwrap();
+        let why = load(&path).unwrap_err();
+        assert!(why.contains("line 2: unknown field"), "{why}");
+
+        fs::write(&path, "[forward]\napi_key = 31337\n").unwrap();
+        let why = load(&path).unwrap_err();
+        assert!(!why.contains("31337"), "{why}");
+        let put = json!({"ingest.token": 31337});
+        let why = merge(&UiConfig::default(), put.as_object().unwrap()).unwrap_err();
+        assert!(!why.contains("31337"), "{why}");
     }
 
     #[test]
