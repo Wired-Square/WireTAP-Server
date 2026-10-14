@@ -19,6 +19,18 @@ All notable changes to this project are documented here. Entries go under
   declares `sockets.app` and serves the console on `/run/appliance/app.sock`
   under `/apps/wiretap-gateway`, so the admin UI opens from the console with
   no key.
+- **The capture daemon as an ApplianceOS app and a Docker image.**
+  `apps/wiretap-server/make-image.sh` builds one image per architecture with
+  `wiretap-server` and `wiretap-server-ui` under one supervisor: if either
+  exits the container exits 1, and a stop takes the UI down first. It runs as
+  any uid in group 0 on host networking, the daemon binding port 23 through
+  file capabilities (`NET_RAW`, `NET_BIND_SERVICE`; `no-new-privileges` must
+  be off). Its state is under `/data`, and the control sockets are in a
+  directory only the running uid may enter. With ApplianceOS's socket
+  directory mounted the UI serves the console on `app.sock` under
+  `/apps/wiretap-server/`, and otherwise its own HTTPS on 8443. The manifest
+  declares GVRET on tcp 23, on, and the device-push listener on tcp 9324, off,
+  clear of the gateway app's 9323; the image's config file pins that port.
 - **The gateway answers an ApplianceOS console.** With `WIRETAP_APP_SOCKET`
   set it also serves on that Unix socket, under `WIRETAP_APP_BASE_PATH`, and a
   request there from `WIRETAP_CONSOLE_UID` (0 by default) is the user the

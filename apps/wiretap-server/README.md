@@ -153,6 +153,53 @@ A read answers 200 with the daemon's body and `"state": "ready"`, or
 A change the daemon could not be asked, or did not answer within 10 s, is a
 503; one it took but has not come back from within 30 s is a 504.
 
+## The image
+
+One image holds the daemon and this UI, for plain Docker and for ApplianceOS:
+
+```sh
+apps/wiretap-server/make-image.sh          # arm64 and amd64, from the repository root
+apps/wiretap-server/make-image.sh arm64    # one of them
+```
+
+Each architecture becomes a `docker load` tarball,
+`target/apps/wiretap-server-<version>-<arch>.tar`, tagged
+`ghcr.io/wired-square/wiretap-server:<version>`, the daemon's version. The
+daemon is built with `cargo zigbuild`, as its package is, and the UI through
+the chassis's `scaffold/packaging/build-binary.sh`, linked with `rust-lld`. The
+script needs `frontend/node_modules`, the `*-unknown-linux-musl` targets,
+`cargo-zigbuild`, `zig`, `docker buildx` and `jq`, and for arm64
+`appliance-xtask`, which checks the Cortex-A53 erratum. Its label is
+`manifest.json` with the version stamped in.
+
+`entrypoint.sh` starts the daemon, then the UI. On `SIGTERM` the UI stops
+first. If either exits on its own, the other is stopped and the container
+exits 1.
+
+It runs as any uid in group 0. The daemon carries the file capabilities
+`cap_net_raw,cap_net_bind_service+ep`, so it binds GVRET's port 23 without
+root; the container must be granted both, and must not run with
+`no-new-privileges`, which strips them. Both control sockets go in
+`/run/wiretap-server/<uid>`, a 0700 directory: under `<uid>:0` the sockets'
+group is every process's, so the directory is the boundary. Everything
+persistent is under `/data`, the only volume: the daemon's `ui.toml` and disk
+cache, the UI's database, and in standalone mode its certificate.
+`/etc/wiretap-server/wiretap-server.toml` in the image sets the device-push
+listener's port to 9324, so a UI shows it as fixed.
+
+**On ApplianceOS** the manifest asks for host networking, so the daemon sees
+the host's CAN interfaces, with `NET_RAW` and `NET_BIND_SERVICE`. When the
+console mounts its socket directory at `/run/appliance`, the UI serves the
+console on `app.sock` under `/apps/wiretap-server/`, which is also where
+ApplianceOS probes `healthz`. Under host networking a listener is a
+declaration only: ApplianceOS publishes nothing, and holds every declared
+port for clash checks whether it is on or off. So GVRET is declared on tcp 23,
+on, and the device-push listener on tcp 9324, off, clear of the gateway app's
+9323. The listener stays off until the UI or a config file turns it on.
+
+Without `/run/appliance` the UI serves its own HTTPS on 8443, and the image's
+`HEALTHCHECK` asks it for `/healthz`.
+
 ## Gates
 
 From this directory, with `CARGO_NET_GIT_FETCH_WITH_CLI=true` for the private
