@@ -27,6 +27,19 @@ builds the image. A production host pulls the released one instead —
 `ghcr.io/wired-square/wiretap-backend`, amd64 and arm64 — see
 [crates/wiretap-backend/deploy/](crates/wiretap-backend/deploy/).
 
+## Install the capture daemon
+
+Three ways, each running the same `wiretap-server`:
+
+- **Direct**: the `.deb`, from a release or from [Packaging](#packaging), on
+  any host with systemd. A web UI is a second package, `wiretap-server-ui`
+  ([apps/wiretap-server](apps/wiretap-server/README.md#the-package)).
+- **Docker**: one image with the daemon and its web UI, on host networking
+  ([apps/wiretap-server](apps/wiretap-server/README.md#on-docker)).
+- **ApplianceOS**: the same image as the `wiretap-server` app, its UI served
+  behind the console. CAN only for now
+  ([apps/wiretap-server](apps/wiretap-server/README.md#the-image)).
+
 ## Running the capture server
 
 Capture two buses, bridge them on the GVRET port, and archive to a gateway:
