@@ -41,10 +41,11 @@ All notable changes to this project are documented here. Entries go under
   devices, the forward link, the ingest and GVRET clients, and whether a
   change is being applied;
   `GET /v1/settings` each setting a UI may change, its source and whether it is
-  pinned, never a secret; `PUT /v1/settings` validates a change as a start
-  would, writes `ui.toml`, shuts down as on `SIGTERM` and executes the daemon
-  again on the same PID, or exits 75 for the supervisor if it cannot. The
-  packaged unit adds `RuntimeDirectory=` and `SuccessExitStatus=75`.
+  pinned, never a secret; `PUT /v1/settings` refuses an empty change,
+  validates one as a start would, writes `ui.toml`, shuts down as on
+  `SIGTERM` and executes the daemon again on the same PID, or exits 75 for the
+  supervisor if it cannot. The packaged unit adds `RuntimeDirectory=` and
+  `SuccessExitStatus=75`.
 - **A web UI for the capture daemon, `wiretap-server-ui`**, in its own
   workspace, `apps/wiretap-server/`, on the private chassis v0.8.0. It shows
   the devices, the forward link and its cache, and the device-push and GVRET

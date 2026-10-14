@@ -274,6 +274,12 @@ pub fn apply(
     };
     let put: Map<String, Value> = serde_json::from_slice(body)
         .map_err(|e| refuse(StatusCode::BAD_REQUEST, format!("not a JSON object: {e}")))?;
+    if put.is_empty() {
+        return Err(refuse(
+            StatusCode::BAD_REQUEST,
+            "the change names no setting",
+        ));
+    }
     let keys = ui::keys();
     if let Some(key) = put.keys().find(|k| !keys.contains(&k.as_str())) {
         return Err((
@@ -445,6 +451,7 @@ mod tests {
             json!({"forward.port": "eighty"}),
             json!({"devices": [{"interface": "can0", "mode": "active"}]}),
             json!(["not", "an", "object"]),
+            json!({}),
         ] {
             assert_eq!(r.refused(body.clone()).0, StatusCode::BAD_REQUEST, "{body}");
         }

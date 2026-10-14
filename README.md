@@ -82,12 +82,13 @@ moves the cache or names the daemon can.
   `file`, `env` or `flag`), whether it is pinned and where. A secret is shown
   only as set or unset.
 - `PUT /v1/settings`: a JSON object of keys as `GET` names them, `null` to
-  clear one. A pinned key is a 409 and any other key a 400. The change is
-  resolved as a start would resolve it, and one that would stop the start is a
-  422 that writes nothing. Otherwise the daemon writes `ui.toml`, answers 202,
-  shuts down as on `SIGTERM` and executes itself again on the same PID, so no
-  supervisor's restart delay applies. If that fails it exits 75, for systemd
-  (or a container's restart policy) to start it on the change.
+  clear one. A pinned key is a 409, and any other key or an empty object a
+  400. The change is resolved as a start would resolve it, and one that would
+  stop the start is a 422 that writes nothing. Otherwise the daemon writes
+  `ui.toml`, answers 202, shuts down as on `SIGTERM` and executes itself
+  again on the same PID, so no supervisor's restart delay applies. If that
+  fails it exits 75, for systemd (or a container's restart policy) to start
+  it on the change.
 
 **The socket has no authentication of its own.** It is created 0660 in the
 daemon's group, in a directory only that group can enter: anyone in the group
