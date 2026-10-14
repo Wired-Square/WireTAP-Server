@@ -412,7 +412,9 @@ fn copy_text(batch: &[FrameRow]) -> Result<String, CopyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiretap_protocol::ingest::{modbus_id, raw_serial_id, FLAG_CRC_VALID, ID_FD, ID_TX};
+    use wiretap_protocol::ingest::{
+        modbus_id, raw_serial_id, FLAG_CRC_VALID, ID_FD, ID_TX, MODBUS_RTU_PROTOCOL,
+    };
 
     #[test]
     fn a_modbus_row_fills_the_columns_a_can_row_leaves_null() {
@@ -602,7 +604,7 @@ mod tests {
                     &format!("\\\\x{}", "aa".repeat(12)),
                     "2"
                 ],
-                ["modbus", "259", "32", "1", "\\\\x01", "0"],
+                [MODBUS_RTU_PROTOCOL, "259", "32", "1", "\\\\x01", "0"],
             ]
         );
     }

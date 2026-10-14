@@ -552,6 +552,7 @@ impl FrameCache for SqliteCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
 
     /// A directory that goes away when the test does. Held by every test as
     /// `_dir`, so it outlives the cache inside it.
@@ -705,8 +706,19 @@ mod tests {
         assert_eq!(dlc, 11, "the message length, CRC included");
         assert_eq!(
             (dir.as_str(), protocol.as_str(), crc),
-            ("rx", "modbus", Some(1))
+            ("rx", MODBUS_RTU_PROTOCOL, Some(1))
         );
+    }
+
+    #[test]
+    fn a_modbus_message_cached_under_the_old_tag_still_drains() {
+        let (_dir, mut c) = temp_cache("legacy_modbus", 100);
+        let original = modbus(1_700_000_000_000_001, 1, 0x03, &[0x01, 0x03, 0x84, 0x0A]);
+        c.append(&[Arc::clone(&original)]).unwrap();
+        c.conn
+            .execute("UPDATE frames SET protocol = 'modbus'", [])
+            .unwrap();
+        assert_eq!(c.oldest(1).unwrap()[0].sample, original);
     }
 
     #[test]

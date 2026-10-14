@@ -24,7 +24,7 @@ const MIGRATION_PROGRESS: &str = include_str!("../schema/migration_progress.sql"
 /// The version `init_schema.sql` creates. [`MIGRATIONS`] takes an older database
 /// up to it. Kept in step with the `schema_version` row that file inserts —
 /// `the_schema_seeds_the_version_it_claims` holds the two together.
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 pub struct Migration {
     pub version: i32,
@@ -55,6 +55,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 4,
         description: "capture_frame: flags packed into one column",
         sql: include_str!("../schema/migrations/0004_capture_frame_flags.sql"),
+    },
+    Migration {
+        version: 5,
+        description: "capture_frame: Modbus RTU stored as modbus_rtu",
+        sql: include_str!("../schema/migrations/0005_capture_frame_modbus_rtu.sql"),
     },
 ];
 
@@ -653,10 +658,11 @@ mod tests {
             .find(&format!("{PROTOCOL_COLUMNS_CHECK} CHECK ("))
             .expect("the constraint's CHECK");
         let to = stmt[from..].find("END)").expect("a CASE end") + from + 4;
-        stmt[from..to]
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+        squashed(&stmt[from..to])
+    }
+
+    fn squashed(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     const PROTOCOL_COLUMNS_CHECK: &str = "capture_frame_protocol_columns_check";
@@ -698,8 +704,7 @@ mod tests {
     }
 
     /// 0004 swaps the same CHECK for one on `flags`, after every row has one and
-    /// before the columns it packs are dropped. A fresh and a migrated
-    /// capture_frame must agree on what a row of each protocol is.
+    /// before the columns it packs are dropped.
     #[test]
     fn the_flags_migration_backfills_then_checks_then_drops() {
         let stmts = split_statements(MIGRATIONS[3].sql);
@@ -722,15 +727,7 @@ mod tests {
             "a repeated run pays for the validating scan again"
         );
 
-        let table = split_statements(INIT_SCHEMA)
-            .into_iter()
-            .find(|s| s.starts_with("CREATE TABLE IF NOT EXISTS public.capture_frame"))
-            .expect("capture_frame present");
-        assert_eq!(
-            check_body(&table),
-            check_body(&stmts[swap]),
-            "a fresh and a migrated capture_frame disagree on the check"
-        );
+        let table = capture_frame_table();
         let columns: Vec<&str> = table
             .lines()
             .filter_map(|l| l.split_whitespace().next())
@@ -744,18 +741,59 @@ mod tests {
             .find(|s| s.contains("attname = 'flags'") && s.contains("RAISE"))
             .expect("the flags guard is present");
         assert!(guard.contains("0004_capture_frame_flags.sql first'"));
+    }
 
-        let sql = MIGRATIONS[3].sql;
-        let init = sql
-            .find("\\ir ../init_schema.sql")
-            .expect("0004 reaches init_schema.sql");
-        let post = sql
-            .find("\\ir 0001_capture_frame_post.sql")
-            .expect("the psql run refreshes the rebuilt rollup");
+    fn capture_frame_table() -> String {
+        split_statements(INIT_SCHEMA)
+            .into_iter()
+            .find(|s| s.starts_with("CREATE TABLE IF NOT EXISTS public.capture_frame"))
+            .expect("capture_frame present")
+    }
+
+    /// 0005 drops both CHECKs before it relabels a row and adds them back, in
+    /// one scan, after the last. A fresh and a migrated capture_frame must
+    /// agree on the tag the code writes.
+    #[test]
+    fn the_modbus_rtu_migration_drops_relabels_then_checks() {
+        use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
+        let stmts = split_statements(MIGRATIONS[4].sql);
+        let at = |what: &str| {
+            stmts
+                .iter()
+                .position(|s| s.contains(what))
+                .unwrap_or_else(|| panic!("no {what}"))
+        };
+        let drop = at("DROP CONSTRAINT IF EXISTS capture_frame_protocol_check");
+        let relabel = at("CALL public.wiretap_relabel_modbus_rtu()");
+        let add = at(&format!("ADD CONSTRAINT {PROTOCOL_COLUMNS_CHECK}"));
+        assert!(drop < relabel && relabel < add);
+        for guarded in [drop, add] {
+            assert!(
+                stmts[guarded].contains("pg_get_constraintdef(oid) LIKE '%modbus_rtu%'"),
+                "a repeated run pays for the validating scan again"
+            );
+        }
         assert!(
-            init < post,
-            "the refresh would run before the aggregate exists"
+            !stmts.iter().any(|s| s.contains("DROP MATERIALIZED VIEW")),
+            "the rollup is rebuilt rather than relabelled"
         );
+
+        let table = capture_frame_table();
+        assert_eq!(
+            check_body(&table),
+            check_body(&stmts[add]),
+            "a fresh and a migrated capture_frame disagree on the check"
+        );
+        assert!(check_body(&table).contains(&format!("WHEN '{MODBUS_RTU_PROTOCOL}' THEN")));
+        let tags = format!("CHECK (protocol IN ('can', '{MODBUS_RTU_PROTOCOL}', 'serial'))");
+        for sql in [&table, &stmts[add]] {
+            assert!(squashed(sql).contains(&tags), "no {tags} in {sql}");
+        }
+        let guard = split_statements(INIT_SCHEMA)
+            .into_iter()
+            .find(|s| s.contains("LIKE '%modbus_rtu%'") && s.contains("RAISE"))
+            .expect("the modbus_rtu guard is present");
+        assert!(guard.contains("0005_capture_frame_modbus_rtu.sql first'"));
     }
 
     /// The gateway applies the progress helper itself; psql has only the
@@ -819,6 +857,7 @@ mod tests {
             "0002_events_annotations.sql",
             "0003_capture_frame_protocol_columns.sql",
             "0004_capture_frame_flags.sql",
+            "0005_capture_frame_modbus_rtu.sql",
         ];
         assert_eq!(files.len(), MIGRATIONS.len(), "name the new migration here");
         let reaches_init = |m: &Migration| m.sql.contains("\\ir ../init_schema.sql");
@@ -834,9 +873,16 @@ mod tests {
                 m.version
             );
         }
+        let newest = MIGRATIONS.last().unwrap().sql;
+        let init = newest
+            .find("\\ir ../init_schema.sql")
+            .expect("the newest migration does not reach init_schema.sql");
+        let post = newest
+            .find("\\ir 0001_capture_frame_post.sql")
+            .expect("the psql run never refreshes a rollup an older migration rebuilt");
         assert!(
-            reaches_init(MIGRATIONS.last().unwrap()),
-            "the newest migration does not reach init_schema.sql"
+            init < post,
+            "the refresh would run before the aggregate exists"
         );
     }
 

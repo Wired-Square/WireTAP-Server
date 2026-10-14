@@ -1,6 +1,7 @@
 //! What a capture source produces.
 
 use serde::{Deserialize, Serialize};
+use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
 
 /// Which interface a sample came from. `bus` is the GVRET-visible number,
 /// which is the socket's index plus the configured `bus_offset`.
@@ -55,11 +56,8 @@ impl std::str::FromStr for Direction {
 }
 
 /// What a sample came off the wire as: the `protocol` column's value, and
-/// the tag a disk cache stores. The serde representation is that value, so a
-/// misspelt query parameter is refused at deserialisation rather than
-/// becoming a filter that matches nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// the tag a disk cache stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Can,
     Modbus,
@@ -67,12 +65,11 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    /// The tag the archive stores. Bound to the serde representation by
-    /// `protocol_tags_agree_with_serde`.
+    /// The tag the archive stores, as the desktop's capture store does.
     pub fn as_str(self) -> &'static str {
         match self {
             Protocol::Can => "can",
-            Protocol::Modbus => "modbus",
+            Protocol::Modbus => MODBUS_RTU_PROTOCOL,
             Protocol::Serial => "serial",
         }
     }
@@ -90,7 +87,8 @@ impl std::str::FromStr for Protocol {
     fn from_str(s: &str) -> Result<Self, ()> {
         match s {
             "can" => Ok(Protocol::Can),
-            "modbus" => Ok(Protocol::Modbus),
+            // A disk cache written before the archive's tag became modbus_rtu.
+            MODBUS_RTU_PROTOCOL | "modbus" => Ok(Protocol::Modbus),
             "serial" => Ok(Protocol::Serial),
             _ => Err(()),
         }
@@ -221,19 +219,15 @@ mod tests {
         assert_eq!("sideways".parse::<Direction>(), Err(()));
     }
 
-    /// The same three-way agreement as `Direction`'s, plus the refusal a
-    /// query parameter relies on.
     #[test]
-    fn protocol_tags_agree_with_serde() {
+    fn protocol_tags_round_trip_and_a_cached_modbus_still_parses() {
         for p in [Protocol::Can, Protocol::Modbus, Protocol::Serial] {
-            assert_eq!(
-                serde_json::to_string(&p).unwrap(),
-                format!("\"{}\"", p.as_str())
-            );
             assert_eq!(p.as_str().parse(), Ok(p));
             assert_eq!(p.to_string(), p.as_str());
         }
-        assert!(serde_json::from_str::<Protocol>("\"modbsu\"").is_err());
+        assert_eq!(Protocol::Modbus.as_str(), MODBUS_RTU_PROTOCOL);
+        assert_eq!("modbus".parse(), Ok(Protocol::Modbus));
+        assert_eq!("modbsu".parse::<Protocol>(), Err(()));
         assert_eq!("CAN".parse::<Protocol>(), Err(()), "case is the column's");
     }
 

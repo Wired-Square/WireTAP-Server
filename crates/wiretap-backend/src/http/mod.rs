@@ -1344,7 +1344,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
     async fn the_databases_list_shows_a_migration_advancing_chunk_by_chunk() {
-        let name = db::tests::seeded_v3_database("progress", 40, 2880).await;
+        let name = db::tests::seeded_v4_database("progress", 40, 2880).await;
         let dbs = db::tests::live_databases(false);
         db::tests::sweep(&dbs).await;
         let at = gateway(dbs.clone()).await;
@@ -1364,7 +1364,7 @@ mod tests {
                 if done.is_some() && seen.last() != done.as_ref() {
                     seen.extend(done);
                 }
-                if listed.is_null() && now.is_some_and(|p| p.phase == "rollup") {
+                if listed.is_null() && now.is_some_and(|p| p.phase != "backfill") {
                     let (_, list) =
                         request_to(at, "GET", "/v1/databases", Some("bootstrap"), None).await;
                     listed = list["databases"]
@@ -1387,7 +1387,11 @@ mod tests {
         assert!(seen.windows(2).all(|w| w[0] < w[1]), "{seen:?}");
         assert_eq!(seen.last().copied(), Some(total as i32));
         assert_eq!(listed["chunks_done"], total, "{listed}");
-        assert_eq!(listed["rows_done"], 40 * 2880, "{listed}");
+        assert_eq!(
+            listed["rows_done"],
+            40 * 2880 / 3,
+            "every Modbus row: {listed}"
+        );
         for field in [
             "current_chunk_start",
             "compressed_left",
@@ -1399,6 +1403,51 @@ mod tests {
         ] {
             assert!(listed.get(field).is_some(), "no {field}: {listed}");
         }
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn a_modbus_read_finds_the_rows_stored_as_modbus_rtu() {
+        let name = db::tests::seeded_v4_database("modbus_reads", 2, 30).await;
+        let dbs = db::tests::live_databases(false);
+        db::tests::sweep(&dbs).await;
+        dbs.start_migration(&name).await.unwrap();
+        db::tests::until_label(&dbs, &name, "current").await;
+        let at = gateway(dbs.clone()).await;
+        let get = |what: &str| {
+            let path = format!("/v1/db/{name}/{what}protocol=modbus");
+            async move { request_to(at, "GET", &path, Some("bootstrap"), None).await }
+        };
+
+        let (status, inventory) = get("inventory?").await;
+        assert_eq!(status, 200, "{inventory}");
+        let entries = inventory["entries"].as_array().unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e["frame_id"].as_i64(), e["count"].as_i64()))
+                .collect::<Vec<_>>(),
+            [(Some(0x0103), Some(20))]
+        );
+
+        let (status, bounds) = get("time-bounds?").await;
+        assert_eq!(status, 200, "{bounds}");
+        assert!(
+            bounds["min_ts_us"].as_i64() < bounds["max_ts_us"].as_i64(),
+            "{bounds}"
+        );
+
+        let (status, batch) = get("frames?limit=100&").await;
+        assert_eq!(status, 200, "{batch}");
+        let frames = batch["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 20, "{batch}");
+        assert!(
+            frames
+                .iter()
+                .all(|f| f["id"] == 0x0103 && f["crc_valid"] == true),
+            "{batch}"
+        );
         dbs.delete_database(&name).await.unwrap();
     }
 

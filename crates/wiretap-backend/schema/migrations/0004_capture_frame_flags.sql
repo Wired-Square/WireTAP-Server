@@ -179,9 +179,6 @@ ALTER TABLE public.capture_frame
   DROP COLUMN IF EXISTS is_fd,
   DROP COLUMN IF EXISTS dir;
 
--- The rollup, the views, `ingest_can_frame` on `flags` and the version row.
--- The newest migration is the one that `\ir`s init_schema.sql — see 0001's
--- step 5.
-\ir ../init_schema.sql
-
-\ir 0001_capture_frame_post.sql
+-- The rollup, the views and `ingest_can_frame` on `flags` are init_schema.sql's,
+-- reached through the next migration, as 0001's step 5 explains.
+\ir 0005_capture_frame_modbus_rtu.sql

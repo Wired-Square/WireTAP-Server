@@ -20,6 +20,10 @@ All notable changes to this project are documented here. Entries go under
   honour `limit` yet. Assigning a catalogue now refuses the `cobs` and
   `length_prefixed` encodings, and a serial header field that sets both `mask`
   and `start_byte`.
+- **Modbus RTU rows are stored as `modbus_rtu`**, the desktop's own capture
+  store's tag, in schema v5. The API still takes `?protocol=modbus`. **Every
+  archive needs Migrate now to v5**; it rewrites only the Modbus rows and
+  relabels the rollup in place.
 
 ## [0.1.10] — 2026-10-06
 
