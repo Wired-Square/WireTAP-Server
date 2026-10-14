@@ -172,6 +172,9 @@ script needs `frontend/node_modules`, the `*-unknown-linux-musl` targets,
 `appliance-xtask`, which checks the Cortex-A53 erratum. Its label is
 `manifest.json` with the version stamped in.
 
+To ship it to an ApplianceOS box, pack it into the apps' signed source
+([apps/README.md](../README.md)).
+
 `entrypoint.sh` starts the daemon, then the UI. On `SIGTERM` the UI stops
 first. If either exits on its own, the other is stopped and the container
 exits 1.

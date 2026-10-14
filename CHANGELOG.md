@@ -31,6 +31,12 @@ All notable changes to this project are documented here. Entries go under
   `/apps/wiretap-server/`, and otherwise its own HTTPS on 8443. The manifest
   declares GVRET on tcp 23, on, and the device-push listener on tcp 9324, off,
   clear of the gateway app's 9323; the image's config file pins that port.
+- **A signed source for the ApplianceOS apps.** `apps/make-source.sh pack`
+  writes the archive an ApplianceOS console installs from: an `index.json`
+  listing both apps on both architectures, each manifest pinned to the digest
+  the box loads its image as, and the images. `sign` adds the index's detached
+  CMS signature from a Code Signing certificate and key passed in, and
+  `test-keys` makes a throwaway root and leaf. The source is named `wiretap`.
 - **The gateway answers an ApplianceOS console.** With `WIRETAP_APP_SOCKET`
   set it also serves on that Unix socket, under `WIRETAP_APP_BASE_PATH`, and a
   request there from `WIRETAP_CONSOLE_UID` (0 by default) is the user the

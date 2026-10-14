@@ -22,6 +22,9 @@ The image's `com.wiredsquare.appliance.manifest` label is `manifest.json` with
 the crate's version stamped in, so the label, the tag and
 `org.opencontainers.image.version` always agree.
 
+To ship it to a box, pack it into the apps' signed source
+([apps/README.md](../README.md)).
+
 ## What it keeps
 
 Everything persistent is under `/data`, the image's only volume:
