@@ -100,8 +100,6 @@ All notable changes to this project are documented here. Entries go under
 - **The card image installs `wiretap-server` through the chassis's `extra_debs`**
   instead of a substage of its own. `scripts/stage-wiretap-server.sh` now copies
   the package to `appliance/target/debian/extra/`.
-- **The README's "Install the capture daemon" offers three ways**: the
-  `.deb`, Docker, or an ApplianceOS app.
 
 ## [0.1.10] — 2026-10-06
 

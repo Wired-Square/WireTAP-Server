@@ -644,8 +644,8 @@ jobs:
         run: npm run ci
 
   # The capture daemon's app image, built and thrown away as the gateway's is.
-  # It carries the UI, so it needs the chassis too. amd64 only: the runner
-  # links it natively.
+  # It carries the UI, so it needs the chassis too. amd64 only: arm64 also
+  # needs appliance-xtask, for the Cortex-A53 erratum check.
   server-image:
     name: Server app image
     runs-on: ubuntu-latest
