@@ -75,7 +75,9 @@ moves the cache or names the daemon can.
 
 - `GET /v1/status`: the version, uptime, each device's state and frame count,
   the forward link per database (connected, last acknowledgement, frames in the
-  disk cache), and the ingest and GVRET clients.
+  disk cache), the ingest and GVRET clients, and whether a change is being
+  applied: once a `PUT` is accepted, this process answers `true` until it
+  executes itself again.
 - `GET /v1/settings`: each such setting's value, source (`default`, `ui`,
   `file`, `env` or `flag`), whether it is pinned and where. A secret is shown
   only as set or unset.

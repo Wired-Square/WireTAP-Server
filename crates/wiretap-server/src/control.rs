@@ -194,6 +194,7 @@ impl State {
             "version": crate::VERSION,
             "daemon_id": s.forward.as_ref().map(|f| &f.daemon_id),
             "uptime_secs": live.started.elapsed().as_secs(),
+            "applying": self.applying.load(Ordering::Relaxed),
             "devices": s.devices.iter().zip(&live.devices).map(|(d, (_, status))| json!({
                 "interface": d.interface,
                 "kind": if d.is_can() { "can" } else { "serial" },

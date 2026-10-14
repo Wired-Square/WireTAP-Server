@@ -135,6 +135,7 @@ fn a_change_over_the_socket_is_applied_by_a_restart() {
     assert_eq!(status, 200);
     assert_eq!(body["ingest"]["enabled"], true);
     assert_eq!(body["forward"]["enabled"], true);
+    assert_eq!(body["applying"], false);
 
     let (status, body) = d.request("PUT", "/v1/settings", r#"{"forward.port": 1}"#);
     assert_eq!(status, 409, "{body}");

@@ -38,7 +38,8 @@ All notable changes to this project are documented here. Entries go under
 - **A control socket for that UI.** HTTP/JSON on
   `$RUNTIME_DIRECTORY/control.sock` (or `--control-socket`), 0660 in the
   daemon's group, with no other authentication. `GET /v1/status` reports the
-  devices, the forward link, and the ingest and GVRET clients;
+  devices, the forward link, the ingest and GVRET clients, and whether a
+  change is being applied;
   `GET /v1/settings` each setting a UI may change, its source and whether it is
   pinned, never a secret; `PUT /v1/settings` validates a change as a start
   would, writes `ui.toml`, shuts down as on `SIGTERM` and executes the daemon
