@@ -303,6 +303,15 @@ pub fn apply(
             ));
         }
     }
+    if put.get("devices").is_some_and(Value::is_null) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            json!({
+                "error": "devices cannot be cleared: the default, can0, transmits; set a device list instead",
+                "key": "devices",
+            }),
+        ));
+    }
 
     let resolved = settings::Settings::resolve(cli, file.as_ref(), Some(&next), env)
         .map_err(|e| unstartable(&e))?;
@@ -442,6 +451,30 @@ mod tests {
             r.refused(json!({"forward.daemon_id": "x"})).1["key"],
             "forward.daemon_id"
         );
+    }
+
+    #[test]
+    fn devices_cannot_be_cleared_back_to_the_transmitting_default() {
+        let r = rig("put-null-devices", &[], None);
+        let (status, body) = r.refused(json!({"devices": null}));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["key"], "devices");
+    }
+
+    /// Off Linux no device can start, so every list is a 422.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_device_list_replaced_by_another_stays_passive() {
+        let r = rig("put-devices", &[], None);
+        r.put(json!({"devices": [{"interface": "can1"}]})).unwrap();
+        r.put(json!({"devices": [{"interface": "can2"}]})).unwrap();
+        let ui = ui::load(&r.ui()).unwrap();
+        let s = Settings::resolve(&r.cli, None, Some(&ui), &env())
+            .unwrap()
+            .settings;
+        assert_eq!(s.devices.len(), 1);
+        assert_eq!(s.devices[0].interface, "can2");
+        assert_eq!(s.devices[0].mode, crate::settings::Mode::Passive);
     }
 
     #[test]
