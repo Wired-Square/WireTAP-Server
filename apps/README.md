@@ -78,3 +78,4 @@ check, the upload and install routes, and a fetch from a source's URL. It
 also proves that a tampered index, a root the box does not hold, and a leaf
 not for code signing are refused. It needs the private ApplianceOS repository
 and the chassis, so CI does not run it; `APPLIANCEOS_REV` picks the commit.
+Its build, about 2 GB, stays in `target/apps/source-check` for the next run.

@@ -10,13 +10,9 @@
 # under target/apps/source-check.
 set -euo pipefail
 
-[[ $# == 1 || $# == 2 ]] || {
-	sed -n 's/^#     apps/usage: apps/p' "$0" >&2
-	exit 2
-}
-HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=apps/make-source.sh
-. "$HERE/make-source.sh"
+. "$(dirname -- "$0")/make-source.sh"
+[[ $# == 1 || $# == 2 ]] || usage
 applianceos=$1
 work=$ROOT/target/apps/source-check
 case=$work/case
@@ -37,7 +33,7 @@ cp "$work/other/root.pem" "$case/other-root.pem"
 jq -c '.apps[0].manifest.version += "-tampered"' "$case/index.json" >"$case/tampered.json"
 
 git -C "$applianceos" archive "${APPLIANCEOS_REV:-HEAD}" console | tar -x -C "$work/applianceos"
-printf '\n#[path = "%s"]\nmod wiretap_source;\n' "$HERE/check-source.rs" \
+printf '\n#[path = "%s"]\nmod wiretap_source;\n' "$ROOT/apps/check-source.rs" \
 	>>"$work/applianceos/console/crates/proxy/src/install/tests.rs"
 WIRETAP_SOURCE_CASE=$case CARGO_TARGET_DIR=$work/target \
 	cargo test --manifest-path "$work/applianceos/console/Cargo.toml" -p applianceos-proxy --lib wiretap_source

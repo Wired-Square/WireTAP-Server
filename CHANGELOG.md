@@ -90,7 +90,6 @@ All notable changes to this project are documented here. Entries go under
   keeps its accounts in `/var/lib/wiretap-server-ui` until a purge.
   `apps/wiretap-server/tests/deb-lifecycle.sh` installs, upgrades, removes and
   purges the pair.
-
 - **A release builds the ApplianceOS apps**: both apps' tarballs for both
   architectures, and the unsigned source archive with its `index.json` and
   checksums, as workflow artefacts. Signing stays a maintainer's step

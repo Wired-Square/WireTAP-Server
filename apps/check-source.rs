@@ -6,9 +6,13 @@ use crate::source::Unverified;
 
 const SOURCE: &str = "wiretap";
 
-fn case(name: &str) -> Vec<u8> {
+fn case_path(name: &str) -> PathBuf {
     let dir = std::env::var("WIRETAP_SOURCE_CASE").expect("run by apps/check-source.sh");
-    std::fs::read(Path::new(&dir).join(name)).unwrap()
+    Path::new(&dir).join(name)
+}
+
+fn case(name: &str) -> Vec<u8> {
+    std::fs::read(case_path(name)).unwrap()
 }
 
 fn holding(root: &[u8]) -> (TempDir, Sources) {
@@ -28,10 +32,7 @@ fn untrusted_because(refused: Result<Verified, Unverified>, why: &str) {
 #[test]
 fn the_signed_index_offers_both_apps_on_both_arches_each_image_in_the_archive() {
     let (_dir, sources) = holding(&case("root.pem"));
-    let path = std::env::temp_dir().join(format!("wiretap-source-{}.tar", std::process::id()));
-    std::fs::write(&path, case("signed.tar")).unwrap();
-    let archive = read_archive(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
+    let archive = read_archive(&case_path("signed.tar")).unwrap();
 
     let verified = sources
         .verify(&archive.index.unwrap(), &archive.signature.unwrap())
