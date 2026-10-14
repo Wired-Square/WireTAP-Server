@@ -81,9 +81,10 @@ With `WIRETAP_APP_SOCKET` set, the gateway also serves every route on that Unix
 socket, under `WIRETAP_APP_BASE_PATH`, for the console's proxy. There a request
 from `WIRETAP_CONSOLE_UID` is the user its `Appliance-Identity` header names,
 and no key is asked for or read. A console `admin` or `hostadmin` is `admin`
-here, and a `viewer` or `operator` is `read`. Any other uid on the socket gets a
-401, and a malformed header a 400. The TCP listener ignores the header and
-still needs a key.
+here, and a `viewer` or `operator` is `read`. Any other uid on the socket gets
+`/healthz`, `/v1/health` and the admin UI's files, and a 401 from every other
+route; a malformed header from the console is a 400. The TCP listener ignores
+the header and still needs a key.
 
 ## Databases (one per capture)
 
@@ -222,9 +223,9 @@ for, and `auto_migrate`.
 Full list (listen addresses, ingest keepalive/batch caps, log buffer size, the
 admin UI's directory) is in [src/config.rs](src/config.rs).
 
-`GET /healthz` (under each listener's base path) answers 200 while Postgres is reachable
-and 503 when it is not, for a supervisor's probe. `/v1/health` answers 200
-either way and says which.
+`GET /healthz` (under each listener's base path) answers 200 while Postgres is
+reachable and 503 when it is not, for a supervisor's probe. `/v1/health`
+answers 200 either way and says which.
 
 The Logging tab shows the newest `WIRETAP_LOG_BUFFER` records (2000) from
 memory; stdout remains the durable log.

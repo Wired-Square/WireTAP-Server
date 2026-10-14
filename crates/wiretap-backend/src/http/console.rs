@@ -141,8 +141,8 @@ impl fmt::Display for SocketPeer {
     }
 }
 
-/// Over a dead socket left by an earlier run. Group 0 may connect: that is how
-/// a console that is root without capabilities reaches it.
+/// Over any socket already at `path`, such as an earlier run's. Group 0 may
+/// connect: that is how a console that is root without capabilities reaches it.
 pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
         std::fs::remove_file(path)?;

@@ -304,7 +304,7 @@ fn console_caller(
     let unauthorised = |msg: &str| ApiError(StatusCode::UNAUTHORIZED, msg.into());
     if !from_console {
         return Err(unauthorised(
-            "only the console is answered on the app socket",
+            "only the console may call this on the app socket",
         ));
     }
     let asserted = console::asserted(headers)

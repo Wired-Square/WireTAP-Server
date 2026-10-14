@@ -14,10 +14,11 @@ All notable changes to this project are documented here. Entries go under
 - **The gateway as an ApplianceOS app.** `apps/wiretap-gateway/make-image.sh`
   builds one image per architecture holding the gateway and its own Postgres 16
   with TimescaleDB 2.29.2, kept under the app's `/data` volume. It runs as any
-  uid with no capabilities, generates its Postgres password and admin key on
-  first start, and stops the gateway before the database. It declares
-  `sockets.app` and serves the console on `/run/appliance/app.sock` under
-  `/apps/wiretap-gateway`, so the admin UI opens from the console with no key.
+  uid in group 0 with no capabilities, generates its Postgres password and
+  admin key on first start, and stops the gateway before the database. It
+  declares `sockets.app` and serves the console on `/run/appliance/app.sock`
+  under `/apps/wiretap-gateway`, so the admin UI opens from the console with
+  no key.
 - **The gateway answers an ApplianceOS console.** With `WIRETAP_APP_SOCKET`
   set it also serves on that Unix socket, under `WIRETAP_APP_BASE_PATH`, and a
   request there from `WIRETAP_CONSOLE_UID` (0 by default) is the user the
