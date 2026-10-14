@@ -2,8 +2,6 @@
 # The capture daemon, then its web UI; stopped in the reverse order.
 set -eu
 
-log() { echo "wiretap-server: $*" >&2; }
-
 stop() {
 	kill -TERM "${ui:-}" 2>/dev/null && wait "$ui" || :
 	kill -TERM "${daemon:-}" 2>/dev/null && wait "$daemon" || :
@@ -39,6 +37,6 @@ while kill -0 "$daemon" 2>/dev/null && kill -0 "$ui" 2>/dev/null; do
 	sleep 1 &
 	wait $! || :
 done
-log "a process exited on its own; stopping the rest"
+echo "wiretap-server: a process exited on its own; stopping the rest" >&2
 stop
 exit 1
