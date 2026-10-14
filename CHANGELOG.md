@@ -45,6 +45,16 @@ All notable changes to this project are documented here. Entries go under
   would, writes `ui.toml`, shuts down as on `SIGTERM` and executes the daemon
   again on the same PID, or exits 75 for the supervisor if it cannot. The
   packaged unit adds `RuntimeDirectory=` and `SuccessExitStatus=75`.
+- **A web UI for the capture daemon, `wiretap-server-ui`**, in its own
+  workspace, `apps/wiretap-server/`, on the private chassis v0.8.0. It shows
+  the devices, the forward link and its cache, and the device-push and GVRET
+  clients, and changes the settings a UI may change, each pinned one shown as
+  fixed with where. It reaches the daemon only through the control socket
+  (`--daemon-socket`, `/run/wiretap-server/control.sock` by default). One
+  binary serves its own HTTPS and accounts, or, with
+  `WIRETAP_SERVER_UI_APP_SOCKET` and `_CONSOLE_UID` set, an ApplianceOS
+  console's proxy. Anyone signed in reads; only an admin changes, and a
+  change is answered once the daemon has restarted on it.
 
 ### Changed
 

@@ -1,0 +1,22 @@
+{
+  "name": "wiretap-server-ui-frontend",
+  "version": "0.1.0",
+  "description": "The capture daemon's web UI: the chassis's shell and the Capture screen.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\"",
+    "ci": "npm run check && npm test && npm run build"
+  },
+  "dependencies": {
+    "@wired-square/appliance-ui": "github:Wired-Square/wslib-appliance-rs#v0.8.0",
+    "solid-js": "^1.9.14"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1"
+  }
+}
