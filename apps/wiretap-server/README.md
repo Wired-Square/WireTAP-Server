@@ -95,6 +95,8 @@ curl --unix-socket /tmp/wt/app.sock http://app/apps/wiretap-server/api/capture/s
 `npm run dev` in `frontend/` serves the browser half with hot reload, proxied
 to the standalone UI on `https://localhost:8443`, or to
 `WIRETAP_SERVER_UI_API`, such as the dev console's `http://127.0.0.1:18080`.
+It asks for `/api` at the root, so a UI behind the dev console must then be
+started without `WIRETAP_SERVER_UI_BASE_PATH`.
 
 ## The API
 
@@ -108,8 +110,8 @@ Under `/api`, beside the chassis's:
 
 A read answers 200 with the daemon's body and `"state": "ready"`, or
 `{"state": "unsupported", "because": "…"}` when the daemon is not answering.
-A change the daemon could not be asked is a 503; one it took but has not come
-back from within 30 s is a 504.
+A change the daemon could not be asked, or did not answer within 10 s, is a
+503; one it took but has not come back from within 30 s is a 504.
 
 ## Gates
 
@@ -119,6 +121,7 @@ chassis:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
+cargo clippy --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
 cargo test --locked
 (cd frontend && npm ci && npm run ci)    # typecheck, unit tests, build
 ```
