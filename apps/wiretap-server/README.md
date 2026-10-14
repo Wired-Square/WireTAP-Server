@@ -228,7 +228,8 @@ cargo build --release --locked --target aarch64-unknown-linux-musl
 
 ```sh
 docker load -i target/apps/wiretap-server-<version>-<arch>.tar
-WIRETAP_SERVER_VERSION=<version> docker compose -f apps/wiretap-server/docker-compose.yml up -d
+export WIRETAP_SERVER_VERSION=<version>
+docker compose -f apps/wiretap-server/docker-compose.yml up -d
 ```
 
 It sets `WIRETAP_SERVER_UI_ONBOARDING=browser`, so the first person to reach
@@ -237,4 +238,5 @@ The daemon's settings come from the UI, beneath the image's
 `/etc/wiretap-server/wiretap-server.toml`; mount a file of your own there to
 pin more, or to move the device-push listener back to 9323. The UI's own
 `WIRETAP_SERVER_UI_*` variables, such as `WIRETAP_SERVER_UI_HTTPS_PORT`, go in
-`environment:`.
+`environment:`. Only the daemon holds a capability, so the UI's port must be
+1024 or above.

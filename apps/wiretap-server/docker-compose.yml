@@ -2,7 +2,8 @@
 # make-image.sh builds:
 #
 #   docker load -i target/apps/wiretap-server-<version>-<arch>.tar
-#   WIRETAP_SERVER_VERSION=<version> docker compose -f apps/wiretap-server/docker-compose.yml up -d
+#   export WIRETAP_SERVER_VERSION=<version>
+#   docker compose -f apps/wiretap-server/docker-compose.yml up -d
 #
 # Then make the first account at https://<host>:8443/.
 name: wiretap-server
