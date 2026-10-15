@@ -1,4 +1,4 @@
-wiretap-server (0.1.11) UNRELEASED; urgency=medium
+wiretap-server (0.1.11) bookworm; urgency=medium
 
   * The config file is optional, and the installed one sets nothing: every
     key is commented out. A -C naming a missing file starts on the defaults.
