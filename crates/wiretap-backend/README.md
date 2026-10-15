@@ -90,6 +90,14 @@ here, and a `viewer` or `operator` is `read`. Any other uid on the socket gets
 route; a malformed header from the console is a 400. The TCP listener ignores
 the header and still needs a key.
 
+Issuing or destroying a credential (creating, rotating or revoking a key, and
+rotating either secret) also needs the console to say its user confirmed their
+password in the last five minutes (`reauth=` in the header, the chassis's
+window). Otherwise it is a 403, `this needs the password confirmed in the last
+5 minutes`, as the console's own such routes answer: confirm the password in the
+console and try again. Editing, disabling and enabling a key are not asked, and
+neither is a key on the TCP listener.
+
 ## Rotating the database password and the admin key
 
 The admin UI's Keys tab has a Secrets section with a Rotate… for each. From a
@@ -100,7 +108,8 @@ docker compose exec backend wiretap-backend rotate db-password   # or admin-key
 ```
 
 asks the running gateway to do the same, through
-`POST /v1/admin/secrets/{db-password|admin-key}/rotate` (admin only), signed in
+`POST /v1/admin/secrets/{db-password|admin-key}/rotate` (admin only, and
+behind a console [a recent password](#behind-an-applianceos-console)), signed in
 with the admin key from its own environment (`WIRETAP_ADMIN_KEY`, else
 `WIRETAP_ADMIN_KEY_FILE`). After an admin key from the environment has been
 rotated, that one is stale: pass the new one with
@@ -289,7 +298,8 @@ reachable and 503 when it is not, for a supervisor's probe. `/v1/health`
 answers 200 either way and says which.
 
 The Logging tab shows the newest `WIRETAP_LOG_BUFFER` records (2000) from
-memory; stdout remains the durable log.
+memory; stdout remains the durable log. A field named like a credential shows
+as `[redacted]`, and a URL's `user:password@` as `redacted@`.
 
 ## Optional: pgBackRest backups
 

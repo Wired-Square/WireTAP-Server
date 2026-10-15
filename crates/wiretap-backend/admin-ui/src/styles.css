@@ -184,16 +184,14 @@ button.icon {
 }
 button.icon:hover, button.icon[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
 
-.menu { position: relative; display: inline-block; }
+/* Placed by Menu.tsx in the top layer; the UA's popover centring is undone. */
 .menu-list {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 4px);
-  z-index: 10;
+  position: fixed;
+  inset: auto;
+  margin: 0;
   min-width: 9rem;
-  display: flex;
-  flex-direction: column;
   padding: 0.25rem;
+  color: var(--text);
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -211,5 +209,24 @@ button.icon:hover, button.icon[aria-expanded="true"] { color: var(--text); borde
 }
 .menu-list [role="menuitem"]:hover { background: var(--surface); }
 .menu-list [role="menuitem"]:focus-visible { background: var(--surface); outline: 1px solid var(--accent); }
+.menu-list:popover-open { display: flex; flex-direction: column; }
+/* A browser without `popover` never opens it; a closed panel is empty. */
+.menu-list:empty { display: none; }
 .menu-list [role="menuitem"].danger { color: var(--danger); }
+.menu-list [role="menuitem"][aria-disabled="true"] { color: var(--text-muted); cursor: default; }
 .menu-list [role="separator"] { height: 1px; background: var(--border); margin: 0.25rem 0; }
+
+dialog.confirm {
+  max-width: min(32rem, calc(100vw - 2rem));
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgb(0 0 0 / 0.5);
+}
+dialog.confirm::backdrop { background: rgb(0 0 0 / 0.55); }
+dialog.confirm .error { margin-top: 0; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+dialog.confirm button.btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+button.btn[aria-disabled="true"] { opacity: 0.5; cursor: default; }

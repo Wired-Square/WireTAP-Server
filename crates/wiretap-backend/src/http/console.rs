@@ -7,10 +7,12 @@ use std::fmt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 
 use axum::extract::connect_info::Connected;
 use axum::http::HeaderMap;
 use axum::serve::IncomingStream;
+use chrono::{DateTime, Utc};
 use tokio::net::UnixListener;
 
 use crate::keys::Role;
@@ -19,11 +21,27 @@ pub const IDENTITY_HEADER: &str = "appliance-identity";
 
 const MAX_FIELD: usize = 256;
 
+/// The chassis's own, mirrored so the gateway stays free of it.
+pub const REAUTHENTICATION_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// The chassis's refusal of a stale proof, which a console matches on.
+pub const STALE_PROOF: &str = "this needs the password confirmed";
+
 /// The caller a console asserts, in the gateway's roles.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Asserted {
     pub username: String,
     pub role: Role,
+    pub reauthenticated_at: Option<DateTime<Utc>>,
+}
+
+/// Within the window and not ahead of `now`, as the chassis judges it.
+pub fn proved_recently(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    at.is_some_and(|at| {
+        (now - at)
+            .to_std()
+            .is_ok_and(|age| age <= REAUTHENTICATION_WINDOW)
+    })
 }
 
 /// `None` when no header was sent; refused when one is malformed or sent twice.
@@ -64,18 +82,21 @@ impl FromStr for Asserted {
                 return Err("a repeated key");
             }
         }
-        if let Some(raw) = reauth {
-            raw.bytes()
-                .all(|b| b.is_ascii_digit())
-                .then(|| raw.parse().ok())
-                .flatten()
-                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-                .ok_or("reauth is not a time in unix seconds")?;
-        }
+        let reauthenticated_at = reauth
+            .map(|raw| {
+                raw.bytes()
+                    .all(|b| b.is_ascii_digit())
+                    .then(|| raw.parse().ok())
+                    .flatten()
+                    .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+                    .ok_or("reauth is not a time in unix seconds")
+            })
+            .transpose()?;
         decoded(id.ok_or("no id")?)?;
         Ok(Self {
             username: decoded(user.ok_or("no user")?)?,
             role: gateway_role(role.ok_or("no role")?).ok_or("an unknown role")?,
+            reauthenticated_at,
         })
     }
 }
@@ -167,6 +188,7 @@ mod tests {
             Ok(Asserted {
                 username: "Zoë O'Brien".into(),
                 role: Role::Read,
+                reauthenticated_at: DateTime::from_timestamp(1_760_000_000, 0),
             })
         );
         assert_eq!(
@@ -221,6 +243,18 @@ mod tests {
             &format!("v1; id={}; user=a; role=admin", "a".repeat(MAX_FIELD + 1)),
         ] {
             assert!(parse(value).is_err(), "{value:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn a_proof_counts_within_the_window_and_not_before_or_after_it() {
+        let now = Utc::now();
+        let window = chrono::TimeDelta::from_std(REAUTHENTICATION_WINDOW).unwrap();
+        let second = chrono::TimeDelta::seconds(1);
+        assert!(proved_recently(Some(now), now));
+        assert!(proved_recently(Some(now - window), now));
+        for at in [None, Some(now - window - second), Some(now + second)] {
+            assert!(!proved_recently(at, now), "{at:?}");
         }
     }
 

@@ -1,57 +1,90 @@
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useId, useLayoutEffect, useRef, useState } from "react";
 
-export type MenuItem = { label: string; onSelect: () => void; danger?: boolean } | "separator";
+export type MenuItem =
+  | { label: string; onSelect: () => void; danger?: boolean; unavailable?: string }
+  | "separator";
 
-/** A kebab button and its menu: arrow keys move, Escape and an outside click close. */
+const STEPS: Record<string, (at: number, last: number) => number> = {
+  ArrowDown: (at, last) => (at >= last ? 0 : at + 1),
+  ArrowUp: (at, last) => (at <= 0 ? last : at - 1),
+  Home: () => 0,
+  End: (_, last) => last,
+};
+
+/**
+ * A kebab button and its menu, on `popover` so light dismiss, Escape and the
+ * top layer (no clipping by a scrolling table) are the platform's. The trigger
+ * is the panel's `popovertarget`, so the platform knows not to light-dismiss on
+ * the trigger's own press. Items are built only while it is open.
+ */
 export default function Menu({ label, items }: { label: string; items: MenuItem[] }) {
-  const [open, setOpen] = useState(false);
-  const root = useRef<HTMLDivElement>(null);
+  const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
-  const entries = () => [...(root.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
+  const panel = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const entries = () => [...(panel.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
+  const dismiss = () => panel.current?.hidePopover();
 
-  useEffect(() => {
+  // Once the items are in, before paint; measured at the origin, where no
+  // label wraps against the viewport's edge. A fixed panel does not follow the
+  // row it was placed against, so a scroll or resize closes it.
+  useLayoutEffect(() => {
     if (!open) return;
-    entries()[0]?.focus();
-    const outside = (e: MouseEvent) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const escape = (e: globalThis.KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      setOpen(false);
-      trigger.current?.focus();
-    };
-    document.addEventListener("mousedown", outside);
-    document.addEventListener("keydown", escape);
+    const p = panel.current!;
+    p.style.top = p.style.left = "0px";
+    const at = trigger.current!.getBoundingClientRect();
+    const roomBelow = window.innerHeight - at.bottom;
+    p.style.top = `${roomBelow < p.offsetHeight + 8 ? at.top - p.offsetHeight - 4 : at.bottom + 4}px`;
+    p.style.left = `${Math.max(8, at.right - p.offsetWidth)}px`;
+    p.style.visibility = "";
+    entries()[0]?.focus({ preventScroll: true });
+    window.addEventListener("scroll", dismiss, { capture: true, passive: true });
+    window.addEventListener("resize", dismiss);
     return () => {
-      document.removeEventListener("mousedown", outside);
-      document.removeEventListener("keydown", escape);
+      window.removeEventListener("scroll", dismiss, { capture: true });
+      window.removeEventListener("resize", dismiss);
     };
   }, [open]);
 
-  const move = (e: KeyboardEvent) => {
-    const step = { ArrowDown: 1, ArrowUp: -1 }[e.key];
+  const navigate = (e: KeyboardEvent) => {
+    if (e.key === "Tab") {
+      dismiss();
+      return;
+    }
+    const step = STEPS[e.key];
     if (!step) return;
     e.preventDefault();
     const all = entries();
-    const at = all.indexOf(document.activeElement as HTMLElement);
-    all[(at + step + all.length) % all.length]?.focus();
+    all[step(all.indexOf(document.activeElement as HTMLElement), all.length - 1)]?.focus();
   };
 
   return (
-    <div className="menu" ref={root}>
+    <>
       <button
         ref={trigger}
         className="icon"
+        popoverTarget={id}
         aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen(!open)}
       >
         ⋮
       </button>
-      {open && (
-        <div role="menu" className="menu-list" onKeyDown={move}>
-          {items.map((item, i) =>
+      <div
+        ref={panel}
+        id={id}
+        popover="auto"
+        role="menu"
+        aria-label={label}
+        className="menu-list"
+        onKeyDown={navigate}
+        onBeforeToggle={(e) => {
+          if (e.newState === "open") panel.current!.style.visibility = "hidden";
+        }}
+        onToggle={(e) => setOpen(e.newState === "open")}
+      >
+        {open &&
+          items.map((item, i) =>
             item === "separator" ? (
               <div key={i} role="separator" />
             ) : (
@@ -59,17 +92,22 @@ export default function Menu({ label, items }: { label: string; items: MenuItem[
                 key={item.label}
                 role="menuitem"
                 className={item.danger ? "danger" : undefined}
+                aria-disabled={item.unavailable ? true : undefined}
                 onClick={() => {
-                  setOpen(false);
+                  if (item.unavailable) return;
+                  // Closed and focus handed back first, so a dialog the item opens
+                  // returns focus to the trigger rather than to a hidden item.
+                  dismiss();
+                  trigger.current?.focus();
                   item.onSelect();
                 }}
               >
                 {item.label}
+                {item.unavailable && <small> — {item.unavailable}</small>}
               </button>
             ),
           )}
-        </div>
-      )}
-    </div>
+      </div>
+    </>
   );
 }

@@ -33,7 +33,7 @@ use crate::config::{AppSocket, Config};
 use crate::db;
 use crate::events;
 use crate::ingest::writer::FrameRow;
-use crate::keys::{KeyInfo, KeyRotation, Role};
+use crate::keys::{ConsoleUser, KeyInfo, KeyRotation, Role};
 use crate::running;
 use crate::schema;
 use crate::sql;
@@ -250,9 +250,9 @@ async fn access_log_mw(req: Request, next: Next) -> Response {
     let ms = started.elapsed().as_millis();
     let who = match response.extensions().get::<KeyInfo>() {
         Some(KeyInfo {
-            console_user: Some(user),
+            console: Some(user),
             ..
-        }) => format!("user={user}"),
+        }) => format!("user={}", user.name),
         Some(key) => format!("key={}", key.name),
         None => "key=-".into(),
     };
@@ -327,14 +327,17 @@ fn console_caller(
         name: format!("console:{}", asserted.username),
         role: asserted.role,
         database_pin: None,
-        console_user: Some(asserted.username),
+        console: Some(ConsoleUser {
+            name: asserted.username,
+            reauthenticated_at: asserted.reauthenticated_at,
+        }),
     })
 }
 
 /// Who the caller is and by what, so the admin UI knows whether to ask for a key.
 async fn whoami(Extension(key): Extension<KeyInfo>) -> Json<serde_json::Value> {
-    Json(match key.console_user {
-        Some(user) => json!({ "via": "console", "name": user, "role": key.role }),
+    Json(match key.console {
+        Some(user) => json!({ "via": "console", "name": user.name, "role": key.role }),
         None => json!({ "via": "key", "name": key.name, "role": key.role }),
     })
 }
@@ -358,6 +361,27 @@ fn check_admin(key: &KeyInfo) -> Result<(), ApiError> {
         return Err(forbidden("admin role required"));
     }
     Ok(())
+}
+
+/// For issuing or destroying a credential. Behind a console the caller must
+/// also have proved their password recently, as the chassis asks of its own
+/// such routes; a bearer key has no password to prove.
+fn check_admin_reauthenticated(key: &KeyInfo) -> Result<(), ApiError> {
+    check_admin(key)?;
+    match &key.console {
+        Some(user) if !console::proved_recently(user.reauthenticated_at, chrono::Utc::now()) => {
+            tracing::warn!(
+                user = %user.name,
+                "re-authentication refused: the password was not confirmed recently"
+            );
+            Err(forbidden(&format!(
+                "{} in the last {} minutes",
+                console::STALE_PROOF,
+                console::REAUTHENTICATION_WINDOW.as_secs() / 60
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 async fn client_for(state: &St, db: &str) -> Result<deadpool_postgres::Object, ApiError> {
@@ -1050,7 +1074,7 @@ async fn keys_create(
     Extension(key): Extension<KeyInfo>,
     Json(body): Json<CreateKeyBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    check_admin(&key)?;
+    check_admin_reauthenticated(&key)?;
     let role = Role::parse(&body.role)
         .ok_or_else(|| ApiError::from(format!("unknown role '{}'", body.role)))?;
     let (id, plaintext) = state
@@ -1094,7 +1118,7 @@ async fn keys_rotate(
     Extension(key): Extension<KeyInfo>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    check_admin(&key)?;
+    check_admin_reauthenticated(&key)?;
     match state.keys.rotate(id).await? {
         KeyRotation::Rotated(plaintext) => Ok(Json(json!({ "id": id, "key": plaintext }))),
         KeyRotation::NotFound => Err(not_found(format!("key not found: {id}"))),
@@ -1137,7 +1161,7 @@ async fn keys_delete(
     Extension(key): Extension<KeyInfo>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    check_admin(&key)?;
+    check_admin_reauthenticated(&key)?;
     if state.keys.delete(id).await? {
         Ok(Json(json!({ "deleted": id })))
     } else {
@@ -1157,6 +1181,7 @@ async fn secrets_list(
     Ok(Json(json!({
         "db_password": { "persisted": files.pg_password.is_some() },
         "admin_key": {
+            "configured": state.keys.bootstrap_configured(),
             "persisted": files.admin_key.is_some(),
             "stale_config": state.keys.stale_config(),
         },
@@ -1175,7 +1200,7 @@ async fn rotate_db_password(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
 ) -> Result<Json<Rotated>, ApiError> {
-    check_admin(&key)?;
+    check_admin_reauthenticated(&key)?;
     let _rotation = state.rotation.lock().await;
     let file = state.secret_files.pg_password.as_deref();
     let password = state
@@ -1202,14 +1227,22 @@ async fn rotate_admin_key(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
 ) -> Result<Json<Rotated>, ApiError> {
-    check_admin(&key)?;
+    check_admin_reauthenticated(&key)?;
     let _rotation = state.rotation.lock().await;
     let file = state.secret_files.admin_key.as_deref();
     let admin_key = state
         .keys
         .rotate_bootstrap_key(file)
         .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::CONFLICT,
+                "no admin key is configured (WIRETAP_ADMIN_KEY or WIRETAP_ADMIN_KEY_FILE) \
+                 for a new one to replace"
+                    .into(),
+            )
+        })?;
     tracing::warn!("{} rotated the admin key", key.name);
     Ok(Json(Rotated {
         secret: admin_key,
@@ -1720,6 +1753,93 @@ mod tests {
         assert_eq!(over_socket(&socket, "/healthz", "").await.0, 404);
     }
 
+    /// A body only where the handler reads one: a server that answers without
+    /// reading the body closes on unread bytes, which resets the connection
+    /// before the client has read the answer.
+    const CREDENTIAL_ROUTES: [(&str, &str, &[u8]); 5] = [
+        (
+            "POST",
+            "/v1/admin/keys",
+            br#"{"name":"probe","role":"read"}"#,
+        ),
+        ("POST", "/v1/admin/keys/1/rotate", b""),
+        ("DELETE", "/v1/admin/keys/1", b""),
+        ("POST", "/v1/admin/secrets/db-password/rotate", b""),
+        ("POST", "/v1/admin/secrets/admin-key/rotate", b""),
+    ];
+
+    /// The database is unreachable, so an allowed request fails further in,
+    /// and only the gate answers 403.
+    #[tokio::test]
+    async fn behind_the_console_a_credential_needs_a_recent_password() {
+        let (socket, tcp) = gateway_on_app_socket("reauth", 0).await;
+        // Both on both listeners: the socket must not read the key, and TCP
+        // must not read the assertion.
+        let headers = |reauth: Option<i64>| {
+            let proof = reauth.map_or(String::new(), |at| format!("; reauth={at}"));
+            format!(
+                "Authorization: Bearer bootstrap\r\n\
+                 Appliance-Identity: v1; id=a1; user=ops; role=admin{proof}\r\n"
+            )
+        };
+        let ask =
+            |method: &'static str, path: &'static str, body: &'static [u8], reauth: Option<i64>| {
+                let socket = socket.clone();
+                let headers = headers(reauth);
+                async move {
+                    let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+                    let path = format!("{BASE}{path}");
+                    let (status, _, body) =
+                        exchange_over(stream, method, &path, &headers, "application/json", body)
+                            .await;
+                    (status, body)
+                }
+            };
+        let now = chrono::Utc::now().timestamp();
+        let stale = now - console::REAUTHENTICATION_WINDOW.as_secs() as i64 - 1;
+
+        for (method, path, body) in CREDENTIAL_ROUTES {
+            for reauth in [None, Some(stale), Some(now + 60)] {
+                let (status, answer) = ask(method, path, body, reauth).await;
+                assert_eq!(status, 403, "{method} {path} {reauth:?}: {answer}");
+                let error: ErrorBody = serde_json::from_str(&answer).unwrap();
+                assert_eq!(
+                    error.error,
+                    format!("{} in the last 5 minutes", console::STALE_PROOF)
+                );
+            }
+            let (status, answer) = ask(method, path, body, Some(now)).await;
+            assert_ne!(status, 403, "{method} {path} fresh: {answer}");
+            for malformed in [-5, i64::MAX] {
+                let (status, answer) = ask(method, path, b"", Some(malformed)).await;
+                assert_eq!(status, 400, "{method} {path} {malformed}: {answer}");
+            }
+
+            let stream = tokio::net::TcpStream::connect(tcp).await.unwrap();
+            let stale_headers = headers(Some(stale));
+            let (status, _, answer) = exchange_over(
+                stream,
+                method,
+                path,
+                &stale_headers,
+                "application/json",
+                body,
+            )
+            .await;
+            assert_ne!(status, 403, "{method} {path} by key: {answer}");
+        }
+
+        for (method, path, body) in [
+            ("POST", "/v1/admin/keys/1/disable", b"" as &[u8]),
+            ("POST", "/v1/admin/keys/1/enable", b""),
+            ("PATCH", "/v1/admin/keys/1", br#"{"name":"probe"}"#),
+            ("GET", "/v1/admin/keys", b""),
+        ] {
+            let (status, answer) = ask(method, path, body, Some(stale)).await;
+            assert_ne!(status, 403, "{method} {path}: {answer}");
+        }
+    }
+
     #[tokio::test]
     async fn anybody_but_the_console_is_nobody_on_the_socket() {
         let (socket, _) = gateway_on_app_socket("other", 1).await;
@@ -2185,6 +2305,7 @@ mod tests {
         let at = live_gateway_with("p10_admin_env", &db::tests::config_at(0, false)).await;
         let (_, sources) =
             request_to(at, "GET", "/v1/admin/secrets", Some("bootstrap"), None).await;
+        assert_eq!(sources["admin_key"]["configured"], true);
         assert_eq!(sources["admin_key"]["persisted"], false);
         assert_eq!(sources["admin_key"]["stale_config"], false);
 

@@ -90,7 +90,67 @@ impl LogBuffer {
     }
 }
 
-/// Splits an event into its rendered message and its structured fields.
+/// Field names whose values are never captured, after the appliance chassis's
+/// `redact::is_secret`.
+const SECRET_NAMES: &[&str] = &[
+    "password",
+    "passphrase",
+    "secret",
+    "token",
+    "psk",
+    "cookie",
+    "authorization",
+    "community",
+];
+
+/// Not bare `key`, which names innocent things too.
+const SECRET_SUFFIXES: &[&str] = &[
+    "_password",
+    "_passphrase",
+    "_secret",
+    "_token",
+    "_key",
+    "_hash",
+    "_community",
+];
+
+fn is_secret(name: &str) -> bool {
+    SECRET_NAMES.contains(&name) || SECRET_SUFFIXES.iter().any(|s| name.ends_with(s))
+}
+
+/// `scheme://user:password@host` becomes `scheme://redacted@host`; the host is
+/// what makes the line useful.
+fn strip_userinfo(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(scheme_end) = rest.find("://") {
+        let after = scheme_end + "://".len();
+        out.push_str(&rest[..after]);
+        rest = &rest[after..];
+        // An `@` past the authority is an address in a path or a message.
+        let authority_end = rest
+            .find(|c: char| {
+                matches!(c, '/' | '?' | '#' | ')' | '"' | '\'' | ',') || c.is_whitespace()
+            })
+            .unwrap_or(rest.len());
+        match rest[..authority_end].rfind('@') {
+            Some(at) => {
+                out.push_str("redacted@");
+                rest = &rest[at + 1..];
+            }
+            None => {
+                out.push_str(&rest[..authority_end]);
+                rest = &rest[authority_end..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Splits an event into its rendered message and its structured fields. A
+/// capture layer sees `%x` and `?x` only as text, so redaction goes by the
+/// field's name.
 #[derive(Default)]
 struct Visitor {
     message: String,
@@ -99,14 +159,30 @@ struct Visitor {
 
 impl Visitor {
     fn add(&mut self, field: &Field, value: std::fmt::Arguments<'_>) {
-        if field.name() == "message" {
-            let _ = write!(self.message, "{value}");
-        } else {
-            if !self.fields.is_empty() {
-                self.fields.push(' ');
-            }
-            let _ = write!(self.fields, "{}={value}", field.name());
+        let name = field.name();
+        if name == "message" {
+            push_without_userinfo(&mut self.message, value);
+            return;
         }
+        if !self.fields.is_empty() {
+            self.fields.push(' ');
+        }
+        let _ = write!(self.fields, "{name}=");
+        if is_secret(name) {
+            self.fields.push_str("[redacted]");
+        } else {
+            push_without_userinfo(&mut self.fields, value);
+        }
+    }
+}
+
+/// Rendered in place, and rewritten only when it holds a URL.
+fn push_without_userinfo(out: &mut String, value: std::fmt::Arguments<'_>) {
+    let start = out.len();
+    let _ = write!(out, "{value}");
+    if out[start..].contains("://") {
+        let stripped = strip_userinfo(&out[start..]);
+        out.replace_range(start.., &stripped);
     }
 }
 
@@ -217,6 +293,85 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].level, Level::WARN);
         assert_eq!(recs[0].message, "queue at 91%", "interpolated, unquoted");
+    }
+
+    #[test]
+    fn a_field_named_like_a_secret_is_redacted() {
+        let buf = LogBuffer::new(8);
+        let subscriber = tracing_subscriber::registry().with(buf.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                user = "ops",
+                password = "hunter2",
+                operator_password = "hunter2",
+                api_key = "hunter2",
+                key_hash = "9f86d081",
+                key = "shed-esp32",
+                "signed in"
+            );
+        });
+        assert_eq!(
+            buf.snapshot(None, 1)[0].fields,
+            "user=ops password=[redacted] operator_password=[redacted] api_key=[redacted] \
+             key_hash=[redacted] key=shed-esp32"
+        );
+    }
+
+    #[test]
+    fn the_denylist_catches_compounds_without_catching_innocent_names() {
+        for name in [
+            "password",
+            "secret",
+            "api_key",
+            "admin_key",
+            "key_hash",
+            "operator_password",
+            "authorization",
+        ] {
+            assert!(is_secret(name), "{name} should be redacted");
+        }
+        for name in ["key", "user", "database", "error", "monkey", "elapsed_ms"] {
+            assert!(!is_secret(name), "{name} should not be redacted");
+        }
+    }
+
+    #[test]
+    fn a_credential_in_a_url_is_captured_without_it() {
+        let buf = LogBuffer::new(8);
+        let subscriber = tracing_subscriber::registry().with(buf.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            let e = "connect to postgresql://postgres:s3cr3t@db.invalid:5432/x refused";
+            tracing::error!(dsn = %"postgres://u:p@db.invalid/y", "migration failed: {e}");
+        });
+        let record = &buf.snapshot(None, 1)[0];
+        assert_eq!(
+            record.message,
+            "migration failed: connect to postgresql://redacted@db.invalid:5432/x refused"
+        );
+        assert_eq!(record.fields, "dsn=postgres://redacted@db.invalid/y");
+    }
+
+    #[test]
+    fn userinfo_is_stripped_from_every_url_and_nothing_else() {
+        let strip = strip_userinfo;
+        assert_eq!(
+            strip("tried https://a:1@one.invalid/x then https://b@two.invalid/y"),
+            "tried https://redacted@one.invalid/x then https://redacted@two.invalid/y"
+        );
+        assert_eq!(
+            strip("postgresql://u:p@[::1]:5432/db?sslmode=disable"),
+            "postgresql://redacted@[::1]:5432/db?sslmode=disable"
+        );
+        for text in [
+            "connecting to https://example.invalid/notify failed",
+            "listening on http://[fe80::1]:8423/v1",
+            "https://example.invalid/contact?to=user@example.invalid",
+            "mail ops@example.invalid",
+            "no url here at all",
+            "",
+        ] {
+            assert_eq!(strip(text), text);
+        }
     }
 
     /// `db.rs` puts the database name in a field and not in the message, so a

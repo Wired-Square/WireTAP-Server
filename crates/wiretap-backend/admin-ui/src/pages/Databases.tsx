@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, formatBytes } from "../api";
+import { useConfirm } from "../Confirm";
 import {
   MigrationProgressView,
   RollupBadge,
@@ -13,6 +14,7 @@ export default function Databases() {
   const { databases, target, error, setError, refresh } = useDatabases();
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [dialog, ask] = useConfirm();
 
   const create = async () => {
     setCreating(true);
@@ -38,41 +40,35 @@ export default function Databases() {
     }
   };
 
-  const migrate = async (dbName: string) => {
-    if (
-      !confirm(
+  const migrate = (dbName: string) =>
+    ask({
+      title: "Migrate database",
+      message:
         `Migrate "${dbName}" to schema v${target} now? Until it finishes it refuses ` +
-          `reads, which can take hours on a large archive. Ingest is buffered and ` +
-          `stored once it is done.`,
-      )
-    )
-      return;
-    setError("");
-    try {
-      await api(`/v1/databases/${dbName}/migrate`, { method: "POST" });
-      refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
+        `reads, which can take hours on a large archive. Ingest is buffered and ` +
+        `stored once it is done.`,
+      verb: "Migrate",
+      act: async () => {
+        setError("");
+        await api(`/v1/databases/${dbName}/migrate`, { method: "POST" });
+        refresh();
+      },
+    });
 
-  const remove = async (dbName: string) => {
-    if (
-      !confirm(
+  const remove = (dbName: string) =>
+    ask({
+      title: "Delete database",
+      message:
         `Delete database "${dbName}"? This permanently removes all its captured ` +
-          `frames and cannot be undone.`,
-      )
-    )
-      return;
-    setError("");
-    try {
-      await api(`/v1/databases/${dbName}`, { method: "DELETE" });
-      refresh();
-    } catch (e) {
-      // e.g. 409 when a device is actively ingesting into it
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
+        `frames and cannot be undone.`,
+      verb: "Delete",
+      danger: true,
+      act: async () => {
+        setError("");
+        await api(`/v1/databases/${dbName}`, { method: "DELETE" });
+        refresh();
+      },
+    });
 
   return (
     <div className="card">
@@ -144,6 +140,7 @@ export default function Databases() {
         omitting the gap rather than recomputing it. The gateway repairs that on
         start; the button is for a rollup that has merely fallen behind.
       </p>
+      {dialog}
     </div>
   );
 }

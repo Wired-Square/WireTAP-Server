@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Caller, type RotatedSecret, type SecretSources, setKey } from "../api";
+import { useConfirm } from "../Confirm";
 import SecretReveal from "../SecretReveal";
 
 type Secret = "db-password" | "admin-key";
@@ -24,27 +25,33 @@ export default function Secrets({ caller }: { caller: Caller }) {
   const [sources, setSources] = useState<SecretSources | null>(null);
   const [rotated, setRotated] = useState<RotatedSecret & { name: string }>();
   const [error, setError] = useState("");
+  const [dialog, ask] = useConfirm();
 
-  useEffect(() => {
+  const refresh = () =>
     api<SecretSources>("/v1/admin/secrets")
       .then(setSources)
       .catch((e) => setError(String(e.message ?? e)));
+  useEffect(() => {
+    refresh();
   }, []);
 
-  const rotate = async (secret: Secret, persisted: boolean) => {
-    if (!confirm(confirmation(secret, persisted))) return;
-    setError("");
-    try {
-      const r = await api<RotatedSecret>(`/v1/admin/secrets/${secret}/rotate`, { method: "POST" });
-      // This tab signed in with the key it just replaced.
-      if (secret === "admin-key" && caller.via === "key" && caller.name === "bootstrap-admin") {
-        setKey(r.secret);
-      }
-      setRotated({ ...r, name: NAMES[secret] });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
+  const rotate = (secret: Secret, persisted: boolean) =>
+    ask({
+      title: `Rotate the ${NAMES[secret].toLowerCase()}`,
+      message: confirmation(secret, persisted),
+      verb: "Rotate",
+      danger: true,
+      act: async () => {
+        setError("");
+        const r = await api<RotatedSecret>(`/v1/admin/secrets/${secret}/rotate`, { method: "POST" });
+        // This tab signed in with the key it just replaced.
+        if (secret === "admin-key" && caller.via === "key" && caller.name === "bootstrap-admin") {
+          setKey(r.secret);
+        }
+        setRotated({ ...r, name: NAMES[secret] });
+        refresh();
+      },
+    });
 
   if (!sources) return error ? <p className="error">{error}</p> : null;
   const rows: [Secret, boolean][] = [
@@ -61,17 +68,23 @@ export default function Secrets({ caller }: { caller: Caller }) {
             <tr key={secret}>
               <td>{NAMES[secret]}</td>
               <td className="muted">
-                {persisted
+                {secret === "admin-key" && !sources.admin_key.configured
+                  ? "none configured: set WIRETAP_ADMIN_KEY or WIRETAP_ADMIN_KEY_FILE to have one"
+                  : persisted
                   ? "saved in a file the gateway owns"
                   : "from the deployment's env: a new one must be copied there by hand"}
                 {secret === "admin-key" && sources.admin_key.stale_config && (
-                  <div className="error">The deployment's env still holds a rotated admin key.</div>
+                  <div className="error">
+                    {persisted ? "The admin key file" : "The deployment's env"} still holds a rotated admin key.
+                  </div>
                 )}
               </td>
               <td style={{ textAlign: "right" }}>
-                <button className="btn" onClick={() => rotate(secret, persisted)}>
-                  Rotate…
-                </button>
+                {(secret !== "admin-key" || sources.admin_key.configured) && (
+                  <button className="btn" onClick={() => rotate(secret, persisted)}>
+                    Rotate…
+                  </button>
+                )}
               </td>
             </tr>
           ))}
@@ -80,6 +93,7 @@ export default function Secrets({ caller }: { caller: Caller }) {
       {rotated && (
         <SecretReveal value={rotated.secret} note={`New ${rotated.name.toLowerCase()}, shown once. ${rotated.note}`} />
       )}
+      {dialog}
     </div>
   );
 }

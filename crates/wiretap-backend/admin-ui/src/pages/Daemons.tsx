@@ -8,6 +8,7 @@ import {
   DaemonList,
   StoredCatalog,
 } from "../api";
+import { useConfirm } from "../Confirm";
 
 const short = (sha: string) => sha.slice(0, 8);
 
@@ -56,6 +57,7 @@ export default function Daemons() {
   const [daemons, setDaemons] = useState<Daemon[]>([]);
   const [error, setError] = useState<Refusal | null>(null);
   const [panel, setPanel] = useState<Panel | null>(null);
+  const [dialog, ask] = useConfirm();
 
   const refresh = useCallback(
     () =>
@@ -102,13 +104,27 @@ export default function Daemons() {
 
   const clear = (daemon: string, device: DaemonDevice) => {
     if (!device.assignment) return;
-    if (!confirm(`Clear the catalogue assigned to ${device.interface} on ${daemon}?`)) return;
     const q = new URLSearchParams({
       daemon_id: daemon,
       interface: device.interface,
       expected: device.assignment.blob_sha,
     });
-    run(() => api(`/v1/admin/assignments?${q}`, { method: "DELETE" }));
+    ask({
+      title: "Clear catalogue",
+      message: `Clear the catalogue assigned to ${device.interface} on ${daemon}?`,
+      verb: "Clear",
+      act: async () => {
+        setError(null);
+        try {
+          await api(`/v1/admin/assignments?${q}`, { method: "DELETE" });
+          setPanel(null);
+        } catch (e) {
+          throw new Error(refusal(e).message);
+        } finally {
+          refresh();
+        }
+      },
+    });
   };
 
   const view = async (daemon: string, sha: string) => {
@@ -251,6 +267,7 @@ export default function Daemons() {
           No capture daemon has named itself yet. (Refreshes every 5 s.)
         </div>
       )}
+      {dialog}
     </>
   );
 }

@@ -7,6 +7,11 @@ All notable changes to this project are documented here. Entries go under
 
 ### Added
 
+- **Behind an ApplianceOS console, issuing or destroying a credential needs a
+  recent password.** Creating, rotating or revoking a key, and rotating either
+  secret, is refused (403, `this needs the password confirmed in the last 5
+  minutes`) unless the console's `reauth=` is within its five-minute window.
+  Keys on :8423 are not asked.
 - **Rotate the database password and the admin key** from the admin UI's Keys
   tab (Secrets), `POST /v1/admin/secrets/{db-password|admin-key}/rotate`, or
   `wiretap-backend rotate db-password|admin-key`, which asks the running gateway
@@ -26,6 +31,10 @@ All notable changes to this project are documented here. Entries go under
   `PATCH /v1/admin/keys/{id}`; the role stays), Rotate… (`POST
   /v1/admin/keys/{id}/rotate`: a new value for the same key, shown once), Disable
   or Enable, and Revoke….
+- **Confirmations are an in-page dialog**, not the browser's `confirm()`: the
+  button names the act, and a refusal stays in the dialog. The ⋮ menu opens in
+  the top layer (no longer clipped by a table), flips above near the bottom of
+  the window, takes Home and End, and says why an item is unavailable.
 
 ### Changed
 
@@ -33,6 +42,10 @@ All notable changes to this project are documented here. Entries go under
   `/v1/admin/keys/{id}/disable` and `/enable`, and a key's `revoked` is now
   `disabled`; the column is renamed in place on start. **Revoke** now deletes a
   key for good, as Delete did.
+- **The Logging tab redacts the credentials it can recognise.** A field named
+  like one (`password`, `secret`, `token`, `*_key`, `*_hash`, …) is captured as
+  `[redacted]`, and a URL's `user:password@` as `redacted@`. stdout is
+  unchanged.
 
 ## [0.1.12] — 2026-10-15
 

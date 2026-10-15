@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type Caller, KeySummary } from "../api";
+import { useConfirm } from "../Confirm";
 import Menu from "../Menu";
 import SecretReveal from "../SecretReveal";
 import Secrets from "./Secrets";
@@ -25,6 +26,8 @@ function NameAndPin(props: {
 
 type Verb = "rotate" | "disable" | "enable" | "revoke";
 
+const VERBS: Record<Verb, string> = { rotate: "Rotate", disable: "Disable", enable: "Enable", revoke: "Revoke" };
+
 export default function Keys({ caller }: { caller: Caller }) {
   const [keys, setKeys] = useState<KeySummary[]>([]);
   const [error, setError] = useState("");
@@ -34,6 +37,7 @@ export default function Keys({ caller }: { caller: Caller }) {
   const [role, setRole] = useState("read");
   const [pin, setPin] = useState("");
   const [revealed, setRevealed] = useState<{ name: string; key: string } | null>(null);
+  const [dialog, ask] = useConfirm();
 
   const refresh = useCallback(() => {
     api<{ keys: KeySummary[] }>("/v1/admin/keys")
@@ -84,15 +88,22 @@ export default function Keys({ caller }: { caller: Caller }) {
       enable: `Enable key "${k.name}"? It will work again.`,
       revoke: `Revoke key "${k.name}"? Clients using it lose access, and this cannot be undone.`,
     };
-    if (!confirm(prompts[verb])) return;
-    setRevealed(null);
-    run(async () => {
-      if (verb === "revoke") {
-        await api(`/v1/admin/keys/${k.id}`, { method: "DELETE" });
-        return;
-      }
-      const r = await api<{ key?: string }>(`/v1/admin/keys/${k.id}/${verb}`, { method: "POST" });
-      if (r.key) setRevealed({ name: k.name, key: r.key });
+    ask({
+      title: `${VERBS[verb]} key`,
+      message: prompts[verb],
+      verb: VERBS[verb],
+      danger: verb !== "enable",
+      act: async () => {
+        setError("");
+        setRevealed(null);
+        if (verb === "revoke") {
+          await api(`/v1/admin/keys/${k.id}`, { method: "DELETE" });
+        } else {
+          const r = await api<{ key?: string }>(`/v1/admin/keys/${k.id}/${verb}`, { method: "POST" });
+          if (r.key) setRevealed({ name: k.name, key: r.key });
+        }
+        refresh();
+      },
     });
   };
 
@@ -180,7 +191,11 @@ export default function Keys({ caller }: { caller: Caller }) {
                     label={`Actions for key ${k.name}`}
                     items={[
                       { label: "Edit…", onSelect: () => openForm(k) },
-                      ...(k.disabled ? [] : [{ label: "Rotate…", onSelect: () => act(k, "rotate") }]),
+                      {
+                        label: "Rotate…",
+                        onSelect: () => act(k, "rotate"),
+                        unavailable: k.disabled ? "Enable the key before rotating it" : undefined,
+                      },
                       k.disabled
                         ? { label: "Enable", onSelect: () => act(k, "enable") }
                         : { label: "Disable", onSelect: () => act(k, "disable") },
@@ -202,6 +217,7 @@ export default function Keys({ caller }: { caller: Caller }) {
         </table>
       </div>
       <Secrets caller={caller} />
+      {dialog}
     </>
   );
 }

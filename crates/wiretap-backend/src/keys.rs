@@ -97,7 +97,14 @@ pub struct KeyInfo {
     pub role: Role,
     pub database_pin: Option<String>,
     /// Set when an ApplianceOS console asserted the caller instead of a key.
-    pub console_user: Option<String>,
+    pub console: Option<ConsoleUser>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsoleUser {
+    pub name: String,
+    /// When the console last saw this user prove their password.
+    pub reauthenticated_at: Option<DateTime<Utc>>,
 }
 
 pub enum KeyRotation {
@@ -139,17 +146,15 @@ enum Standing {
 
 /// `rows` holds the configured key's row, if any, and the current one.
 fn standing(configured: &str, rows: &[(String, Option<DateTime<Utc>>)]) -> Standing {
-    let current = || {
-        rows.iter()
-            .find(|(_, retired)| retired.is_none())
-            .map(|(hash, _)| hash.clone())
-    };
     match rows.iter().find(|(hash, _)| hash == configured) {
         None => Standing::Unknown,
         Some((_, None)) => Standing::Current,
         Some((_, Some(at))) => Standing::Retired {
             at: *at,
-            current: current(),
+            current: rows
+                .iter()
+                .find(|(_, retired)| retired.is_none())
+                .map(|(hash, _)| hash.clone()),
         },
     }
 }
@@ -224,13 +229,28 @@ impl KeyStore {
         bootstrap.configured.is_some() && bootstrap.configured != bootstrap.current
     }
 
+    pub fn bootstrap_configured(&self) -> bool {
+        self.bootstrap.read().unwrap().configured.is_some()
+    }
+
     /// A new bootstrap key, recorded as current so it outlives a restart, and
-    /// saved in `file` when given. The old one stops working at once.
-    pub async fn rotate_bootstrap_key(&self, file: Option<&Path>) -> Result<String, String> {
+    /// saved in `file` when given. The old one stops working at once. `None`
+    /// when no admin key is configured: a start ignores the record then, so a
+    /// new key would not outlive a restart.
+    pub async fn rotate_bootstrap_key(
+        &self,
+        file: Option<&Path>,
+    ) -> Result<Option<String>, String> {
         let failed = |e| format!("admin key rotation failed: {e}");
+        let outgoing = {
+            let bootstrap = self.bootstrap.read().unwrap();
+            if bootstrap.configured.is_none() {
+                return Ok(None);
+            }
+            bootstrap.current.clone()
+        };
         let key = new_key();
         let hash = hash_key(&key);
-        let outgoing = self.bootstrap.read().unwrap().current.clone();
         let mut client = self.dbs.connect_raw(self.dbs.default_database()).await?;
         let tx = meta_transaction(&mut client).await.map_err(failed)?;
         make_current(&tx, outgoing.as_deref(), &hash)
@@ -245,7 +265,7 @@ impl KeyStore {
             bootstrap.configured = Some(hash.clone());
         }
         bootstrap.current = Some(hash);
-        Ok(key)
+        Ok(Some(key))
     }
 
     /// Create the meta schema, settle which admin key is honoured, and warm
@@ -310,7 +330,7 @@ impl KeyStore {
                     name: row.get("name"),
                     role,
                     database_pin: row.get("database_pin"),
-                    console_user: None,
+                    console: None,
                 },
             );
         }
@@ -328,7 +348,7 @@ impl KeyStore {
                 name: "bootstrap-admin".into(),
                 role: Role::Admin,
                 database_pin: None,
-                console_user: None,
+                console: None,
             });
         }
         let info = self.cache.read().await.get(&h).cloned()?;
@@ -507,6 +527,13 @@ pub(crate) mod tests {
         assert_eq!(standing("n", &[]), Standing::Unknown);
     }
 
+    #[tokio::test]
+    async fn with_no_admin_key_configured_there_is_none_to_rotate() {
+        let store = KeyStore::new(crate::db::tests::unreachable_databases(false), None);
+        assert!(!store.bootstrap_configured());
+        assert_eq!(store.rotate_bootstrap_key(None).await, Ok(None));
+    }
+
     async fn current_bootstrap_keys(dbs: &Databases) -> i64 {
         let client = dbs.connect_raw(dbs.default_database()).await.unwrap();
         client
@@ -530,7 +557,7 @@ pub(crate) mod tests {
     async fn an_admin_key_rotated_from_the_environment_outlives_a_restart_with_the_old_env() {
         let dbs = own_key_database("p10_admin_restart").await;
         let first = restarted(&dbs, Some("old")).await;
-        let rotated = first.rotate_bootstrap_key(None).await.unwrap();
+        let rotated = first.rotate_bootstrap_key(None).await.unwrap().unwrap();
         assert!(first.stale_config());
 
         let old_env = restarted(&dbs, Some("old")).await;
@@ -581,7 +608,11 @@ pub(crate) mod tests {
         std::fs::write(&file, "from-file").unwrap();
 
         let first = restarted(&dbs, Some("from-file")).await;
-        let rotated = first.rotate_bootstrap_key(Some(&file)).await.unwrap();
+        let rotated = first
+            .rotate_bootstrap_key(Some(&file))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!first.stale_config());
         let saved = secrets::read(&file).unwrap();
         assert_eq!(saved.expose(), rotated);
