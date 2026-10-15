@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Fixed
+
+- **Migrate now to v5 no longer stops at TimescaleDB's decompression limit.**
+  On v0.1.11 it failed on an archive whose compressed chunks held more than
+  100 000 Modbus rows each. Re-running it now resumes where it stopped.
+
 ## [0.1.11] — 2026-10-15
 
 Modbus RTU rows are stored as `modbus_rtu`, the WireTAP desktop's own tag, in

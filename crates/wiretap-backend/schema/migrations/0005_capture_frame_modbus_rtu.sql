@@ -95,6 +95,8 @@ BEGIN
     PERFORM public.wiretap_migration_progress(5, 'backfill', done, total, rows_done,
                                               c.range_start);
     COMMIT;
+    -- TimescaleDB's decompression limit (100 000 rows) lifted until the next COMMIT.
+    PERFORM set_config('timescaledb.max_tuples_decompressed_per_dml_transaction', '0', true);
     t := clock_timestamp();
     UPDATE public.capture_frame SET protocol = 'modbus_rtu'
      WHERE ts >= c.range_start AND ts < c.range_end AND protocol = 'modbus';
