@@ -1,3 +1,24 @@
+wiretap-server (0.1.11) UNRELEASED; urgency=medium
+
+  * The config file is optional, and the installed one sets nothing: every
+    key is commented out. A -C naming a missing file starts on the defaults.
+    An existing /etc/wiretap-server/wiretap-server.toml is left as it is.
+  * With no device named by the file, -i or a UI, can0 is captured, where a
+    file naming none used to capture nothing. A file that wants no CAN says
+    iface = "".
+  * Settings can also come from a UI, in $STATE_DIRECTORY/ui.toml, beneath
+    the config file, the environment and the flags. --check-config lists
+    each setting with its source. A control socket for that UI listens on
+    $RUNTIME_DIRECTORY/control.sock, 0660 in the daemon's group; the unit
+    adds RuntimeDirectory= and SuccessExitStatus=75.
+  * Modbus RTU messages are tagged modbus_rtu, as the desktop's capture
+    store tags them. Messages cached under the old tag still drain.
+  * Install and restart. Take the gateway to 0.1.11 and Migrate now each
+    database to schema v5; a gateway migrating a database buffers this
+    daemon's batches meanwhile.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Thu, 15 Oct 2026 20:24:01 +1100
+
 wiretap-server (0.1.10) bookworm; urgency=medium
 
   * The package brings CAN interfaces up: wiretap-can@<interface>.service

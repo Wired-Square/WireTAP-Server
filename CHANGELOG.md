@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-10-15
+
+Modbus RTU rows are stored as `modbus_rtu`, the WireTAP desktop's own tag, in
+schema v5, on wslib-wiretap-rs `v0.10.2`. **Every archive waits for Migrate now
+to v5**, which rewrites only its Modbus rows. The gateway serves under a base
+path with a real health check, the capture daemon takes settings from a UI
+beneath its own, and **a config file that names no device at all now captures
+`can0`**. The ApplianceOS apps are built by a release but not yet published.
+
 ### Added
 
 - **The gateway serves under a base path.** `WIRETAP_BASE_PATH` (e.g.
