@@ -1,3 +1,10 @@
+wiretap-server (0.1.12) UNRELEASED; urgency=medium
+
+  * No change to the capture server. This release fixes the gateway's
+    migration to schema v5; install and restart, or stay on 0.1.11.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Thu, 15 Oct 2026 21:32:18 +1100
+
 wiretap-server (0.1.11) bookworm; urgency=medium
 
   * The config file is optional, and the installed one sets nothing: every

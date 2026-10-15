@@ -5,6 +5,11 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-10-15
+
+Fixes v0.1.11's Migrate now to v5 on a large Modbus archive. The capture server
+is unchanged.
+
 ### Fixed
 
 - **Migrate now to v5 no longer stops at TimescaleDB's decompression limit.**
