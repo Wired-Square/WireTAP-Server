@@ -9,13 +9,12 @@
 #
 # Distributed as a Debian package and a container image, never to crates.io.
 #
-# ## Releasing is two pushes, not one — and the order matters
+# ## Releasing ends in one push
 #
 # `push = false` below, which is the one deliberate difference from
-# wslib-wiretap-rs. `.github/workflows/release.yml` refuses to build a draft for a
-# commit that has no successful `ci.yml` run, and `ci.yml` never runs on a tag
-# ref — so a tag pushed alongside its commit races CI and loses. The tag has to
-# follow a green run, which means:
+# wslib-wiretap-rs. CI runs on pull requests and not on main, so
+# `.github/workflows/release.yml` runs all of `ci.yml` on the tagged commit
+# before it drafts or builds anything:
 #
 #   0. Ask whether to move the pinned TimescaleDB image (the backend's deploy
 #      compose, its TrueNAS example, db/Dockerfile, CI's service in ci.yml).
@@ -29,12 +28,11 @@
 #   2. `cargo release <level> -x` — bumps, stamps that entry with the version
 #      and `bookworm`, runs the gates, commits, tags locally. Without an
 #      UNRELEASED entry the pre-release hook refuses.
-#   3. `git push origin main` — wait for CI to go green on that commit.
-#   4. `git push origin v<version>` — this is what drafts the release, builds
-#      both .deb files and pushes the two-architecture gateway image. It also
-#      leaves the ApplianceOS apps' unsigned source archive as a workflow
-#      artefact, to sign by hand (apps/README.md § Signing a release).
-#   5. Write the release notes over the draft's placeholder body, then publish
+#   3. `git push origin main v<version>` — the tag runs CI, then drafts the
+#      release, builds both .deb files and pushes the two-architecture gateway
+#      image. It also leaves the ApplianceOS apps' unsigned source archive as
+#      a workflow artefact, to sign by hand (apps/README.md § Signing a release).
+#   4. Write the release notes over the draft's placeholder body, then publish
 #      it by hand:
 #
 #        gh release edit v<version> --notes-file <filled-in copy>
@@ -42,8 +40,9 @@
 #      `.github/release-notes-template.md` is the template and the house style,
 #      which matches the WireTAP desktop's releases.
 #
-# If CI fails at step 3, delete the local tag, fix, and start again. A tag is the
-# one part of a release that cannot be corrected in place.
+# If CI fails in the release run, nothing has been built or pushed to GHCR:
+# delete the tag on both sides (`git push origin :refs/tags/v<version>`,
+# `git tag -d v<version>`), fix through a PR, and start again at step 2.
 
 publish = false
 push = false
