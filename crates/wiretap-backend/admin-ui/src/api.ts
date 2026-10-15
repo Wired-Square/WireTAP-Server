@@ -71,7 +71,20 @@ export interface KeySummary {
   database_pin: string | null;
   created_at: string;
   last_used_at: string | null;
-  revoked: boolean;
+  disabled: boolean;
+}
+
+/** Whether each secret is saved in a file the gateway owns, or comes from env. */
+export interface SecretSources {
+  db_password: { persisted: boolean };
+  admin_key: { persisted: boolean };
+}
+
+/** A rotated secret, shown once, and what to do with it. */
+export interface RotatedSecret {
+  secret: string;
+  persisted: boolean;
+  note: string;
 }
 
 export type SchemaState =

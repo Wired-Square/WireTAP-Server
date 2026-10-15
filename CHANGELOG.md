@@ -5,6 +5,31 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **Rotate the database password and the admin key** from the admin UI's Keys
+  tab (Secrets), `POST /v1/admin/secrets/{db-password|admin-key}/rotate`, or
+  `wiretap-backend rotate db-password|admin-key`, which asks the running gateway
+  over its own listener. The new value is shown once, in full. The password is
+  set with `ALTER ROLE CURRENT_USER` from a SCRAM verifier computed by the
+  gateway, so no superuser is needed and the plaintext never reaches the
+  server's log; open connections stay up, and ingest carries on. The gateway app
+  image saves both in `/data/secrets`, through the new `WIRETAP_PG_PASSWORD_FILE`
+  and `WIRETAP_ADMIN_KEY_FILE`, and a crash between the change and the save is
+  put right at the next start. A compose deploy keeps them in its env, so the
+  new value must be copied into `.env` before the next restart.
+- **Each API key has a ⋮ menu**: Edit… (its name and database pin, through
+  `PATCH /v1/admin/keys/{id}`; the role stays), Rotate… (`POST
+  /v1/admin/keys/{id}/rotate`: a new value for the same key, shown once), Disable
+  or Enable, and Revoke….
+
+### Changed
+
+- **Revoke and Restore are now Disable and Enable**, at
+  `/v1/admin/keys/{id}/disable` and `/enable`, and a key's `revoked` is now
+  `disabled`; the column is renamed in place on start. **Revoke** now deletes a
+  key for good, as Delete did.
+
 ## [0.1.12] — 2026-10-15
 
 Fixes v0.1.11's Migrate now to v5 on a large Modbus archive. The capture server

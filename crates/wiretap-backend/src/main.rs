@@ -18,6 +18,7 @@ mod keys;
 mod logbuf;
 mod running;
 mod schema;
+mod secrets;
 mod sql;
 mod state;
 mod types;
@@ -46,6 +47,20 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => {}
+        [verb, which] if verb == "rotate" => {
+            if let Err(e) = secrets::rotate_command(&config, which).await {
+                eprintln!("wiretap-backend: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        _ => {
+            eprintln!("usage: wiretap-backend [rotate db-password|admin-key]");
+            std::process::exit(2);
+        }
+    }
     // One filter over both layers: the admin UI sees exactly what stdout sees,
     // and `RUST_LOG` governs both.
     let logs = LogBuffer::new(config.log_buffer);
@@ -77,8 +92,8 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
     // bare `docker start` of this container alone must also work)
     let mut attempts = 0u32;
     loop {
-        match dbs.connect_raw("postgres").await {
-            Ok(_) => break,
+        match dbs.reach_postgres().await {
+            Ok(()) => break,
             Err(e) if attempts < 60 => {
                 attempts += 1;
                 tracing::info!("waiting for postgres ({attempts}): {e}");
@@ -123,6 +138,8 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
         sessions,
         logs,
         catalogs,
+        secret_files: config.secret_files.clone(),
+        rotation: Default::default(),
     });
     let listener = tokio::net::TcpListener::bind(&config.http_listen)
         .await

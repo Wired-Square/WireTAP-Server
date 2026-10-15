@@ -1,18 +1,19 @@
 //! API key store. Keys live in `wiretap_meta.api_keys` in the default
 //! database (sha256-hashed; the plaintext is shown once at creation).
-//! A bootstrap admin key from the environment is always honoured so the
-//! stack can never lock itself out.
+//! A bootstrap admin key, from the environment or its file, is always honoured
+//! so the stack can never lock itself out.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use rand::RngCore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 use crate::db::Databases;
+use crate::secrets;
 
 const META_SCHEMA: &str = r#"
 CREATE SCHEMA IF NOT EXISTS wiretap_meta;
@@ -24,8 +25,17 @@ CREATE TABLE IF NOT EXISTS wiretap_meta.api_keys (
   database_pin  TEXT,
   created_at    timestamptz NOT NULL DEFAULT now(),
   last_used_at  timestamptz,
-  revoked_at    timestamptz
+  disabled_at   timestamptz
 );
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = 'wiretap_meta' AND table_name = 'api_keys'
+               AND column_name = 'revoked_at') THEN
+    ALTER TABLE wiretap_meta.api_keys RENAME COLUMN revoked_at TO disabled_at;
+  END IF;
+EXCEPTION WHEN undefined_column THEN NULL; -- another gateway renamed it first
+END $$;
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -78,6 +88,12 @@ pub struct KeyInfo {
     pub console_user: Option<String>,
 }
 
+pub enum KeyRotation {
+    Rotated(String),
+    NotFound,
+    Disabled,
+}
+
 #[derive(Debug, Serialize)]
 pub struct KeySummary {
     pub id: i64,
@@ -86,18 +102,22 @@ pub struct KeySummary {
     pub database_pin: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
-    pub revoked: bool,
+    pub disabled: bool,
 }
 
 fn hash_key(key: &str) -> String {
     hex::encode(Sha256::digest(key.as_bytes()))
 }
 
+pub fn new_key() -> String {
+    format!("wt_{}", secrets::random_hex())
+}
+
 #[derive(Clone)]
 pub struct KeyStore {
     dbs: Databases,
-    bootstrap_hash: Option<String>,
-    /// key_hash -> KeyInfo for active (non-revoked) keys.
+    bootstrap_hash: Arc<std::sync::RwLock<Option<String>>>,
+    /// key_hash -> KeyInfo for enabled keys.
     cache: Arc<RwLock<HashMap<String, KeyInfo>>>,
 }
 
@@ -105,9 +125,24 @@ impl KeyStore {
     pub fn new(dbs: Databases, bootstrap_admin_key: Option<&str>) -> Self {
         Self {
             dbs,
-            bootstrap_hash: bootstrap_admin_key.map(hash_key),
+            bootstrap_hash: Arc::new(std::sync::RwLock::new(bootstrap_admin_key.map(hash_key))),
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// The old bootstrap key stops working at once.
+    pub fn set_bootstrap_key(&self, key: &str) {
+        *self.bootstrap_hash.write().unwrap() = Some(hash_key(key));
+    }
+
+    /// A new bootstrap key, persisted when `file` is given.
+    pub fn rotate_bootstrap_key(&self, file: Option<&Path>) -> Result<String, String> {
+        let key = new_key();
+        if let Some(file) = file {
+            secrets::persist(file, &key)?;
+        }
+        self.set_bootstrap_key(&key);
+        Ok(key)
     }
 
     /// Create the meta schema and warm the cache. Call once at startup,
@@ -126,7 +161,7 @@ impl KeyStore {
         let rows = client
             .query(
                 "SELECT id, name, key_hash, role, database_pin \
-                 FROM wiretap_meta.api_keys WHERE revoked_at IS NULL",
+                 FROM wiretap_meta.api_keys WHERE disabled_at IS NULL",
                 &[],
             )
             .await
@@ -153,7 +188,7 @@ impl KeyStore {
     /// nothing about the stored keys.
     pub async fn validate(&self, key: &str) -> Option<KeyInfo> {
         let h = hash_key(key);
-        if self.bootstrap_hash.as_deref() == Some(h.as_str()) {
+        if self.bootstrap_hash.read().unwrap().as_deref() == Some(h.as_str()) {
             return Some(KeyInfo {
                 id: 0,
                 name: "bootstrap-admin".into(),
@@ -190,9 +225,7 @@ impl KeyStore {
         role: Role,
         database_pin: Option<&str>,
     ) -> Result<(i64, String), String> {
-        let mut raw = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut raw);
-        let plaintext = format!("wt_{}", hex::encode(raw));
+        let plaintext = new_key();
         let client = self.dbs.connect_raw(self.dbs.default_database()).await?;
         let row = client
             .query_one(
@@ -206,31 +239,62 @@ impl KeyStore {
         Ok((row.get(0), plaintext))
     }
 
-    pub async fn revoke(&self, id: i64) -> Result<bool, String> {
+    /// False when there is no such key, or it is already that way.
+    pub async fn set_disabled(&self, id: i64, disabled: bool) -> Result<bool, String> {
         let client = self.dbs.connect_raw(self.dbs.default_database()).await?;
         let n = client
             .execute(
-                "UPDATE wiretap_meta.api_keys SET revoked_at = now() \
-                 WHERE id = $1 AND revoked_at IS NULL",
-                &[&id],
+                "UPDATE wiretap_meta.api_keys SET disabled_at = CASE WHEN $2 THEN now() END \
+                 WHERE id = $1 AND (disabled_at IS NULL) = $2",
+                &[&id, &disabled],
             )
             .await
-            .map_err(|e| format!("key revoke failed: {e}"))?;
+            .map_err(|e| format!("key update failed: {e}"))?;
         self.reload().await?;
         Ok(n > 0)
     }
 
-    /// Reinstate a revoked key.
-    pub async fn unrevoke(&self, id: i64) -> Result<bool, String> {
+    /// A new plaintext for the same key row, returned once; the old one stops
+    /// working at once.
+    pub async fn rotate(&self, id: i64) -> Result<KeyRotation, String> {
+        let plaintext = new_key();
+        let client = self.dbs.connect_raw(self.dbs.default_database()).await?;
+        let row = client
+            .query_opt(
+                "WITH found AS (SELECT disabled_at IS NOT NULL AS disabled \
+                   FROM wiretap_meta.api_keys WHERE id = $1), \
+                 rotated AS (UPDATE wiretap_meta.api_keys SET key_hash = $2 \
+                   WHERE id = $1 AND disabled_at IS NULL RETURNING id) \
+                 SELECT disabled FROM found",
+                &[&id, &hash_key(&plaintext)],
+            )
+            .await
+            .map_err(|e| format!("key rotate failed: {e}"))?;
+        self.reload().await?;
+        Ok(match row.map(|r| r.get::<_, bool>(0)) {
+            None => KeyRotation::NotFound,
+            Some(true) => KeyRotation::Disabled,
+            Some(false) => KeyRotation::Rotated(plaintext),
+        })
+    }
+
+    /// `pin` is `Some(None)` to clear the pin, and `None` to leave it.
+    pub async fn edit(
+        &self,
+        id: i64,
+        name: Option<&str>,
+        pin: Option<Option<&str>>,
+    ) -> Result<bool, String> {
         let client = self.dbs.connect_raw(self.dbs.default_database()).await?;
         let n = client
             .execute(
-                "UPDATE wiretap_meta.api_keys SET revoked_at = NULL \
-                 WHERE id = $1 AND revoked_at IS NOT NULL",
-                &[&id],
+                "UPDATE wiretap_meta.api_keys SET name = COALESCE($2, name), \
+                 database_pin = CASE WHEN $3 THEN $4 ELSE database_pin END \
+                 WHERE id = $1",
+                &[&id, &name, &pin.is_some(), &pin.flatten()],
             )
             .await
-            .map_err(|e| format!("key restore failed: {e}"))?;
+            .map_err(|e| format!("key edit failed: {e}"))?;
         self.reload().await?;
         Ok(n > 0)
     }
@@ -250,7 +314,7 @@ impl KeyStore {
         let client = self.dbs.connect_raw(self.dbs.default_database()).await?;
         let rows = client
             .query(
-                "SELECT id, name, role, database_pin, created_at, last_used_at, revoked_at \
+                "SELECT id, name, role, database_pin, created_at, last_used_at, disabled_at \
                  FROM wiretap_meta.api_keys ORDER BY id",
                 &[],
             )
@@ -265,8 +329,72 @@ impl KeyStore {
                 database_pin: r.get("database_pin"),
                 created_at: r.get("created_at"),
                 last_used_at: r.get("last_used_at"),
-                revoked: r.get::<_, Option<DateTime<Utc>>>("revoked_at").is_some(),
+                disabled: r.get::<_, Option<DateTime<Utc>>>("disabled_at").is_some(),
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::db::tests::{live_databases, run};
+
+    /// Over a database of its own, so no other test's keys are in the store.
+    pub(crate) async fn own_key_database(prefix: &str) -> Databases {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("{prefix}_{stamp}");
+        run("postgres", &format!("CREATE DATABASE {name}")).await;
+        let mut config = live_databases(false).config().clone();
+        config.default_database = name;
+        Databases::new(Arc::new(config))
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_store_from_before_the_rename_keeps_its_rows_and_which_are_disabled() {
+        let dbs = own_key_database("p10_keys_old").await;
+        run(
+            dbs.default_database(),
+            &(META_SCHEMA
+                .split("DO $$")
+                .next()
+                .unwrap()
+                .replace("disabled_at", "revoked_at")
+                + "INSERT INTO wiretap_meta.api_keys (name, key_hash, role, revoked_at) VALUES \
+                   ('live', 'h1', 'read', NULL), ('gone', 'h2', 'admin', now());"),
+        )
+        .await;
+
+        let store = KeyStore::new(dbs.clone(), None);
+        store.bootstrap().await.unwrap();
+        store.bootstrap().await.unwrap();
+        let listed: Vec<_> = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|k| (k.name, k.disabled))
+            .collect();
+        assert_eq!(listed, [("live".into(), false), ("gone".into(), true)]);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_fresh_store_disables_and_enables_a_key() {
+        let store = KeyStore::new(own_key_database("p10_keys_new").await, None);
+        store.bootstrap().await.unwrap();
+        store.bootstrap().await.unwrap();
+        let (id, key) = store.create("k", Role::Read, None).await.unwrap();
+
+        assert!(store.set_disabled(id, true).await.unwrap());
+        assert!(!store.set_disabled(id, true).await.unwrap());
+        assert!(store.validate(&key).await.is_none());
+        assert!(store.list().await.unwrap()[0].disabled);
+        assert!(store.set_disabled(id, false).await.unwrap());
+        assert!(store.validate(&key).await.is_some());
     }
 }

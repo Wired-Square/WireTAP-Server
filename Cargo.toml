@@ -73,6 +73,8 @@ futures-util = "0.3"
 # a static musl binary with no TLS stack and no libpq.
 deadpool-postgres = "0.14"
 tokio-postgres = "0.7"
+# The SCRAM verifier for a rotated password, computed client-side.
+postgres-protocol = "0.6"
 
 # --- local storage ---
 # The capture server's disk cache, holding frames through a gateway outage. The

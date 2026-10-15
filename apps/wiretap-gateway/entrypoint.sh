@@ -33,17 +33,17 @@ with_passwd_entry() {
 
 umask 077
 mkdir -p "$SECRETS"
-[ -s "$SECRETS/postgres-password" ] || keep "$SECRETS/postgres-password" "$(random_hex)"
-if [ ! -s "$SECRETS/admin-key" ]; then
-	keep "$SECRETS/admin-key" "wt_$(random_hex)"
-	log "generated the admin key, in $SECRETS/admin-key"
+[ -s "$WIRETAP_PG_PASSWORD_FILE" ] || keep "$WIRETAP_PG_PASSWORD_FILE" "$(random_hex)"
+if [ ! -s "$WIRETAP_ADMIN_KEY_FILE" ]; then
+	keep "$WIRETAP_ADMIN_KEY_FILE" "wt_$(random_hex)"
+	log "generated the admin key, in $WIRETAP_ADMIN_KEY_FILE"
 fi
 
 if [ ! -d "$PGDATA" ]; then
 	log "initialising the database in $PGDATA"
 	rm -rf "$PGDATA.new"
 	with_passwd_entry initdb --pgdata="$PGDATA.new" --username=postgres \
-		--pwfile="$SECRETS/postgres-password" --auth=scram-sha-256 --encoding=UTF8 >/dev/null
+		--pwfile="$WIRETAP_PG_PASSWORD_FILE" --auth=scram-sha-256 --encoding=UTF8 >/dev/null
 	mv "$PGDATA.new" "$PGDATA"
 fi
 
@@ -58,9 +58,9 @@ postgres -D "$PGDATA" \
 	-c dynamic_shared_memory_type=sysv &
 pg=$!
 
-POSTGRES_PASSWORD=$(cat "$SECRETS/postgres-password") \
-	WIRETAP_ADMIN_KEY=${WIRETAP_ADMIN_KEY:-$(cat "$SECRETS/admin-key")} \
-	wiretap-backend &
+# The cluster's password is the file's, which the gateway rotates in place.
+unset POSTGRES_PASSWORD
+wiretap-backend &
 gw=$!
 
 # Polled: busybox's `wait -n` misses a child that dies while it waits.

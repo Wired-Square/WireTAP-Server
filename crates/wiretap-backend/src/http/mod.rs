@@ -33,7 +33,7 @@ use crate::config::{AppSocket, Config};
 use crate::db;
 use crate::events;
 use crate::ingest::writer::FrameRow;
-use crate::keys::{KeyInfo, Role};
+use crate::keys::{KeyInfo, KeyRotation, Role};
 use crate::running;
 use crate::schema;
 use crate::sql;
@@ -168,9 +168,16 @@ fn routes(state: &St, config: &Config) -> Router<St> {
         .route("/v1/db/{db}/import", post(import_capture))
         // admin
         .route("/v1/admin/keys", get(keys_list).post(keys_create))
-        .route("/v1/admin/keys/{id}", delete(keys_delete))
-        .route("/v1/admin/keys/{id}/revoke", post(keys_revoke))
-        .route("/v1/admin/keys/{id}/restore", post(keys_restore))
+        .route("/v1/admin/keys/{id}", delete(keys_delete).patch(keys_edit))
+        .route("/v1/admin/keys/{id}/disable", post(keys_disable))
+        .route("/v1/admin/keys/{id}/enable", post(keys_enable))
+        .route("/v1/admin/keys/{id}/rotate", post(keys_rotate))
+        .route("/v1/admin/secrets", get(secrets_list))
+        .route(
+            "/v1/admin/secrets/db-password/rotate",
+            post(rotate_db_password),
+        )
+        .route("/v1/admin/secrets/admin-key/rotate", post(rotate_admin_key))
         .route("/v1/admin/ingest-sessions", polled(get(ingest_sessions)))
         .route("/v1/admin/daemons", polled(get(daemons)))
         .route(
@@ -1054,29 +1061,74 @@ async fn keys_create(
     Ok(Json(json!({ "id": id, "key": plaintext })))
 }
 
-async fn keys_revoke(
+async fn keys_disable(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     check_admin(&key)?;
-    if state.keys.revoke(id).await? {
-        Ok(Json(json!({ "revoked": id })))
+    if state.keys.set_disabled(id, true).await? {
+        Ok(Json(json!({ "disabled": id })))
     } else {
-        Err(not_found(format!("key not found or already revoked: {id}")))
+        Err(not_found(format!(
+            "key not found or already disabled: {id}"
+        )))
     }
 }
 
-async fn keys_restore(
+async fn keys_enable(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     check_admin(&key)?;
-    if state.keys.unrevoke(id).await? {
-        Ok(Json(json!({ "restored": id })))
+    if state.keys.set_disabled(id, false).await? {
+        Ok(Json(json!({ "enabled": id })))
     } else {
-        Err(not_found(format!("key not found or not revoked: {id}")))
+        Err(not_found(format!("key not found or not disabled: {id}")))
+    }
+}
+
+async fn keys_rotate(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_admin(&key)?;
+    match state.keys.rotate(id).await? {
+        KeyRotation::Rotated(plaintext) => Ok(Json(json!({ "id": id, "key": plaintext }))),
+        KeyRotation::NotFound => Err(not_found(format!("key not found: {id}"))),
+        KeyRotation::Disabled => Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("key {id} is disabled; enable it before rotating it"),
+        )),
+    }
+}
+
+/// Absent leaves a field alone; `"database_pin": null` clears the pin.
+#[derive(Deserialize)]
+struct EditKeyBody {
+    name: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    database_pin: Option<Option<String>>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::deserialize(d).map(Some)
+}
+
+async fn keys_edit(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(id): Path<i64>,
+    Json(body): Json<EditKeyBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_admin(&key)?;
+    let pin = body.database_pin.as_ref().map(Option::as_deref);
+    if state.keys.edit(id, body.name.as_deref(), pin).await? {
+        Ok(Json(json!({ "edited": id })))
+    } else {
+        Err(not_found(format!("key not found: {id}")))
     }
 }
 
@@ -1091,6 +1143,80 @@ async fn keys_delete(
     } else {
         Err(not_found(format!("key not found: {id}")))
     }
+}
+
+/// Whether each secret is saved in a file the gateway owns, or comes from the
+/// environment and so must be copied there by hand after a rotation.
+async fn secrets_list(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_admin(&key)?;
+    let files = &state.secret_files;
+    Ok(Json(json!({
+        "db_password": { "persisted": files.pg_password.is_some() },
+        "admin_key": { "persisted": files.admin_key.is_some() },
+    })))
+}
+
+/// The new secret in full, once, and what the operator must do with it.
+#[derive(Serialize)]
+struct Rotated {
+    secret: String,
+    persisted: bool,
+    note: &'static str,
+}
+
+async fn rotate_db_password(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+) -> Result<Json<Rotated>, ApiError> {
+    check_admin(&key)?;
+    let _rotation = state.rotation.lock().await;
+    let file = state.secret_files.pg_password.as_deref();
+    let password = state
+        .dbs
+        .rotate_pg_password(file)
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    tracing::warn!("{} rotated the database password", key.name);
+    Ok(Json(Rotated {
+        secret: password.expose().into(),
+        persisted: file.is_some(),
+        note: if file.is_some() {
+            "Saved in the gateway's password file. Nothing more to do."
+        } else {
+            "Not saved: put it in the deployment's env as POSTGRES_PASSWORD, for both the \
+             backend and the timescaledb services, before the gateway next restarts. Until \
+             then a restarted gateway cannot reach the database. Anything else that logs in \
+             as this role, such as a backup job or a migration DSN, needs it too."
+        },
+    }))
+}
+
+async fn rotate_admin_key(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+) -> Result<Json<Rotated>, ApiError> {
+    check_admin(&key)?;
+    let _rotation = state.rotation.lock().await;
+    let file = state.secret_files.admin_key.as_deref();
+    let admin_key = state
+        .keys
+        .rotate_bootstrap_key(file)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    tracing::warn!("{} rotated the admin key", key.name);
+    Ok(Json(Rotated {
+        secret: admin_key,
+        persisted: file.is_some(),
+        note: if file.is_some() {
+            "Saved in the gateway's admin key file. The old key no longer works."
+        } else {
+            "Not saved: put it in the deployment's env as WIRETAP_ADMIN_KEY before the \
+             gateway next restarts. The old key no longer works, but works again if the \
+             gateway restarts with it."
+        },
+    }))
 }
 
 async fn ingest_sessions(
@@ -1333,7 +1459,7 @@ mod tests {
         gateway_with(dbs, &db::tests::config_at(0, false)).await
     }
 
-    fn state_over(dbs: db::Databases) -> St {
+    fn state_over(dbs: db::Databases, secret_files: crate::secrets::SecretFiles) -> St {
         let sessions = crate::ingest::Sessions::default();
         Arc::new(AppState {
             keys: crate::keys::KeyStore::new(dbs.clone(), Some("bootstrap")),
@@ -1341,11 +1467,13 @@ mod tests {
             dbs,
             sessions,
             logs: crate::logbuf::LogBuffer::new(16),
+            secret_files,
+            rotation: Default::default(),
         })
     }
 
     async fn gateway_with(dbs: db::Databases, config: &Config) -> std::net::SocketAddr {
-        let state = state_over(dbs);
+        let state = state_over(dbs, config.secret_files.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app =
@@ -1478,8 +1606,12 @@ mod tests {
         };
         let dbs = db::tests::unreachable_databases(false);
         let listener = bind_app_socket(&socket.path).unwrap();
-        let app = app_socket_router(state_over(dbs.clone()), &config, &socket)
-            .into_make_service_with_connect_info::<SocketPeer>();
+        let app = app_socket_router(
+            state_over(dbs.clone(), Default::default()),
+            &config,
+            &socket,
+        )
+        .into_make_service_with_connect_info::<SocketPeer>();
         tokio::spawn(async move { axum::serve(listener, app).await });
         (socket.path, gateway_with(dbs, &config).await)
     }
@@ -2023,5 +2155,174 @@ mod tests {
             let msg = err["error"].as_str().unwrap_or_default();
             assert!(msg.contains(says), "{says}: {msg}");
         }
+    }
+
+    async fn rotate(at: std::net::SocketAddr, secret: &str, key: &str) -> serde_json::Value {
+        let path = format!("/v1/admin/secrets/{secret}/rotate");
+        let (status, body) = request_to(at, "POST", &path, Some(key), None).await;
+        assert_eq!(status, 200, "{body}");
+        body
+    }
+
+    #[tokio::test]
+    async fn a_rotated_admin_key_from_the_environment_replaces_the_old_one_in_memory_only() {
+        let at = gateway(db::tests::unreachable_databases(true)).await;
+        let (_, sources) =
+            request_to(at, "GET", "/v1/admin/secrets", Some("bootstrap"), None).await;
+        assert_eq!(sources["admin_key"]["persisted"], false);
+
+        let rotated = rotate(at, "admin-key", "bootstrap").await;
+        assert_eq!(rotated["persisted"], false);
+        assert!(rotated["note"]
+            .as_str()
+            .unwrap()
+            .contains("WIRETAP_ADMIN_KEY"));
+        let new_key = rotated["secret"].as_str().unwrap();
+        assert!(
+            new_key.starts_with("wt_") && new_key.len() == 67,
+            "{new_key}"
+        );
+        assert_eq!(
+            request_to(at, "GET", "/v1/whoami", Some("bootstrap"), None)
+                .await
+                .0,
+            401
+        );
+        assert_eq!(
+            request_to(at, "GET", "/v1/whoami", Some(new_key), None)
+                .await
+                .0,
+            200
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rotated_admin_key_with_a_file_is_saved_there() {
+        let dir = std::env::temp_dir().join(format!("wiretap-admin-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = db::tests::config_at(0, false);
+        config.secret_files.admin_key = Some(dir.join("admin-key"));
+        let at = gateway_with(db::tests::unreachable_databases(true), &config).await;
+
+        let rotated = rotate(at, "admin-key", "bootstrap").await;
+        assert_eq!(rotated["persisted"], true);
+        let saved = std::fs::read_to_string(dir.join("admin-key")).unwrap();
+        assert_eq!(rotated["secret"].as_str(), Some(saved.as_str()));
+    }
+
+    #[tokio::test]
+    async fn only_an_admin_may_rotate_a_secret() {
+        let at = gateway(db::tests::unreachable_databases(true)).await;
+        assert_eq!(
+            request_to(at, "POST", "/v1/admin/secrets/admin-key/rotate", None, None)
+                .await
+                .0,
+            401
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cli_rotates_through_the_running_gateway() {
+        let at = gateway(db::tests::unreachable_databases(true)).await;
+        let mut config = db::tests::config_at(0, false);
+        config.http_listen = format!("0.0.0.0:{}", at.port());
+        config.bootstrap_admin_key = Some(wiretap_model::Secret::new("bootstrap"));
+        crate::secrets::rotate_command(&config, "admin-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            request_to(at, "GET", "/v1/whoami", Some("bootstrap"), None)
+                .await
+                .0,
+            401
+        );
+
+        let refused = crate::secrets::rotate_command(&config, "admin-key").await;
+        assert!(refused.unwrap_err().contains("401"));
+        assert!(crate::secrets::rotate_command(&config, "nonsense")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_key_edited_to_another_pin_is_refused_outside_it_on_its_next_request() {
+        let dbs = crate::keys::tests::own_key_database("p10_pins").await;
+        crate::keys::KeyStore::new(dbs.clone(), None)
+            .bootstrap()
+            .await
+            .unwrap();
+        let at = gateway_with(dbs, &db::tests::config_at(0, false)).await;
+        let admin = Some("bootstrap");
+        let body = json!({ "name": "pinned", "role": "read", "database_pin": "a" });
+        let (_, made) = request_to(at, "POST", "/v1/admin/keys", admin, Some(body)).await;
+        let (id, key) = (made["id"].as_i64().unwrap(), made["key"].as_str().unwrap());
+        let edit = |body: serde_json::Value| async move {
+            let path = format!("/v1/admin/keys/{id}");
+            assert_eq!(
+                request_to(at, "PATCH", &path, admin, Some(body)).await.0,
+                200
+            );
+        };
+        let pinned_out_of = |db: &'static str| async move {
+            let path = format!("/v1/db/{db}/time-bounds");
+            request_to(at, "GET", &path, Some(key), None).await.0 == 403
+        };
+        let listed = || async move {
+            let (_, keys) = request_to(at, "GET", "/v1/admin/keys", admin, None).await;
+            keys["keys"][0].clone()
+        };
+
+        assert!(pinned_out_of("b").await && !pinned_out_of("a").await);
+        edit(json!({ "database_pin": "b" })).await;
+        assert!(pinned_out_of("a").await && !pinned_out_of("b").await);
+        edit(json!({ "name": "renamed" })).await;
+        assert_eq!(listed().await["database_pin"], "b");
+        assert_eq!(listed().await["name"], "renamed");
+        edit(json!({ "database_pin": null })).await;
+        assert!(!pinned_out_of("a").await && !pinned_out_of("b").await);
+        assert_eq!(listed().await["role"], "read");
+
+        let disable = format!("/v1/admin/keys/{id}/disable");
+        assert_eq!(request_to(at, "POST", &disable, admin, None).await.0, 200);
+        edit(json!({ "database_pin": "a" })).await;
+        assert_eq!(listed().await["database_pin"], "a");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_rotated_key_keeps_its_row_and_only_the_new_plaintext_works() {
+        let dbs = crate::keys::tests::own_key_database("p10_key_rotate").await;
+        crate::keys::KeyStore::new(dbs.clone(), None)
+            .bootstrap()
+            .await
+            .unwrap();
+        let at = gateway_with(dbs, &db::tests::config_at(0, false)).await;
+        let admin = Some("bootstrap");
+        let body = json!({ "name": "k", "role": "read", "database_pin": "a" });
+        let (_, made) = request_to(at, "POST", "/v1/admin/keys", admin, Some(body)).await;
+        let (id, old) = (made["id"].as_i64().unwrap(), made["key"].as_str().unwrap());
+
+        let rotate = format!("/v1/admin/keys/{id}/rotate");
+        let (status, rotated) = request_to(at, "POST", &rotate, admin, None).await;
+        assert_eq!(status, 200);
+        let new = rotated["key"].as_str().unwrap();
+        assert_eq!(
+            request_to(at, "GET", "/v1/whoami", Some(old), None).await.0,
+            401
+        );
+        assert_eq!(
+            request_to(at, "GET", "/v1/whoami", Some(new), None).await.0,
+            200
+        );
+        let (_, keys) = request_to(at, "GET", "/v1/admin/keys", admin, None).await;
+        assert_eq!(keys["keys"][0]["id"], id);
+        assert_eq!(keys["keys"][0]["database_pin"], "a");
+
+        let disable = format!("/v1/admin/keys/{id}/disable");
+        assert_eq!(request_to(at, "POST", &disable, admin, None).await.0, 200);
+        assert_eq!(request_to(at, "POST", &rotate, admin, None).await.0, 409);
+        let missing = "/v1/admin/keys/999999/rotate";
+        assert_eq!(request_to(at, "POST", missing, admin, None).await.0, 404);
     }
 }

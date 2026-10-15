@@ -3,16 +3,22 @@
 //! SQL, and existence is checked against pg_database.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use deadpool_postgres::{Connect, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use futures_util::future::BoxFuture;
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
+use tokio::task::JoinHandle;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::NoTls;
+use wiretap_model::Secret;
 
 use crate::config::Config;
 use crate::ingest::writer::{self, CopyError, FrameRow, Written};
 use crate::schema;
+use crate::secrets;
 
 /// Where a capture database stands relative to [`schema::SCHEMA_VERSION`].
 ///
@@ -167,9 +173,54 @@ impl std::fmt::Display for DbError {
     }
 }
 
+/// The password each new connection, pooled or raw, is opened with. A rotation
+/// takes the write half, so no handshake straddles its `ALTER ROLE`.
+#[derive(Clone)]
+struct Credentials(Arc<RwLock<Secret>>);
+
+impl Connect for Credentials {
+    fn connect(
+        &self,
+        pg_config: &tokio_postgres::Config,
+    ) -> BoxFuture<'_, Result<(tokio_postgres::Client, JoinHandle<()>), tokio_postgres::Error>>
+    {
+        let mut pg_config = pg_config.clone();
+        Box::pin(async move {
+            let password = self.0.read().await;
+            pg_config.password(password.expose());
+            let (client, connection) = pg_config.connect(NoTls).await?;
+            drop(password);
+            let task = tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    tracing::debug!("postgres connection closed: {e}");
+                }
+            });
+            Ok((client, task))
+        })
+    }
+}
+
+enum Unreached {
+    TimedOut,
+    Failed(tokio_postgres::Error),
+}
+
+impl Unreached {
+    fn describe(self, database: &str) -> String {
+        match self {
+            Self::TimedOut => format!("connect to '{database}' timed out"),
+            Self::Failed(e) => format!(
+                "connect to '{database}' failed: {}",
+                schema::db_error_detail(&e)
+            ),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Databases {
     config: Arc<Config>,
+    credentials: Credentials,
     pools: Arc<Mutex<HashMap<String, Pool>>>,
     /// Serialises CREATE DATABASE between concurrent first connections.
     create_lock: Arc<Mutex<()>>,
@@ -193,6 +244,7 @@ pub struct Databases {
 impl Databases {
     pub fn new(config: Arc<Config>) -> Self {
         Self {
+            credentials: Credentials(Arc::new(RwLock::new(config.pg_password.clone()))),
             config,
             pools: Arc::new(Mutex::new(HashMap::new())),
             create_lock: Arc::new(Mutex::new(())),
@@ -723,14 +775,9 @@ impl Databases {
     }
 
     fn build_pool(&self, database: &str) -> Result<Pool, String> {
-        let pg_config: tokio_postgres::Config = self
-            .config
-            .pg_dsn(database)
-            .parse()
-            .map_err(|e| format!("bad DSN: {e}"))?;
-        let mgr = Manager::from_config(
-            pg_config,
-            NoTls,
+        let mgr = Manager::from_connect(
+            self.config.pg_config(database),
+            self.credentials.clone(),
             ManagerConfig {
                 recycling_method: RecyclingMethod::Fast,
             },
@@ -745,18 +792,98 @@ impl Databases {
 
     /// One-off (non-pooled) connection, used for CREATE DATABASE and bootstrap.
     pub async fn connect_raw(&self, database: &str) -> Result<tokio_postgres::Client, String> {
-        let dsn = self.config.pg_dsn(database);
-        let connecting = tokio_postgres::connect(&dsn, NoTls);
-        let (client, connection) = tokio::time::timeout(self.connect_timeout, connecting)
-            .await
-            .map_err(|_| format!("connect to '{database}' timed out"))?
-            .map_err(|e| format!("connect to '{database}' failed: {e}"))?;
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                tracing::debug!("postgres connection closed: {e}");
+        self.reach(database).await.map_err(|e| e.describe(database))
+    }
+
+    async fn reach(&self, database: &str) -> Result<tokio_postgres::Client, Unreached> {
+        let pg_config = self.config.pg_config(database);
+        let connecting = self.credentials.connect(&pg_config);
+        match tokio::time::timeout(self.connect_timeout, connecting).await {
+            Err(_) => Err(Unreached::TimedOut),
+            Ok(Err(e)) => Err(Unreached::Failed(e)),
+            Ok(Ok((client, _))) => Ok(client),
+        }
+    }
+
+    /// The previous password.
+    pub async fn set_pg_password(&self, password: Secret) -> Secret {
+        std::mem::replace(&mut *self.credentials.0.write().await, password)
+    }
+
+    /// Connect once, as the gateway does at start. A `.next` beside the
+    /// password file is a rotation interrupted after its `ALTER ROLE` if it is
+    /// the password that works, and promoted; otherwise one that never got
+    /// that far, and discarded.
+    pub async fn reach_postgres(&self) -> Result<(), String> {
+        let file = self.config.secret_files.pg_password.as_deref();
+        let Some(file) = file.filter(|f| secrets::staged(f).exists()) else {
+            return self.connect_raw("postgres").await.map(drop);
+        };
+        let staged = secrets::staged(file);
+        match self.reach("postgres").await {
+            Err(Unreached::Failed(e)) if e.code() == Some(&SqlState::INVALID_PASSWORD) => {
+                let previous = self.set_pg_password(secrets::read(&staged)?).await;
+                if let Err(e) = self.connect_raw("postgres").await {
+                    self.set_pg_password(previous).await;
+                    return Err(e);
+                }
+                secrets::promote(file).map_err(|e| format!("{}: {e}", staged.display()))?;
+                tracing::warn!(
+                    "promoted {}, left by a rotation that stopped before saving it",
+                    staged.display()
+                );
+                Ok(())
             }
-        });
-        Ok(client)
+            Err(e) => Err(e.describe("postgres")),
+            Ok(_) => match std::fs::remove_file(&staged) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Err(format!("{}: {e}", staged.display()))
+                }
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// A new password for the gateway's role, set from a verifier computed here
+    /// so the plaintext never reaches the server's log. Persisted when `file`
+    /// is given: staged first, so a crash after the `ALTER ROLE` leaves it for
+    /// [`Self::reach_postgres`] to promote. A failed `ALTER ROLE` leaves it
+    /// too, since a lost reply may hide one that took.
+    pub async fn rotate_pg_password(&self, file: Option<&Path>) -> Result<Secret, String> {
+        let client = self.connect_raw("postgres").await?;
+        // Every new connection waits while the write half is held.
+        client
+            .batch_execute("SET statement_timeout = '10s'")
+            .await
+            .map_err(|e| schema::db_error_detail(&e))?;
+        let password = Secret::new(secrets::random_hex());
+        if let Some(file) = file {
+            secrets::stage(file, password.expose())
+                .map_err(|e| format!("{}: {e}", secrets::staged(file).display()))?;
+        }
+        let verifier = postgres_protocol::password::scram_sha_256(password.expose().as_bytes());
+        let mut current = self.credentials.0.write().await;
+        if let Err(e) = client
+            .batch_execute(&format!("ALTER ROLE CURRENT_USER PASSWORD '{verifier}'"))
+            .await
+        {
+            return Err(format!(
+                "ALTER ROLE failed: {}",
+                schema::db_error_detail(&e)
+            ));
+        }
+        *current = password.clone();
+        drop(current);
+        if let Some(file) = file {
+            secrets::promote(file).map_err(|e| {
+                format!(
+                    "the password was changed but not saved ({e}); it is in {}, \
+                     which the next start promotes",
+                    secrets::staged(file).display()
+                )
+            })?;
+        }
+        Ok(password)
     }
 
     pub async fn database_exists(&self, name: &str) -> Result<bool, String> {
@@ -937,7 +1064,6 @@ impl Databases {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use wiretap_model::Secret;
 
     pub(crate) fn unreachable_databases(auto_migrate: bool) -> Databases {
         let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -958,6 +1084,7 @@ pub(crate) mod tests {
             pg_password: Secret::new("unused"),
             default_database: "wiretap".into(),
             bootstrap_admin_key: None,
+            secret_files: Default::default(),
             auto_create_databases: false,
             auto_migrate,
             ingest_keepalive_secs: 30.0,
@@ -966,6 +1093,12 @@ pub(crate) mod tests {
             base_path: String::new(),
             admin_dir: "/nonexistent".into(),
             app_socket: None,
+        }
+    }
+
+    impl Databases {
+        pub(crate) fn config(&self) -> &Config {
+            &self.config
         }
     }
 
@@ -1620,6 +1753,122 @@ pub(crate) mod tests {
             error: "connection refused".into(),
             since: Instant::now().checked_sub(ago).unwrap(),
         }
+    }
+
+    /// A non-superuser `LOGIN` role of its own, so rotating its password leaves
+    /// the other tests' superuser alone; and `Databases` that log in as it.
+    async fn as_new_role(prefix: &str, files: secrets::SecretFiles) -> (Databases, Secret) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let role = format!("{prefix}_{stamp}");
+        let password = Secret::new(secrets::random_hex());
+        run(
+            "postgres",
+            &format!(
+                "CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{}'",
+                password.expose()
+            ),
+        )
+        .await;
+        let mut config = live_databases(false).config.as_ref().clone();
+        config.pg_user = role;
+        config.pg_password = password.clone();
+        config.secret_files = files;
+        (Databases::new(Arc::new(config)), password)
+    }
+
+    async fn refuses(dbs: &Databases, password: &Secret) -> bool {
+        let previous = dbs.set_pg_password(password.clone()).await;
+        let refused = matches!(
+            dbs.reach("postgres").await,
+            Err(Unreached::Failed(e)) if e.code() == Some(&SqlState::INVALID_PASSWORD)
+        );
+        dbs.set_pg_password(previous).await;
+        refused
+    }
+
+    fn secrets_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wiretap-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("postgres-password")
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_rotated_password_works_at_once_and_a_pooled_connection_survives_it() {
+        let (dbs, old) = as_new_role("p10_rotate", Default::default()).await;
+        let pool = dbs.build_pool("postgres").unwrap();
+        let held = pool.get().await.unwrap();
+
+        let new = dbs.rotate_pg_password(None).await.unwrap();
+
+        held.query_one("SELECT 1", &[]).await.unwrap();
+        let fresh = (pool.get().await.unwrap(), pool.get().await.unwrap());
+        fresh.1.query_one("SELECT 1", &[]).await.unwrap();
+        drop(fresh);
+        dbs.connect_raw("postgres").await.unwrap();
+        assert!(refuses(&dbs, &old).await);
+        assert!(!refuses(&dbs, &new).await);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_rotated_password_is_saved_to_its_file() {
+        let file = secrets_dir("rotate-file");
+        let (dbs, _) = as_new_role(
+            "p10_file",
+            secrets::SecretFiles {
+                pg_password: Some(file.clone()),
+                admin_key: None,
+            },
+        )
+        .await;
+        let new = dbs.rotate_pg_password(Some(&file)).await.unwrap();
+        assert_eq!(secrets::read(&file).unwrap(), new);
+        assert!(!secrets::staged(&file).exists());
+    }
+
+    /// The crash D2 is for: the `ALTER ROLE` ran, and the rename never did.
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_staged_password_the_cluster_took_is_promoted_at_start() {
+        let file = secrets_dir("promote");
+        let files = secrets::SecretFiles {
+            pg_password: Some(file.clone()),
+            admin_key: None,
+        };
+        let (rotator, old) = as_new_role("p10_promote", files.clone()).await;
+        std::fs::write(&file, old.expose()).unwrap();
+        let new = rotator.rotate_pg_password(None).await.unwrap();
+        secrets::stage(&file, new.expose()).unwrap();
+
+        let mut config = rotator.config.as_ref().clone();
+        config.pg_password = old;
+        let started = Databases::new(Arc::new(config));
+        started.reach_postgres().await.unwrap();
+        assert_eq!(secrets::read(&file).unwrap(), new);
+        assert!(!secrets::staged(&file).exists());
+        started.connect_raw("postgres").await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_staged_password_the_cluster_never_took_is_discarded_at_start() {
+        let file = secrets_dir("discard");
+        let files = secrets::SecretFiles {
+            pg_password: Some(file.clone()),
+            admin_key: None,
+        };
+        let (dbs, old) = as_new_role("p10_discard", files).await;
+        std::fs::write(&file, old.expose()).unwrap();
+        secrets::stage(&file, "never-applied").unwrap();
+
+        dbs.reach_postgres().await.unwrap();
+        assert_eq!(secrets::read(&file).unwrap(), old);
+        assert!(!secrets::staged(&file).exists());
     }
 
     /// Behind a server that accepts connections and never says a word, like

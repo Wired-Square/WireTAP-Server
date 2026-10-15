@@ -26,11 +26,16 @@ wiretap-protocol.workspace = true
 wiretap-catalog.workspace = true
 wiretap-gateway.workspace = true
 axum.workspace = true
+# `wiretap-backend rotate` asks the running gateway, over its own listener.
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 base64.workspace = true
 bytes.workspace = true
 deadpool-postgres.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+postgres-protocol.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

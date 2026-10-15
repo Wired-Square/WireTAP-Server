@@ -170,6 +170,12 @@ Notes:
   Create per-user `read` keys in the admin UI rather than sharing the admin key.
 - **Capture devices / Pi forward mode**: point them at `<nas>:9323` with an
   `ingest` key (admin UI → Keys).
+- **Rotate the database password or the admin key** from the admin UI (Keys →
+  Secrets), or with `wiretap-backend rotate db-password|admin-key` in the backend
+  container. The gateway does not save the new value: put it in the app's
+  environment (`POSTGRES_PASSWORD` for both services, or `WIRETAP_ADMIN_KEY`)
+  before its next restart. See
+  [../README.md](../README.md#rotating-the-database-password-and-the-admin-key).
 - **Migrate an existing archive** into the NAS database: see the runbook in
   [../README.md](../README.md#migrating-an-existing-archive-into-the-container)
   and [tools/migrate_to_timescale.py](../../../tools/migrate_to_timescale.py).
