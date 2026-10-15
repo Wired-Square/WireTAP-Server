@@ -1396,22 +1396,13 @@ pub(crate) mod tests {
     #[tokio::test]
     #[ignore = "needs TimescaleDB; see live_databases"]
     async fn a_v4_archive_relabels_its_modbus_rows_and_rollup_in_place() {
-        use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
         let name = seeded_v4_database("relabel", 6, 300).await;
         let compressed = "SELECT count(*) FROM timescaledb_information.chunks \
                            WHERE hypertable_name = 'capture_frame' AND is_compressed";
         let compressed_before = scalar(&name, compressed).await;
         assert!(compressed_before > 0);
         let rollup = rollup_table(&name).await;
-        let relabelled: Vec<_> = per_protocol(&name)
-            .await
-            .into_iter()
-            .map(|(p, rows, rolled_up)| match p.as_str() {
-                "modbus" => (MODBUS_RTU_PROTOCOL.to_string(), rows, rolled_up),
-                _ => (p, rows, rolled_up),
-            })
-            .collect();
-        assert_eq!(relabelled.len(), 3);
+        let relabelled = per_protocol_relabelled(&name).await;
 
         let dbs = live_databases(false);
         sweep(&dbs).await;
@@ -1440,6 +1431,79 @@ pub(crate) mod tests {
             .await;
         assert!(refused.is_err(), "the old tag is still accepted");
         dbs.delete_database(&name).await.unwrap();
+    }
+
+    /// [`per_protocol`] as it should read once 0005 has run.
+    async fn per_protocol_relabelled(name: &str) -> Vec<(String, i64, i64)> {
+        use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
+        let relabelled: Vec<_> = per_protocol(name)
+            .await
+            .into_iter()
+            .map(|(p, rows, rolled_up)| match p.as_str() {
+                "modbus" => (MODBUS_RTU_PROTOCOL.to_string(), rows, rolled_up),
+                _ => (p, rows, rolled_up),
+            })
+            .collect();
+        assert_eq!(relabelled.len(), 3);
+        relabelled
+    }
+
+    /// A v4 archive whose compressed chunks each hold more Modbus rows than
+    /// TimescaleDB will decompress in one transaction, left as `half_done` by
+    /// an earlier run, migrated to the end.
+    async fn migrate_past_the_decompression_limit(prefix: &str, half_done: &str) {
+        let name = seeded_v4_database(prefix, 6, 300).await;
+        let relabelled = per_protocol_relabelled(&name).await;
+        run(
+            &name,
+            &format!(
+                "{half_done}
+                 ALTER DATABASE {name}
+                   SET timescaledb.max_tuples_decompressed_per_dml_transaction = 10"
+            ),
+        )
+        .await;
+
+        let dbs = live_databases(false);
+        dbs.migrate_one(&name).await.unwrap();
+        assert_eq!(per_protocol(&name).await, relabelled);
+        let checks = "SELECT count(*) FROM pg_constraint \
+                       WHERE conrelid = 'public.capture_frame'::regclass \
+                         AND conname IN ('capture_frame_protocol_check', \
+                                         'capture_frame_protocol_columns_check')";
+        assert_eq!(scalar(&name, checks).await, 2);
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_compressed_chunk_past_the_decompression_limit_still_relabels() {
+        migrate_past_the_decompression_limit("decompress", "").await;
+    }
+
+    /// Where v0.1.11's run stopped: the CHECKs gone and the first chunk done.
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_relabel_stopped_at_the_decompression_limit_resumes() {
+        migrate_past_the_decompression_limit(
+            "decompress_resume",
+            "ALTER TABLE public.capture_frame
+               DROP CONSTRAINT capture_frame_protocol_check,
+               DROP CONSTRAINT capture_frame_protocol_columns_check;
+             DO $$
+             DECLARE c record;
+             BEGIN
+               SELECT format('%I.%I', chunk_schema, chunk_name)::regclass AS chunk,
+                      range_start, range_end
+                 INTO c FROM timescaledb_information.chunks
+                WHERE hypertable_name = 'capture_frame' AND is_compressed
+                ORDER BY range_start LIMIT 1;
+               UPDATE public.capture_frame SET protocol = 'modbus_rtu'
+                WHERE ts >= c.range_start AND ts < c.range_end AND protocol = 'modbus';
+               PERFORM compress_chunk(c.chunk);
+             END $$;",
+        )
+        .await;
     }
 
     #[tokio::test]
