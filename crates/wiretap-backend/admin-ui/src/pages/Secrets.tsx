@@ -16,8 +16,8 @@ function confirmation(secret: Secret, persisted: boolean): string {
   }
   return persisted
     ? "Rotate the admin key? The current one stops working at once."
-    : "Rotate the admin key? The current one stops working at once, and the new one is not saved. " +
-        "Copy it into WIRETAP_ADMIN_KEY before the gateway next restarts.";
+    : "Rotate the admin key? The current one stops working at once and stays dead, even if the gateway " +
+        "restarts with it. The new one is kept across restarts; copy it into WIRETAP_ADMIN_KEY too, so the env matches.";
 }
 
 export default function Secrets({ caller }: { caller: Caller }) {
@@ -64,6 +64,9 @@ export default function Secrets({ caller }: { caller: Caller }) {
                 {persisted
                   ? "saved in a file the gateway owns"
                   : "from the deployment's env: a new one must be copied there by hand"}
+                {secret === "admin-key" && sources.admin_key.stale_config && (
+                  <div className="error">The deployment's env still holds a rotated admin key.</div>
+                )}
               </td>
               <td style={{ textAlign: "right" }}>
                 <button className="btn" onClick={() => rotate(secret, persisted)}>

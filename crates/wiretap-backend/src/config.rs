@@ -20,8 +20,8 @@ pub struct Config {
     /// Database created on first start and used when an ingest client
     /// doesn't name one. Also hosts the wiretap_meta schema (API keys).
     pub default_database: String,
-    /// Break-glass admin API key, always honoured (cannot be revoked from
-    /// the admin UI). Optional — without it, keys must be seeded in SQL.
+    /// Break-glass admin API key, honoured until rotated (cannot be revoked
+    /// from the admin UI). Optional — without it, keys must be seeded in SQL.
     pub bootstrap_admin_key: Option<Secret>,
     pub secret_files: SecretFiles,
     /// Allow ingest clients / imports to auto-create unknown databases.

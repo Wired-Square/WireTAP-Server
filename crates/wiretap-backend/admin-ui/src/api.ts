@@ -77,7 +77,7 @@ export interface KeySummary {
 /** Whether each secret is saved in a file the gateway owns, or comes from env. */
 export interface SecretSources {
   db_password: { persisted: boolean };
-  admin_key: { persisted: boolean };
+  admin_key: { persisted: boolean; stale_config: boolean };
 }
 
 /** A rotated secret, shown once, and what to do with it. */

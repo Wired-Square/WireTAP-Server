@@ -58,7 +58,6 @@ export default function Keys({ caller }: { caller: Caller }) {
     setShowCreate(key === null && !showCreate);
     setName(key?.name ?? "");
     setPin(key?.database_pin ?? "");
-    setRevealed(null);
   };
 
   const create = () =>
@@ -86,6 +85,7 @@ export default function Keys({ caller }: { caller: Caller }) {
       revoke: `Revoke key "${k.name}"? Clients using it lose access, and this cannot be undone.`,
     };
     if (!confirm(prompts[verb])) return;
+    setRevealed(null);
     run(async () => {
       if (verb === "revoke") {
         await api(`/v1/admin/keys/${k.id}`, { method: "DELETE" });

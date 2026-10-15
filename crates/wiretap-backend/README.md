@@ -59,8 +59,8 @@ WIRETAP_BUILD_ID=$(../../packaging/build-id.sh) docker compose up -d --build
 
 Keys live in the database (`wiretap_meta.api_keys`, sha256-hashed); the
 plaintext is shown once at creation in the admin UI. `WIRETAP_ADMIN_KEY` from
-the environment is a break-glass admin key that always works and can't be
-disabled or revoked from the UI; it can be
+the environment is a break-glass admin key that can't be disabled or revoked
+from the UI, and works until it is
 [rotated](#rotating-the-database-password-and-the-admin-key).
 
 | Role | Can |
@@ -120,11 +120,16 @@ Where the secret comes from decides what is left to do:
   is left to do. A crash between the password change and the save is put right
   at the next start.
 - **The environment**, `POSTGRES_PASSWORD` or `WIRETAP_ADMIN_KEY`, as the
-  compose deploys have it: nothing is saved. Put the new value in `.env` (or
-  `gateway.env`) before the gateway next restarts: `POSTGRES_PASSWORD` for both
-  the backend and the timescaledb services, or `WIRETAP_ADMIN_KEY`. Until then a
-  restarted gateway cannot reach the database, or comes back with the old admin
-  key.
+  compose deploys have it: nothing is saved there. Put the new password in
+  `.env` (or `gateway.env`) as `POSTGRES_PASSWORD`, for both the backend and the
+  timescaledb services, before the gateway next restarts: until then a
+  restarted gateway cannot reach the database. A new admin key is kept across
+  restarts in the database, and the old one stays dead even if the gateway
+  restarts with it; put the new one in `WIRETAP_ADMIN_KEY` too, so the env
+  matches. Until you do, the gateway logs a warning at start and the Secrets
+  section says the env holds a rotated key. Setting `WIRETAP_ADMIN_KEY` to a
+  value it has never seen is a break-glass reset: that key becomes the admin
+  key, and the previous one stops working.
 
 In the shipped compose files the gateway logs in as the `postgres` superuser,
 so a rotation changes that role's password: anything else that uses it, such as

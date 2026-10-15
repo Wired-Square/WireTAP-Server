@@ -47,7 +47,8 @@ The image points the gateway at both files with `WIRETAP_PG_PASSWORD_FILE` and
 (Secrets), or with `docker exec <container> wiretap-backend rotate
 db-password` (or `admin-key`), which prints the new value. The gateway saves it
 in the file, and nothing needs a restart. An admin key set with
-`WIRETAP_ADMIN_KEY` is rotated only until the next start.
+`WIRETAP_ADMIN_KEY` is rotated for good: put the new one there too, so the env
+matches.
 
 ## How it runs
 

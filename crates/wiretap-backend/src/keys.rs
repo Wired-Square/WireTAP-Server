@@ -1,7 +1,8 @@
 //! API key store. Keys live in `wiretap_meta.api_keys` in the default
 //! database (sha256-hashed; the plaintext is shown once at creation).
-//! A bootstrap admin key, from the environment or its file, is always honoured
-//! so the stack can never lock itself out.
+//! A bootstrap admin key, from the environment or its file, is honoured unless
+//! a rotation retired it, and a new one always is, so the stack can never lock
+//! itself out.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,7 +37,18 @@ BEGIN
   END IF;
 EXCEPTION WHEN undefined_column THEN NULL; -- another gateway renamed it first
 END $$;
+CREATE TABLE IF NOT EXISTS wiretap_meta.bootstrap_keys (
+  key_hash    TEXT        PRIMARY KEY,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  retired_at  timestamptz
+);
+CREATE UNIQUE INDEX IF NOT EXISTS bootstrap_keys_one_current
+  ON wiretap_meta.bootstrap_keys ((true)) WHERE retired_at IS NULL;
 "#;
+
+/// Serialises the meta schema and the bootstrap key's history across gateways
+/// sharing a database.
+const META_LOCK: i64 = 0x5754_4150_0003;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -113,46 +125,168 @@ pub fn new_key() -> String {
     format!("wt_{}", secrets::random_hex())
 }
 
+/// What `wiretap_meta.bootstrap_keys` makes of the configured admin key.
+#[derive(Debug, PartialEq)]
+enum Standing {
+    Current,
+    Retired {
+        at: DateTime<Utc>,
+        current: Option<String>,
+    },
+    /// A deliberate break-glass reset: it becomes the current one.
+    Unknown,
+}
+
+/// `rows` holds the configured key's row, if any, and the current one.
+fn standing(configured: &str, rows: &[(String, Option<DateTime<Utc>>)]) -> Standing {
+    let current = || {
+        rows.iter()
+            .find(|(_, retired)| retired.is_none())
+            .map(|(hash, _)| hash.clone())
+    };
+    match rows.iter().find(|(hash, _)| hash == configured) {
+        None => Standing::Unknown,
+        Some((_, None)) => Standing::Current,
+        Some((_, Some(at))) => Standing::Retired {
+            at: *at,
+            current: current(),
+        },
+    }
+}
+
+async fn meta_transaction(
+    client: &mut tokio_postgres::Client,
+) -> Result<tokio_postgres::Transaction<'_>, tokio_postgres::Error> {
+    let tx = client.transaction().await?;
+    tx.execute("SELECT pg_advisory_xact_lock($1)", &[&META_LOCK])
+        .await?;
+    Ok(tx)
+}
+
+/// Retires the current bootstrap key, and `outgoing` if it has no row yet.
+async fn make_current(
+    tx: &tokio_postgres::Transaction<'_>,
+    outgoing: Option<&str>,
+    hash: &str,
+) -> Result<(), tokio_postgres::Error> {
+    tx.execute(
+        "UPDATE wiretap_meta.bootstrap_keys SET retired_at = now() WHERE retired_at IS NULL",
+        &[],
+    )
+    .await?;
+    if let Some(outgoing) = outgoing {
+        tx.execute(
+            "INSERT INTO wiretap_meta.bootstrap_keys (key_hash, retired_at) VALUES ($1, now()) \
+             ON CONFLICT DO NOTHING",
+            &[&outgoing],
+        )
+        .await?;
+    }
+    tx.execute(
+        "INSERT INTO wiretap_meta.bootstrap_keys (key_hash) VALUES ($1)",
+        &[&hash],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Hashes of the admin key the gateway was started with, and the one it honours.
+struct Bootstrap {
+    configured: Option<String>,
+    current: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct KeyStore {
     dbs: Databases,
-    bootstrap_hash: Arc<std::sync::RwLock<Option<String>>>,
+    bootstrap: Arc<std::sync::RwLock<Bootstrap>>,
     /// key_hash -> KeyInfo for enabled keys.
     cache: Arc<RwLock<HashMap<String, KeyInfo>>>,
 }
 
 impl KeyStore {
     pub fn new(dbs: Databases, bootstrap_admin_key: Option<&str>) -> Self {
+        let configured = bootstrap_admin_key.map(hash_key);
         Self {
             dbs,
-            bootstrap_hash: Arc::new(std::sync::RwLock::new(bootstrap_admin_key.map(hash_key))),
+            bootstrap: Arc::new(std::sync::RwLock::new(Bootstrap {
+                current: configured.clone(),
+                configured,
+            })),
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// The old bootstrap key stops working at once.
-    pub fn set_bootstrap_key(&self, key: &str) {
-        *self.bootstrap_hash.write().unwrap() = Some(hash_key(key));
+    /// The configured admin key was rotated away, so the deployment should be
+    /// given the current one.
+    pub fn stale_config(&self) -> bool {
+        let bootstrap = self.bootstrap.read().unwrap();
+        bootstrap.configured.is_some() && bootstrap.configured != bootstrap.current
     }
 
-    /// A new bootstrap key, persisted when `file` is given.
-    pub fn rotate_bootstrap_key(&self, file: Option<&Path>) -> Result<String, String> {
+    /// A new bootstrap key, recorded as current so it outlives a restart, and
+    /// saved in `file` when given. The old one stops working at once.
+    pub async fn rotate_bootstrap_key(&self, file: Option<&Path>) -> Result<String, String> {
+        let failed = |e| format!("admin key rotation failed: {e}");
         let key = new_key();
+        let hash = hash_key(&key);
+        let outgoing = self.bootstrap.read().unwrap().current.clone();
+        let mut client = self.dbs.connect_raw(self.dbs.default_database()).await?;
+        let tx = meta_transaction(&mut client).await.map_err(failed)?;
+        make_current(&tx, outgoing.as_deref(), &hash)
+            .await
+            .map_err(failed)?;
         if let Some(file) = file {
             secrets::persist(file, &key)?;
         }
-        self.set_bootstrap_key(&key);
+        tx.commit().await.map_err(failed)?;
+        let mut bootstrap = self.bootstrap.write().unwrap();
+        if file.is_some() {
+            bootstrap.configured = Some(hash.clone());
+        }
+        bootstrap.current = Some(hash);
         Ok(key)
     }
 
-    /// Create the meta schema and warm the cache. Call once at startup,
-    /// after the default database exists.
+    /// Create the meta schema, settle which admin key is honoured, and warm
+    /// the cache. Call once at startup, after the default database exists.
     pub async fn bootstrap(&self) -> Result<(), String> {
-        let client = self.dbs.connect_raw(self.dbs.default_database()).await?;
-        client
-            .batch_execute(META_SCHEMA)
-            .await
-            .map_err(|e| format!("meta schema failed: {e}"))?;
+        let failed = |e| format!("meta schema failed: {e}");
+        let mut client = self.dbs.connect_raw(self.dbs.default_database()).await?;
+        let tx = meta_transaction(&mut client).await.map_err(failed)?;
+        tx.batch_execute(META_SCHEMA).await.map_err(failed)?;
+        let configured = self.bootstrap.read().unwrap().configured.clone();
+        let mut honoured = configured.clone();
+        if let Some(configured) = &configured {
+            let rows: Vec<_> = tx
+                .query(
+                    "SELECT key_hash, retired_at FROM wiretap_meta.bootstrap_keys \
+                     WHERE key_hash = $1 OR retired_at IS NULL",
+                    &[configured],
+                )
+                .await
+                .map_err(failed)?
+                .iter()
+                .map(|r| (r.get(0), r.get(1)))
+                .collect();
+            match standing(configured, &rows) {
+                Standing::Current => {}
+                Standing::Retired { at, current } => {
+                    tracing::warn!(
+                        "the configured admin key was rotated away on {}: set WIRETAP_ADMIN_KEY \
+                         (or the key file) to the current key",
+                        at.format("%Y-%m-%d %H:%M UTC")
+                    );
+                    honoured = current;
+                }
+                Standing::Unknown => {
+                    make_current(&tx, None, configured).await.map_err(failed)?;
+                    tracing::info!("the configured admin key is new: it replaces the previous one");
+                }
+            }
+        }
+        tx.commit().await.map_err(failed)?;
+        self.bootstrap.write().unwrap().current = honoured;
         self.reload().await
     }
 
@@ -188,7 +322,7 @@ impl KeyStore {
     /// nothing about the stored keys.
     pub async fn validate(&self, key: &str) -> Option<KeyInfo> {
         let h = hash_key(key);
-        if self.bootstrap_hash.read().unwrap().as_deref() == Some(h.as_str()) {
+        if self.bootstrap.read().unwrap().current.as_deref() == Some(h.as_str()) {
             return Some(KeyInfo {
                 id: 0,
                 name: "bootstrap-admin".into(),
@@ -351,6 +485,111 @@ pub(crate) mod tests {
         let mut config = live_databases(false).config().clone();
         config.default_database = name;
         Databases::new(Arc::new(config))
+    }
+
+    #[test]
+    fn the_configured_admin_key_is_current_retired_or_a_reset() {
+        let at = Utc::now();
+        let row = |hash: &str, retired| (hash.to_string(), retired);
+        assert_eq!(standing("c", &[row("c", None)]), Standing::Current);
+        assert_eq!(
+            standing("r", &[row("r", Some(at)), row("c", None)]),
+            Standing::Retired {
+                at,
+                current: Some("c".into())
+            }
+        );
+        assert_eq!(
+            standing("r", &[row("r", Some(at))]),
+            Standing::Retired { at, current: None }
+        );
+        assert_eq!(standing("n", &[row("c", None)]), Standing::Unknown);
+        assert_eq!(standing("n", &[]), Standing::Unknown);
+    }
+
+    async fn current_bootstrap_keys(dbs: &Databases) -> i64 {
+        let client = dbs.connect_raw(dbs.default_database()).await.unwrap();
+        client
+            .query_one(
+                "SELECT count(*) FROM wiretap_meta.bootstrap_keys WHERE retired_at IS NULL",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    async fn restarted(dbs: &Databases, configured: Option<&str>) -> KeyStore {
+        let store = KeyStore::new(dbs.clone(), configured);
+        store.bootstrap().await.unwrap();
+        store
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn an_admin_key_rotated_from_the_environment_outlives_a_restart_with_the_old_env() {
+        let dbs = own_key_database("p10_admin_restart").await;
+        let first = restarted(&dbs, Some("old")).await;
+        let rotated = first.rotate_bootstrap_key(None).await.unwrap();
+        assert!(first.stale_config());
+
+        let old_env = restarted(&dbs, Some("old")).await;
+        assert!(old_env.validate("old").await.is_none());
+        assert!(old_env.validate(&rotated).await.is_some());
+        assert!(old_env.stale_config());
+
+        let fresh_env = restarted(&dbs, Some("fresh")).await;
+        assert!(fresh_env.validate("fresh").await.is_some());
+        assert!(fresh_env.validate(&rotated).await.is_none());
+        assert!(fresh_env.validate("old").await.is_none());
+        assert!(!fresh_env.stale_config());
+        assert_eq!(current_bootstrap_keys(&dbs).await, 1);
+
+        let no_env = restarted(&dbs, None).await;
+        assert!(no_env.validate("fresh").await.is_none());
+        assert!(!no_env.stale_config());
+        assert!(restarted(&dbs, Some("fresh"))
+            .await
+            .validate("fresh")
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn two_gateways_starting_with_a_new_admin_key_record_one_current() {
+        let dbs = own_key_database("p10_admin_race").await;
+        for key in ["old", "new"] {
+            let (a, b) = tokio::join!(restarted(&dbs, Some(key)), restarted(&dbs, Some(key)));
+            assert_eq!(current_bootstrap_keys(&dbs).await, 1);
+            assert!(a.validate(key).await.is_some() && b.validate(key).await.is_some());
+        }
+        assert!(restarted(&dbs, Some("old"))
+            .await
+            .validate("old")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn an_admin_key_rotated_into_its_file_is_the_one_a_restart_reads() {
+        let dbs = own_key_database("p10_admin_keyfile").await;
+        let dir = std::env::temp_dir().join(format!("wiretap-keyfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("admin-key");
+        std::fs::write(&file, "from-file").unwrap();
+
+        let first = restarted(&dbs, Some("from-file")).await;
+        let rotated = first.rotate_bootstrap_key(Some(&file)).await.unwrap();
+        assert!(!first.stale_config());
+        let saved = secrets::read(&file).unwrap();
+        assert_eq!(saved.expose(), rotated);
+
+        let again = restarted(&dbs, Some(saved.expose())).await;
+        assert!(again.validate(&rotated).await.is_some());
+        assert!(again.validate("from-file").await.is_none());
+        assert!(!again.stale_config());
     }
 
     #[tokio::test]

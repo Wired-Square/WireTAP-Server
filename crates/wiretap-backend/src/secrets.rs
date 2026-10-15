@@ -47,15 +47,22 @@ pub fn staged(file: &Path) -> PathBuf {
     name.into()
 }
 
+/// Always a new file, as `mode` applies only on creation: a leftover `.next`
+/// could otherwise keep a looser one.
 pub fn stage(file: &Path, value: &str) -> io::Result<()> {
+    let path = staged(file);
+    fs::remove_file(&path).ok();
     let mut staged = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
-        .open(staged(file))?;
-    staged.write_all(value.as_bytes())?;
-    staged.sync_all()
+        .open(&path)?;
+    staged
+        .write_all(value.as_bytes())
+        .and_then(|()| staged.sync_all())
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&path);
+        })
 }
 
 pub fn promote(file: &Path) -> io::Result<()> {
@@ -185,6 +192,18 @@ mod tests {
         assert_eq!(read(&file).unwrap().expose(), "abc");
         fs::write(&file, "\n").unwrap();
         assert!(read(&file).is_err());
+    }
+
+    #[test]
+    fn a_leftover_staged_file_with_a_looser_mode_is_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = scratch("leftover");
+        fs::write(staged(&file), "stale").unwrap();
+        fs::set_permissions(staged(&file), fs::Permissions::from_mode(0o644)).unwrap();
+        stage(&file, "new").unwrap();
+        let mode = fs::metadata(staged(&file)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(read(&staged(&file)).unwrap().expose(), "new");
     }
 
     #[test]

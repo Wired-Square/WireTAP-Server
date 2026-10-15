@@ -16,8 +16,12 @@ All notable changes to this project are documented here. Entries go under
   server's log; open connections stay up, and ingest carries on. The gateway app
   image saves both in `/data/secrets`, through the new `WIRETAP_PG_PASSWORD_FILE`
   and `WIRETAP_ADMIN_KEY_FILE`, and a crash between the change and the save is
-  put right at the next start. A compose deploy keeps them in its env, so the
-  new value must be copied into `.env` before the next restart.
+  put right at the next start. A compose deploy keeps them in its env, so a new
+  password must be copied into `.env` before the next restart. A new admin key
+  is kept across restarts in `wiretap_meta.bootstrap_keys`, and the old one
+  stays dead even if the gateway restarts with it; until `.env` has the new one,
+  the gateway warns at start and the Secrets section says so. A
+  `WIRETAP_ADMIN_KEY` the gateway has never seen is a break-glass reset.
 - **Each API key has a ⋮ menu**: Edit… (its name and database pin, through
   `PATCH /v1/admin/keys/{id}`; the role stays), Rotate… (`POST
   /v1/admin/keys/{id}/rotate`: a new value for the same key, shown once), Disable

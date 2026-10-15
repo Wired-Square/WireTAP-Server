@@ -1146,7 +1146,8 @@ async fn keys_delete(
 }
 
 /// Whether each secret is saved in a file the gateway owns, or comes from the
-/// environment and so must be copied there by hand after a rotation.
+/// environment and so must be copied there by hand after a rotation; and
+/// whether the configured admin key is one a rotation retired.
 async fn secrets_list(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
@@ -1155,7 +1156,10 @@ async fn secrets_list(
     let files = &state.secret_files;
     Ok(Json(json!({
         "db_password": { "persisted": files.pg_password.is_some() },
-        "admin_key": { "persisted": files.admin_key.is_some() },
+        "admin_key": {
+            "persisted": files.admin_key.is_some(),
+            "stale_config": state.keys.stale_config(),
+        },
     })))
 }
 
@@ -1204,6 +1208,7 @@ async fn rotate_admin_key(
     let admin_key = state
         .keys
         .rotate_bootstrap_key(file)
+        .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     tracing::warn!("{} rotated the admin key", key.name);
     Ok(Json(Rotated {
@@ -1212,9 +1217,9 @@ async fn rotate_admin_key(
         note: if file.is_some() {
             "Saved in the gateway's admin key file. The old key no longer works."
         } else {
-            "Not saved: put it in the deployment's env as WIRETAP_ADMIN_KEY before the \
-             gateway next restarts. The old key no longer works, but works again if the \
-             gateway restarts with it."
+            "Kept across restarts, and the old key stays dead even if the gateway restarts \
+             with it. Put the new one in the deployment's env as WIRETAP_ADMIN_KEY too, so \
+             the env matches."
         },
     }))
 }
@@ -2164,12 +2169,24 @@ mod tests {
         body
     }
 
+    /// Over a key store of its own, taking the key `bootstrap` as admin.
+    async fn live_gateway_with(prefix: &str, config: &Config) -> std::net::SocketAddr {
+        let dbs = crate::keys::tests::own_key_database(prefix).await;
+        crate::keys::KeyStore::new(dbs.clone(), None)
+            .bootstrap()
+            .await
+            .unwrap();
+        gateway_with(dbs, config).await
+    }
+
     #[tokio::test]
-    async fn a_rotated_admin_key_from_the_environment_replaces_the_old_one_in_memory_only() {
-        let at = gateway(db::tests::unreachable_databases(true)).await;
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_rotated_admin_key_from_the_environment_replaces_the_old_one() {
+        let at = live_gateway_with("p10_admin_env", &db::tests::config_at(0, false)).await;
         let (_, sources) =
             request_to(at, "GET", "/v1/admin/secrets", Some("bootstrap"), None).await;
         assert_eq!(sources["admin_key"]["persisted"], false);
+        assert_eq!(sources["admin_key"]["stale_config"], false);
 
         let rotated = rotate(at, "admin-key", "bootstrap").await;
         assert_eq!(rotated["persisted"], false);
@@ -2188,26 +2205,49 @@ mod tests {
                 .0,
             401
         );
-        assert_eq!(
-            request_to(at, "GET", "/v1/whoami", Some(new_key), None)
-                .await
-                .0,
-            200
-        );
+        let (_, sources) = request_to(at, "GET", "/v1/admin/secrets", Some(new_key), None).await;
+        assert_eq!(sources["admin_key"]["stale_config"], true);
     }
 
     #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
     async fn a_rotated_admin_key_with_a_file_is_saved_there() {
         let dir = std::env::temp_dir().join(format!("wiretap-admin-key-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut config = db::tests::config_at(0, false);
         config.secret_files.admin_key = Some(dir.join("admin-key"));
-        let at = gateway_with(db::tests::unreachable_databases(true), &config).await;
+        let at = live_gateway_with("p10_admin_file", &config).await;
 
         let rotated = rotate(at, "admin-key", "bootstrap").await;
         assert_eq!(rotated["persisted"], true);
         let saved = std::fs::read_to_string(dir.join("admin-key")).unwrap();
         assert_eq!(rotated["secret"].as_str(), Some(saved.as_str()));
+        let (_, sources) = request_to(at, "GET", "/v1/admin/secrets", Some(&saved), None).await;
+        assert_eq!(sources["admin_key"]["stale_config"], false);
+    }
+
+    #[tokio::test]
+    async fn an_admin_key_rotation_the_database_cannot_record_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("wiretap-admin-norot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = db::tests::config_at(0, false);
+        config.secret_files.admin_key = Some(dir.join("admin-key"));
+        let at = gateway_with(db::tests::unreachable_databases(true), &config).await;
+
+        let path = "/v1/admin/secrets/admin-key/rotate";
+        assert_eq!(
+            request_to(at, "POST", path, Some("bootstrap"), None)
+                .await
+                .0,
+            500
+        );
+        assert!(!dir.join("admin-key").exists());
+        assert_eq!(
+            request_to(at, "GET", "/v1/whoami", Some("bootstrap"), None)
+                .await
+                .0,
+            200
+        );
     }
 
     #[tokio::test]
@@ -2222,8 +2262,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
     async fn the_cli_rotates_through_the_running_gateway() {
-        let at = gateway(db::tests::unreachable_databases(true)).await;
+        let at = live_gateway_with("p10_admin_cli", &db::tests::config_at(0, false)).await;
         let mut config = db::tests::config_at(0, false);
         config.http_listen = format!("0.0.0.0:{}", at.port());
         config.bootstrap_admin_key = Some(wiretap_model::Secret::new("bootstrap"));
@@ -2247,12 +2288,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs TimescaleDB; see live_databases"]
     async fn a_key_edited_to_another_pin_is_refused_outside_it_on_its_next_request() {
-        let dbs = crate::keys::tests::own_key_database("p10_pins").await;
-        crate::keys::KeyStore::new(dbs.clone(), None)
-            .bootstrap()
-            .await
-            .unwrap();
-        let at = gateway_with(dbs, &db::tests::config_at(0, false)).await;
+        let at = live_gateway_with("p10_pins", &db::tests::config_at(0, false)).await;
         let admin = Some("bootstrap");
         let body = json!({ "name": "pinned", "role": "read", "database_pin": "a" });
         let (_, made) = request_to(at, "POST", "/v1/admin/keys", admin, Some(body)).await;
@@ -2292,12 +2328,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs TimescaleDB; see live_databases"]
     async fn a_rotated_key_keeps_its_row_and_only_the_new_plaintext_works() {
-        let dbs = crate::keys::tests::own_key_database("p10_key_rotate").await;
-        crate::keys::KeyStore::new(dbs.clone(), None)
-            .bootstrap()
-            .await
-            .unwrap();
-        let at = gateway_with(dbs, &db::tests::config_at(0, false)).await;
+        let at = live_gateway_with("p10_key_rotate", &db::tests::config_at(0, false)).await;
         let admin = Some("bootstrap");
         let body = json!({ "name": "k", "role": "read", "database_pin": "a" });
         let (_, made) = request_to(at, "POST", "/v1/admin/keys", admin, Some(body)).await;
