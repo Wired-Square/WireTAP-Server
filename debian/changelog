@@ -1,4 +1,4 @@
-wiretap-server (0.1.12) UNRELEASED; urgency=medium
+wiretap-server (0.1.12) bookworm; urgency=medium
 
   * No change to the capture server. This release fixes the gateway's
     migration to schema v5; install and restart, or stay on 0.1.11.
