@@ -5,8 +5,108 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **The gateway serves under a base path.** `WIRETAP_BASE_PATH` (e.g.
+  `/apps/wiretap-gateway`) moves every HTTP route under it, the admin UI
+  included; unset, nothing moves. The admin UI now finds the API from its own
+  address. `GET /healthz` answers 200 only while Postgres is reachable.
+- **The gateway as an ApplianceOS app.** `apps/wiretap-gateway/make-image.sh`
+  builds one image per architecture holding the gateway and its own Postgres 16
+  with TimescaleDB 2.29.2, kept under the app's `/data` volume. It runs as any
+  uid in group 0 with no capabilities, generates its Postgres password and
+  admin key on first start, and stops the gateway before the database. It
+  declares `sockets.app` and serves the console on `/run/appliance/app.sock`
+  under `/apps/wiretap-gateway`, so the admin UI opens from the console with
+  no key.
+- **The capture daemon as an ApplianceOS app and a Docker image.**
+  `apps/wiretap-server/make-image.sh` builds one image per architecture with
+  `wiretap-server` and `wiretap-server-ui` under one supervisor: if either
+  exits the container exits 1, and a stop takes the UI down first. It runs as
+  any uid in group 0 on host networking, the daemon binding port 23 through
+  file capabilities (`NET_RAW`, `NET_BIND_SERVICE`; `no-new-privileges` must
+  be off). Its state is under `/data`, and the control sockets are in a
+  directory only the running uid may enter. With ApplianceOS's socket
+  directory mounted the UI serves the console on `app.sock` under
+  `/apps/wiretap-server/`, and otherwise its own HTTPS on 8443. The manifest
+  declares GVRET on tcp 23, on, and the device-push listener on tcp 9324, off,
+  clear of the gateway app's 9323; the image's config file pins that port.
+- **A signed source for the ApplianceOS apps.** `apps/make-source.sh pack`
+  writes the archive an ApplianceOS console installs from: an `index.json`
+  listing both apps on both architectures, each manifest pinned to the digest
+  the box loads its image as, and the images. `sign` adds the index's detached
+  CMS signature from a Code Signing certificate and key passed in, and
+  `test-keys` makes a throwaway root and leaf. The source is named `wiretap`.
+- **The gateway answers an ApplianceOS console.** With `WIRETAP_APP_SOCKET`
+  set it also serves on that Unix socket, under `WIRETAP_APP_BASE_PATH`, and a
+  request there from `WIRETAP_CONSOLE_UID` (0 by default) is the user the
+  console's `Appliance-Identity` header names: a console admin is a gateway
+  admin, and a viewer or operator reads. The admin UI asks the new
+  `GET /v1/whoami` and, behind the console, asks for no key. The access log
+  names a console user as `user=` where it names a key as `key=`. The TCP
+  listeners, their base path and their keys are unchanged.
+- **A compose file for the capture daemon on Docker**,
+  `apps/wiretap-server/docker-compose.yml`: host networking, `NET_RAW` and
+  `NET_BIND_SERVICE` over `cap_drop: [ALL]`, a named volume on `/data`, and the
+  standalone UI with browser onboarding.
+- **`apps/check-source.sh` checks a source with ApplianceOS's own code.** It
+  signs the archive with throwaway keys and runs a test inside a copy of an
+  ApplianceOS checkout's console that reads, verifies, uploads, installs and
+  fetches it, and refuses a tampered index, another root and a leaf not for
+  code signing.
+- **The capture daemon takes settings from a UI, beneath the admin's.** A
+  UI's settings live in `$STATE_DIRECTORY/ui.toml` (or `--ui-config`), below
+  the config file and the flags, and an environment variable's secret beats
+  them too. Only the devices (CAN, always passive), the gateway and its key,
+  database and batching, the ingest listener's enable, port and token, and the
+  log level can be set there. `--check-config` lists each of these with its
+  source (`default`, `ui`, `file`, `env` or `flag`). A `ui.toml` that cannot
+  be read, or that would stop the start, is ignored with a warning.
+- **A control socket for that UI.** HTTP/JSON on
+  `$RUNTIME_DIRECTORY/control.sock` (or `--control-socket`), 0660 in the
+  daemon's group, with no other authentication. `GET /v1/status` reports the
+  devices, the forward link, the ingest and GVRET clients, and whether a
+  change is being applied;
+  `GET /v1/settings` each setting a UI may change, its source and whether it is
+  pinned, never a secret; `PUT /v1/settings` refuses an empty change,
+  validates one as a start would, writes `ui.toml`, shuts down as on
+  `SIGTERM` and executes the daemon again on the same PID, or exits 75 for the
+  supervisor if it cannot. The packaged unit adds `RuntimeDirectory=` and
+  `SuccessExitStatus=75`.
+- **A web UI for the capture daemon, `wiretap-server-ui`**, in its own
+  workspace, `apps/wiretap-server/`, on the private chassis v0.8.0. It shows
+  the devices, the forward link and its cache, and the device-push and GVRET
+  clients, and changes the settings a UI may change, each pinned one shown as
+  fixed with where. It reaches the daemon only through the control socket
+  (`--daemon-socket`, `/run/wiretap-server/control.sock` by default). One
+  binary serves its own HTTPS and accounts, or, with
+  `WIRETAP_SERVER_UI_APP_SOCKET` and `_CONSOLE_UID` set, an ApplianceOS
+  console's proxy. Anyone signed in reads; only an admin changes, and a
+  change is answered once the daemon has restarted on it.
+- **`wiretap-server-ui` as a package**, depending on `wiretap-server`, which
+  is unchanged. The chassis renders it from `apps/wiretap-server/appliance.toml`.
+  It runs as its own user in its own group, with the daemon's group added by
+  its unit alone, so its control socket is root's; it serves HTTPS on 8443 and
+  keeps its accounts in `/var/lib/wiretap-server-ui` until a purge.
+  `apps/wiretap-server/tests/deb-lifecycle.sh` installs, upgrades, removes and
+  purges the pair.
+- **A release builds the ApplianceOS apps**: both apps' tarballs for both
+  architectures, and the unsigned source archive with its `index.json` and
+  checksums, as workflow artefacts. Signing stays a maintainer's step
+  (`apps/README.md`).
+
 ### Changed
 
+- **The capture daemon's config file is optional, and the shipped one sets
+  nothing.** A `-C` naming a missing file starts on the defaults and says so;
+  an unreadable or invalid one still stops the start. With no device named by
+  the file, `-i` or the UI, `can0` is captured, where a file naming none used
+  to capture nothing: a file that wants no CAN says `iface = ""`. The
+  installed `wiretap-server.toml` has every key commented out, so a fresh
+  install pins nothing. An existing `/etc` file is left as it is.
+- **The gateway image's health check asks `/healthz`** under
+  `WIRETAP_BASE_PATH`, so the container is unhealthy while Postgres is
+  unreachable. It asked `/v1/health` at the root, which answers 200 regardless.
 - **A migration's progress is easier to read.** Time taken shows as `2h 33m
   20s`, the time left as a badge beside it, and the chunk count beside the
   phase. The banner counts the databases waiting and offers one Fix button.

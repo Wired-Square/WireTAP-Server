@@ -1,22 +1,25 @@
-# The two cargo workspaces
+# The three cargo workspaces
 
 The root workspace is `wiretap-server` and `wiretap-backend`. `appliance/` is a
-second one, holding `wiretap-appliance` and the card image's scaffold, and it is
-not a member of the root.
+second one, holding `wiretap-appliance` and the card image's scaffold, and
+`apps/wiretap-server/` a third, holding `wiretap-server-ui`, the capture
+daemon's web UI. Neither is a member of the root.
 
-## Why two
+## Why three
 
-`wiretap-appliance` is built on the Wired Square appliance chassis,
+`wiretap-appliance` and `wiretap-server-ui` are built on the Wired Square
+appliance chassis,
 [`wslib-appliance-rs`](https://github.com/Wired-Square/wslib-appliance-rs), which
-is a private repository. Were `appliance/` a member, the root's lockfile would
+is a private repository. Were either a member, the root's lockfile would
 name the chassis and every build of it would need read access. Kept apart, the
 public root, its release and any fork build without the key. Each workspace has
-its own `Cargo.lock` and its own `rust-version`: 1.85 at the root, 1.88 in
-`appliance/`.
+its own `Cargo.lock` and its own `rust-version`: 1.85 at the root, 1.88 in the
+other two. They pin different chassis tags: `appliance/` v0.1.4,
+`apps/wiretap-server/` v0.8.0.
 
-The root's `.cargo/config.toml` still applies under `appliance/`, since cargo
-reads config from parent directories, so a cargo command there gets the root's
-musl `CC`.
+The root's `.cargo/config.toml` still applies under `appliance/` and
+`apps/wiretap-server/`, since cargo reads config from parent directories, so a
+cargo command there gets the root's musl `CC`.
 
 ## Building and gating each
 
@@ -34,6 +37,11 @@ else does:
 | Appliance gates | the same four gates, with the aarch64 `clippy` over the whole workspace |
 | Appliance browser half | `npm ci`, then `npm run ci` (typecheck and build) in `frontend/` |
 | Appliance packaging | `appliance-xtask packaging diff` (the scaffold is what the chassis renders), then `scaffold/image/tests/run-verify-tests.sh` |
+
+`apps/wiretap-server/` has two more, the same as the first two: Server UI
+gates, and Server UI browser half (`npm run ci` there also runs its unit
+tests). A third, Server app image, builds its amd64 image with
+`apps/wiretap-server/make-image.sh` and keeps nothing.
 
 Locally, `CARGO_NET_GIT_FETCH_WITH_CLI=true` has cargo fetch the private
 chassis with your own git and its credentials.

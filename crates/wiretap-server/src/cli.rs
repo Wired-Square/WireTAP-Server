@@ -9,9 +9,10 @@
 //! Defaults here are the Python's `build_parser()` defaults, which differ in
 //! places from the values in the shipped `wiretap-server.toml`.
 
-use clap::Parser;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser};
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(
     name = "wiretap-server",
     about = "SocketCAN to TCP GVRET bridge, forwarding captures to a WireTAP gateway",
@@ -19,7 +20,8 @@ use clap::Parser;
 )]
 pub struct Cli {
     /// CAN interface(s), comma-separated. Empty for a deployment with no CAN
-    /// hardware. With no -i and no config file at all, `can0`.
+    /// hardware. With no -i, and no device in the config file or the UI's
+    /// settings, `can0`.
     #[arg(short, long)]
     pub iface: Option<String>,
 
@@ -142,16 +144,53 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub pg_write_mode: Option<String>,
 
-    /// TOML config file. Note: values in the file OVERRIDE these flags.
+    /// TOML config file, optional. Note: values in the file OVERRIDE these
+    /// flags.
     #[arg(short = 'C', long)]
     pub config: Option<String>,
 
     /// Parse the configuration, print what it resolves to, and exit.
     #[arg(long)]
     pub check_config: bool,
+
+    /// The settings a UI has written, beneath the config file and these
+    /// flags. Default: $STATE_DIRECTORY/ui.toml, else none.
+    #[arg(long)]
+    pub ui_config: Option<String>,
+
+    /// The local control socket a UI talks to. Default:
+    /// $RUNTIME_DIRECTORY/control.sock, else none. Empty disables it.
+    #[arg(long)]
+    pub control_socket: Option<String>,
+
+    /// The flags given on the command line, by field name.
+    #[arg(skip)]
+    given: Vec<String>,
 }
 
 impl Cli {
+    /// Parse `args` as [`Parser::parse_from`] does, remembering which flags
+    /// were given, so a setting can say whether a flag pinned it.
+    pub fn parse_args<I, T>(args: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let matches = Self::command().get_matches_from(args);
+        let mut cli = Self::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+        cli.given = matches
+            .ids()
+            .filter(|id| matches.value_source(id.as_str()) == Some(ValueSource::CommandLine))
+            .map(|id| id.to_string())
+            .collect();
+        cli
+    }
+
+    /// Whether the flag behind `field` was given on the command line.
+    pub fn given(&self, field: &str) -> bool {
+        self.given.iter().any(|g| g == field)
+    }
+
     /// Retired `--pg-*` flags the caller actually passed, for warning about.
     ///
     /// Only three of them are retired. The rest name the *batcher*, which the
@@ -175,7 +214,6 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
 
     #[test]
     fn the_cli_definition_is_valid() {
@@ -188,8 +226,7 @@ mod tests {
     fn defaults_match_the_python() {
         let c = Cli::parse_from(["wiretap-server"]);
         // The Python's `can0` default is applied by `Settings::resolve`, and
-        // only when no config file speaks — a file's device set is what it
-        // says and nothing more.
+        // only when no layer names a device.
         assert_eq!(c.iface, None);
         assert_eq!(c.host, "0.0.0.0");
         assert_eq!(c.port, 23);
@@ -244,6 +281,23 @@ mod tests {
             "the DSN went with the sink; the batch size did not"
         );
         assert_eq!(c.pg_batch_size, 500);
+    }
+
+    #[test]
+    fn a_flag_is_given_only_when_it_is_on_the_command_line() {
+        let c = Cli::parse_args([
+            "wiretap-server",
+            "--forward-port",
+            "9323",
+            "--forward-enable",
+        ]);
+        assert!(
+            c.given("forward_port"),
+            "given, though equal to its default"
+        );
+        assert!(c.given("forward_enable"));
+        assert!(!c.given("forward_host"), "defaulted");
+        assert!(!c.given("iface"));
     }
 
     #[test]

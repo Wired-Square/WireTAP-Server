@@ -16,6 +16,7 @@
 //! token and the archive around it.
 
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -31,6 +32,7 @@ use wiretap_protocol::ingest::{
 use crate::archive::Archive;
 use crate::settings::Ingest;
 use crate::source::system_time_to_us;
+use crate::status::Connected;
 use crate::wire;
 
 /// One read from a client. The Python's `recv(65536)`, and large on purpose: a
@@ -61,6 +63,7 @@ pub struct Server {
     listener: TcpListener,
     config: Arc<Config>,
     archive: Archive,
+    clients: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -99,7 +102,13 @@ impl Server {
                 relays_raw_serial,
             }),
             archive,
+            clients: Arc::default(),
         })
+    }
+
+    /// How many devices are connected, as it changes.
+    pub fn clients(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.clients)
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -125,8 +134,10 @@ impl Server {
                 config: self.config.clone(),
                 archive: self.archive.clone(),
             };
+            let connected = Connected::new(&self.clients);
             tokio::spawn(async move {
                 session.serve(stream).await;
+                drop(connected);
                 info!("Ingest client {peer} disconnected");
             });
         }

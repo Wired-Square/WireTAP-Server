@@ -1,7 +1,12 @@
 //! HTTP API: query surface (ports of the desktop dbquery commands), admin
 //! (keys, databases, ingest sessions, activity, daemons and their catalogues),
 //! capture import, health.
-//! Auth is `Authorization: Bearer <api-key>`; roles read|ingest|admin.
+//! Auth is `Authorization: Bearer <api-key>`; roles read|ingest|admin. On the
+//! app socket it is the console's `Appliance-Identity` instead.
+
+mod console;
+
+pub use console::{bind as bind_app_socket, SocketPeer};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,7 +15,7 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, patch, post, put, MethodRouter};
 use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt;
@@ -24,6 +29,7 @@ use wiretap_protocol::import::{parse_header, parse_record, BODY_HEADER};
 use wiretap_protocol::ingest::RecordKind;
 
 use crate::catalogs::AssignError;
+use crate::config::{AppSocket, Config};
 use crate::db;
 use crate::events;
 use crate::ingest::writer::FrameRow;
@@ -75,8 +81,53 @@ fn unavailable(msg: String) -> ApiError {
     ApiError(StatusCode::SERVICE_UNAVAILABLE, msg)
 }
 
-pub fn router(state: St) -> Router {
+pub fn router(state: St, config: &Config) -> Router {
+    let routes = under(&config.base_path, routes(&state, config));
+    logged(routes, state)
+}
+
+/// The routes under the app's base path, where a request from `console_uid`
+/// is authenticated as the caller the console asserts.
+pub fn app_socket_router(state: St, config: &Config, socket: &AppSocket) -> Router {
+    let console_uid = socket.console_uid;
+    let routes = under(&socket.base_path, routes(&state, config)).layer(middleware::map_request(
+        move |mut req: Request| async move {
+            let uid = req
+                .extensions()
+                .get::<ConnectInfo<SocketPeer>>()
+                .and_then(|ConnectInfo(peer)| peer.uid);
+            req.extensions_mut().insert(OnAppSocket {
+                from_console: uid == Some(console_uid),
+            });
+            req
+        },
+    ));
+    logged(routes, state)
+}
+
+/// Outermost, so the access log wraps `auth_mw` and sees the 401s too.
+fn logged(routes: Router<St>, state: St) -> Router {
+    routes
+        .layer(middleware::from_fn(access_log_mw))
+        .with_state(state)
+}
+
+#[derive(Clone, Copy)]
+struct OnAppSocket {
+    from_console: bool,
+}
+
+fn under(base_path: &str, routes: Router<St>) -> Router<St> {
+    if base_path.is_empty() {
+        routes
+    } else {
+        Router::new().nest(base_path, routes)
+    }
+}
+
+fn routes(state: &St, config: &Config) -> Router<St> {
     let authed = Router::new()
+        .route("/v1/whoami", get(whoami))
         // databases
         .route(
             "/v1/databases",
@@ -131,27 +182,29 @@ pub fn router(state: St) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw));
 
     // Admin SPA: static files with index.html fallback (client-side tabs).
-    // Auth happens in the browser (the SPA stores an admin key and calls the
-    // /v1/admin endpoints) — the static assets themselves are not secret.
-    let admin_dir = std::path::PathBuf::from(
-        std::env::var("WIRETAP_ADMIN_DIR").unwrap_or_else(|_| "/usr/share/wiretap-admin".into()),
-    );
-    let admin = tower_http::services::ServeDir::new(&admin_dir).fallback(
-        tower_http::services::ServeFile::new(admin_dir.join("index.html")),
-    );
+    // Auth happens on its API calls, by key or by the console — the static
+    // assets themselves are not secret.
+    let admin_dir = &config.admin_dir;
+    // Directories fall back to index.html rather than redirect: ServeDir builds
+    // its redirect from the path with the prefix already stripped.
+    let admin = tower_http::services::ServeDir::new(admin_dir)
+        .append_index_html_on_directories(false)
+        .fallback(tower_http::services::ServeFile::new(
+            admin_dir.join("index.html"),
+        ));
 
-    // The bundle is polled too: every SPA load pulls it.
+    // The bundle is polled too: every SPA load pulls it. The SPA loads its
+    // assets relative to `admin/`, so `admin` itself redirects there.
     let admin = Router::new()
-        .nest_service("/admin", admin)
+        .route("/admin", get(|| async { Redirect::permanent("admin/") }))
+        .nest_service("/admin/", admin)
         .layer(middleware::from_fn(mark_routine));
 
     Router::new()
+        .route("/healthz", polled(get(healthz)))
         .route("/v1/health", polled(get(health)))
         .merge(authed)
         .merge(admin)
-        // Outermost, so it wraps `auth_mw` and sees the 401s too.
-        .layer(middleware::from_fn(access_log_mw))
-        .with_state(state)
 }
 
 /// Polled rather than requested — a healthcheck, a tab refreshing itself — so
@@ -170,12 +223,16 @@ fn polled(routes: MethodRouter<St>) -> MethodRouter<St> {
     routes.layer(middleware::from_fn(mark_routine))
 }
 
-/// Method, path, status, duration, peer, key *name*. Never a header.
-async fn access_log_mw(
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
-    req: Request,
-    next: Next,
-) -> Response {
+/// Method, path, status, duration, peer, key *name* or console user. Never a
+/// header.
+async fn access_log_mw(req: Request, next: Next) -> Response {
+    let peer = match req.extensions().get::<ConnectInfo<std::net::SocketAddr>>() {
+        Some(ConnectInfo(addr)) => addr.to_string(),
+        None => req
+            .extensions()
+            .get::<ConnectInfo<SocketPeer>>()
+            .map_or("-".into(), |ConnectInfo(peer)| peer.to_string()),
+    };
     let method = req.method().clone();
     let uri = req.uri().clone();
     let started = Instant::now();
@@ -184,19 +241,23 @@ async fn access_log_mw(
 
     let status = response.status().as_u16();
     let ms = started.elapsed().as_millis();
-    let key = response
-        .extensions()
-        .get::<KeyInfo>()
-        .map_or("-", |k| k.name.as_str());
+    let who = match response.extensions().get::<KeyInfo>() {
+        Some(KeyInfo {
+            console_user: Some(user),
+            ..
+        }) => format!("user={user}"),
+        Some(key) => format!("key={}", key.name),
+        None => "key=-".into(),
+    };
     let routine = response.extensions().get::<Routine>().is_some();
     if status >= 500 {
-        tracing::error!("{method} {uri} {status} {ms}ms peer={peer} key={key}");
+        tracing::error!("{method} {uri} {status} {ms}ms peer={peer} {who}");
     } else if status >= 400 {
-        tracing::warn!("{method} {uri} {status} {ms}ms peer={peer} key={key}");
+        tracing::warn!("{method} {uri} {status} {ms}ms peer={peer} {who}");
     } else if routine {
-        tracing::debug!("{method} {uri} {status} {ms}ms peer={peer} key={key}");
+        tracing::debug!("{method} {uri} {status} {ms}ms peer={peer} {who}");
     } else {
-        tracing::info!("{method} {uri} {status} {ms}ms peer={peer} key={key}");
+        tracing::info!("{method} {uri} {status} {ms}ms peer={peer} {who}");
     }
     response
 }
@@ -206,8 +267,20 @@ async fn auth_mw(
     mut req: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let key = req
-        .headers()
+    let info = match req.extensions().get::<OnAppSocket>() {
+        Some(&OnAppSocket { from_console }) => console_caller(from_console, req.headers())?,
+        None => key_caller(&state, req.headers()).await?,
+    };
+    req.extensions_mut().insert(info.clone());
+    let mut response = next.run(req).await;
+    // Also on the response: `access_log_mw` wraps this one, so by the time it
+    // logs, the request it could have read this from is gone.
+    response.extensions_mut().insert(info);
+    Ok(response)
+}
+
+async fn key_caller(state: &St, headers: &axum::http::HeaderMap) -> Result<KeyInfo, ApiError> {
+    let key = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
@@ -215,17 +288,48 @@ async fn auth_mw(
             StatusCode::UNAUTHORIZED,
             "missing bearer token".into(),
         ))?;
-    let info = state
+    state
         .keys
         .validate(key)
         .await
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid API key".into()))?;
-    req.extensions_mut().insert(info.clone());
-    let mut response = next.run(req).await;
-    // Also on the response: `access_log_mw` wraps this one, so by the time it
-    // logs, the request it could have read this from is gone.
-    response.extensions_mut().insert(info);
-    Ok(response)
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid API key".into()))
+}
+
+/// Only the console's assertion counts on the app socket: anybody else there is
+/// nobody, and a bearer key is not read.
+fn console_caller(
+    from_console: bool,
+    headers: &axum::http::HeaderMap,
+) -> Result<KeyInfo, ApiError> {
+    let unauthorised = |msg: &str| ApiError(StatusCode::UNAUTHORIZED, msg.into());
+    if !from_console {
+        return Err(unauthorised(
+            "only the console may call this on the app socket",
+        ));
+    }
+    let asserted = console::asserted(headers)
+        .map_err(|why| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("the Appliance-Identity header is malformed: {why}"),
+            )
+        })?
+        .ok_or_else(|| unauthorised("missing Appliance-Identity"))?;
+    Ok(KeyInfo {
+        id: 0,
+        name: format!("console:{}", asserted.username),
+        role: asserted.role,
+        database_pin: None,
+        console_user: Some(asserted.username),
+    })
+}
+
+/// Who the caller is and by what, so the admin UI knows whether to ask for a key.
+async fn whoami(Extension(key): Extension<KeyInfo>) -> Json<serde_json::Value> {
+    Json(match key.console_user {
+        Some(user) => json!({ "via": "console", "name": user, "role": key.role }),
+        None => json!({ "via": "key", "name": key.name, "role": key.role }),
+    })
 }
 
 /// Database access for read-style endpoints: role must allow reads and a
@@ -271,6 +375,14 @@ async fn health(State(state): State<St>) -> Json<Health> {
         db_ok,
         schema: schema_consensus(&state.dbs.schema_states().await),
     })
+}
+
+/// For a supervisor's probe: 2xx only while Postgres answers.
+async fn healthz(State(state): State<St>) -> StatusCode {
+    match state.dbs.connect_raw("postgres").await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 /// One word for how the whole deployment stands: the shared version when every
@@ -1215,17 +1327,26 @@ mod tests {
 
     /// The router over `dbs`, taking the key `bootstrap` as admin.
     async fn gateway(dbs: db::Databases) -> std::net::SocketAddr {
+        gateway_with(dbs, &db::tests::config_at(0, false)).await
+    }
+
+    fn state_over(dbs: db::Databases) -> St {
         let sessions = crate::ingest::Sessions::default();
-        let state = Arc::new(AppState {
+        Arc::new(AppState {
             keys: crate::keys::KeyStore::new(dbs.clone(), Some("bootstrap")),
             catalogs: crate::catalogs::Catalogs::new(dbs.clone(), sessions.clone()),
             dbs,
             sessions,
             logs: crate::logbuf::LogBuffer::new(16),
-        });
+        })
+    }
+
+    async fn gateway_with(dbs: db::Databases, config: &Config) -> std::net::SocketAddr {
+        let state = state_over(dbs);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let app =
+            router(state, config).into_make_service_with_connect_info::<std::net::SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, app).await });
         addr
     }
@@ -1271,11 +1392,36 @@ mod tests {
         content_type: &str,
         body: &[u8],
     ) -> (u16, serde_json::Value) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut stream = tokio::net::TcpStream::connect(at).await.unwrap();
+        let (status, _, body) = exchange(at, method, path, key, content_type, body).await;
+        (status, serde_json::from_str(&body).unwrap_or_default())
+    }
+
+    /// The status, the head and the body.
+    async fn exchange(
+        at: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        content_type: &str,
+        body: &[u8],
+    ) -> (u16, String, String) {
+        let stream = tokio::net::TcpStream::connect(at).await.unwrap();
         let auth = key.map_or(String::new(), |k| format!("Authorization: Bearer {k}\r\n"));
+        exchange_over(stream, method, path, &auth, content_type, body).await
+    }
+
+    /// `headers` is whole lines, each ending in CRLF.
+    async fn exchange_over(
+        mut stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+        method: &str,
+        path: &str,
+        headers: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> (u16, String, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n{auth}\
+            "{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n{headers}\
              Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
             body.len()
         );
@@ -1285,7 +1431,208 @@ mod tests {
         stream.read_to_string(&mut response).await.unwrap();
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
         let status = head.split(' ').nth(1).unwrap().parse().unwrap();
-        (status, serde_json::from_str(body).unwrap_or_default())
+        (status, head.to_string(), body.to_string())
+    }
+
+    /// A gateway under `base_path` with an admin bundle of one `index.html`
+    /// and one asset, and an unreachable database.
+    async fn gateway_under(base_path: &str) -> std::net::SocketAddr {
+        let mut config = config_with_admin_bundle(&base_path.replace('/', "_"));
+        config.base_path = base_path.into();
+        gateway_with(db::tests::unreachable_databases(false), &config).await
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wiretap-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn config_with_admin_bundle(tag: &str) -> Config {
+        let admin_dir = scratch_dir(&format!("admin-{tag}"));
+        std::fs::create_dir_all(admin_dir.join("assets")).unwrap();
+        std::fs::write(admin_dir.join("index.html"), "the admin index").unwrap();
+        std::fs::write(admin_dir.join("assets/app.js"), "the admin script").unwrap();
+        let mut config = db::tests::config_at(0, false);
+        config.admin_dir = admin_dir;
+        config
+    }
+
+    /// A gateway on an app socket under [`BASE`], also on TCP at the root,
+    /// taking the key `bootstrap` as admin. The console is this test's uid,
+    /// moved by `console_offset`.
+    async fn gateway_on_app_socket(
+        tag: &str,
+        console_offset: u32,
+    ) -> (std::path::PathBuf, std::net::SocketAddr) {
+        use std::os::unix::fs::MetadataExt;
+        let dir = scratch_dir(&format!("socket-{tag}"));
+        let config = config_with_admin_bundle(tag);
+        let socket = AppSocket {
+            path: dir.join("app.sock"),
+            console_uid: std::fs::metadata(&dir).unwrap().uid() + console_offset,
+            base_path: BASE.into(),
+        };
+        let dbs = db::tests::unreachable_databases(false);
+        let listener = bind_app_socket(&socket.path).unwrap();
+        let app = app_socket_router(state_over(dbs.clone()), &config, &socket)
+            .into_make_service_with_connect_info::<SocketPeer>();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (socket.path, gateway_with(dbs, &config).await)
+    }
+
+    async fn over_socket(socket: &std::path::Path, path: &str, headers: &str) -> (u16, String) {
+        let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        let (status, _, body) =
+            exchange_over(stream, "GET", path, headers, "text/plain", b"").await;
+        (status, body)
+    }
+
+    fn asserting(role: &str) -> String {
+        format!("Appliance-Identity: v1; id=a1; user=Zo%C3%AB; role={role}\r\n")
+    }
+
+    async fn get(at: std::net::SocketAddr, path: &str) -> (u16, String, String) {
+        exchange(at, "GET", path, None, "text/plain", b"").await
+    }
+
+    const BASE: &str = "/apps/wiretap-gateway";
+
+    #[tokio::test]
+    async fn without_a_base_path_the_routes_are_at_the_root() {
+        let at = gateway_under("").await;
+        assert_eq!(get(at, "/v1/health").await.0, 200);
+        assert_eq!(get(at, "/v1/databases").await.0, 401);
+        assert_eq!(get(at, "/admin/").await.2, "the admin index");
+        assert_eq!(get(at, &format!("{BASE}/v1/health")).await.0, 404);
+    }
+
+    #[tokio::test]
+    async fn with_a_base_path_every_route_moves_under_it() {
+        let at = gateway_under(BASE).await;
+        assert_eq!(get(at, &format!("{BASE}/v1/health")).await.0, 200);
+        assert_eq!(get(at, &format!("{BASE}/v1/databases")).await.0, 401);
+        assert_eq!(get(at, &format!("{BASE}/healthz")).await.0, 503);
+        for path in ["/", "/v1/health", "/v1/databases", "/healthz", "/admin/"] {
+            assert_eq!(get(at, path).await.0, 404, "{path} outside the base");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_admin_bundle_is_served_under_the_base() {
+        let at = gateway_under(BASE).await;
+        let admin = format!("{BASE}/admin");
+        assert_eq!(get(at, &format!("{admin}/")).await.2, "the admin index");
+        assert_eq!(
+            get(at, &format!("{admin}/assets/app.js")).await.2,
+            "the admin script"
+        );
+        assert_eq!(
+            get(at, &format!("{admin}/no-such-tab")).await.2,
+            "the admin index"
+        );
+        assert_eq!(
+            get(at, &format!("{admin}/assets")).await.2,
+            "the admin index"
+        );
+
+        let (status, head, _) = get(at, &admin).await;
+        assert_eq!(status, 308);
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("\r\nlocation: admin/\r\n"),
+            "{head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_console_is_answered_on_the_socket_under_the_app_base() {
+        let (socket, _) = gateway_on_app_socket("console", 0).await;
+        let at = |path: &str| format!("{BASE}{path}");
+        let whoami = at("/v1/whoami");
+
+        let (status, body) = over_socket(&socket, &whoami, &asserting("hostadmin")).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            json!({ "via": "console", "name": "Zoë", "role": "admin" })
+        );
+        let (status, body) = over_socket(&socket, &whoami, &asserting("viewer")).await;
+        assert_eq!((status, body.contains(r#""role":"read""#)), (200, true));
+        assert_eq!(
+            over_socket(&socket, &at("/v1/admin/keys"), &asserting("viewer"))
+                .await
+                .0,
+            403
+        );
+
+        assert_eq!(over_socket(&socket, &whoami, "").await.0, 401);
+        let bearer = "Authorization: Bearer bootstrap\r\n";
+        assert_eq!(over_socket(&socket, &whoami, bearer).await.0, 401);
+        let malformed = "Appliance-Identity: v1; id=a1; user=ops; role=root\r\n";
+        assert_eq!(over_socket(&socket, &whoami, malformed).await.0, 400);
+
+        assert_eq!(over_socket(&socket, &at("/healthz"), "").await.0, 503);
+        assert_eq!(
+            over_socket(&socket, &at("/admin/"), "").await.1,
+            "the admin index"
+        );
+        assert_eq!(over_socket(&socket, "/healthz", "").await.0, 404);
+    }
+
+    #[tokio::test]
+    async fn anybody_but_the_console_is_nobody_on_the_socket() {
+        let (socket, _) = gateway_on_app_socket("other", 1).await;
+        let whoami = format!("{BASE}/v1/whoami");
+        assert_eq!(
+            over_socket(&socket, &whoami, &asserting("admin")).await.0,
+            401
+        );
+        let malformed = "Appliance-Identity: v2\r\n";
+        assert_eq!(over_socket(&socket, &whoami, malformed).await.0, 401);
+        assert_eq!(
+            over_socket(&socket, &format!("{BASE}/healthz"), "").await.0,
+            503
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_ignores_the_identity_header_and_stays_at_its_own_base() {
+        let (_, tcp) = gateway_on_app_socket("tcp", 0).await;
+        let ask = |headers: String| async move {
+            let stream = tokio::net::TcpStream::connect(tcp).await.unwrap();
+            let (status, _, body) =
+                exchange_over(stream, "GET", "/v1/whoami", &headers, "text/plain", b"").await;
+            (status, body)
+        };
+        assert_eq!(ask(asserting("admin")).await.0, 401);
+        let (status, body) = ask(format!(
+            "Authorization: Bearer bootstrap\r\n{}",
+            asserting("viewer")
+        ))
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            json!({ "via": "key", "name": "bootstrap-admin", "role": "admin" })
+        );
+        assert_eq!(get(tcp, "/healthz").await.0, 503);
+        assert_eq!(get(tcp, &format!("{BASE}/healthz")).await.0, 404);
+    }
+
+    /// Unreachable here; the 200 side needs a live Postgres.
+    #[tokio::test]
+    async fn healthz_fails_while_the_database_is_unreachable() {
+        assert_eq!(get(gateway_under("").await, "/healthz").await.0, 503);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn healthz_passes_while_the_database_answers() {
+        let mut config = db::tests::config_at(0, false);
+        config.base_path = BASE.into();
+        let at = gateway_with(db::tests::live_databases(false), &config).await;
+        assert_eq!(get(at, &format!("{BASE}/healthz")).await.0, 200);
     }
 
     #[tokio::test]

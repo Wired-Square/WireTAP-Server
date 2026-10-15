@@ -1,0 +1,172 @@
+#!/bin/sh
+# Chassis-owned. `appliance-xtask packaging render` rewrites this file
+# unconditionally, every time. Put product-specific steps in
+# /usr/share/wiretap-server-ui/postinst.d/ instead — see hooks.README beside this file.
+set -e
+
+NAME='wiretap-server-ui'
+USER='wiretap-server-ui'
+GROUP='wiretap-server-ui'
+CONFIG_DIR='/etc/wiretap-server-ui'
+HOOK_DIR='/usr/share/wiretap-server-ui/postinst.d'
+REMOVED_WHILE_RUNNING='/var/lib/wiretap-server-ui.removed-while-running'
+
+# Every value above is single-quoted, and `appliance-xtask` holds the path
+# components to a character set with no shell metacharacters in it. Both halves
+# are needed: this file is run as root, and an unquoted `CONFIG_DIR=/etc/my
+# appliance` is a script that runs the command `appliance`.
+
+case "$1" in
+configure)
+    # ---------------------------------------------------------------------
+    # The account and the group
+    # ---------------------------------------------------------------------
+    # The group is the control socket's authority as well as the daemon's: the
+    # socket is 0660 owned by it, and adding an operator to it is the whole
+    # grant.
+    #
+    # `adduser` is in Depends because of these two lines: it is Priority
+    # important rather than Essential, so a minbase or container rootfs may not
+    # have it, and these calls are unguarded.
+    if ! getent group "$GROUP" >/dev/null; then
+        addgroup --system "$GROUP"
+    fi
+    if ! getent passwd "$USER" >/dev/null; then
+        adduser --system --ingroup "$GROUP" --no-create-home \
+            --home /nonexistent --shell /usr/sbin/nologin "$USER"
+    fi
+
+    # ---------------------------------------------------------------------
+    # The configuration directory, which systemd will NOT do for us
+    # ---------------------------------------------------------------------
+    # systemd chowns StateDirectory= and RuntimeDirectory= to the unit's User=
+    # and Group=. systemd.exec(5) documents, in one subordinate clause, that it
+    # deliberately does **not** do this for ConfigurationDirectory= — it creates
+    # the directory as root and, if it already exists, only logs that the mode
+    # differs.
+    #
+    # So this is the only place the ownership can be set, and without it an
+    # unprivileged daemon cannot read its own config.toml — it would be "other"
+    # against the directory and unable even to traverse it. The unit renders
+    # ConfigurationDirectoryMode=0751 to match, so systemd has nothing to
+    # complain about on every start.
+    #
+    # 0751: every account may traverse it, not list or read it — what is
+    # readable in here is what its owner made readable.
+    #
+    # It is re-asserted on every configure, deliberately — the reason it exists
+    # is that nothing else maintains it. An operator who wants different
+    # ownership should use dpkg-statoverride, which is the mechanism for exactly
+    # that and which this deliberately does not fight.
+    install -d -o root -g "$GROUP" -m 0751 "$CONFIG_DIR"
+
+    # **No certificate is generated here, and that is a decision rather than an
+    # omission.** A package installed into a chroot while an image is assembled
+    # runs postinst once, on the build host, and every box written from that
+    # image would ship the same private key, named after the builder.
+    #
+    # **The daemon makes its own instead**, at first start, when it finds
+    # neither half. It is the only actor certain to run on the real box. The
+    # pair defaults under the state directory rather
+    # than the configuration one, because that is the directory every daemon
+    # can write — see hooks.README beside this file.
+
+    # The conffile config.toml, unpacked 0640 root:root: world access is taken
+    # on every configure, and the group is set only from root, so an operator's
+    # group stays. A symlink, or a deleted file, is the operator's.
+    if [ -f "$CONFIG_DIR/config.toml" ] && [ ! -L "$CONFIG_DIR/config.toml" ]; then
+        find "$CONFIG_DIR/config.toml" -prune -group 0 -exec chgrp "$GROUP" {} +
+        chmod o-rwx "$CONFIG_DIR/config.toml"
+    fi
+
+    # The state directory is deliberately not created here: StateDirectory= in
+    # the unit makes it, 0700, owned by the daemon. Two authorities for one
+    # directory is how the modes drift.
+
+    # An image install of this appliance may have told sshd and timesyncd to
+    # read files under the configuration directory; that is taken back.
+    if [ -f "/etc/ssh/sshd_config.d/50-$NAME.conf" ]; then
+        echo "$NAME: removed /etc/ssh/sshd_config.d/50-$NAME.conf; keys authorised from the SSH screen will no longer log in" >&2
+        rm -f "/etc/ssh/sshd_config.d/50-$NAME.conf"
+        if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+            deb-systemd-invoke try-reload-or-restart ssh.service >/dev/null 2>&1 || true
+        fi
+    fi
+    if [ -L "/etc/systemd/timesyncd.conf.d/90-$NAME.conf" ]; then
+        rm -f "/etc/systemd/timesyncd.conf.d/90-$NAME.conf"
+        if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+            deb-systemd-invoke try-restart systemd-timesyncd.service >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # ---------------------------------------------------------------------
+    # Hooks
+    # ---------------------------------------------------------------------
+    # A product's own steps go in $HOOK_DIR as numbered executables. Nothing in
+    # the chassis writes that directory, so nothing there is lost when this file
+    # is regenerated.
+    #
+    # **--exit-on-error, and a failing hook fails the install.** run-parts
+    # otherwise runs every script and reports afterwards, which for a migration
+    # means the second one running against what the first did not finish. A
+    # refused upgrade is recoverable; a half-migrated appliance in the field is
+    # somebody driving to it. `set -e` above turns that non-zero into a failed
+    # configure, which is what leaves dpkg saying so.
+    #
+    # **These run while the old daemon is still up**, because prerm does not
+    # stop it on an upgrade. A hook must not touch the database — see
+    # hooks.README.
+    if [ -d "$HOOK_DIR" ]; then
+        run-parts --exit-on-error --arg="$1" --arg="$2" "$HOOK_DIR"
+    fi
+    ;;
+
+abort-upgrade | abort-remove | abort-deconfigure) ;;
+
+*)
+    # dpkg calls a postinst with `triggered <name>` once a package declares a
+    # triggers file. Nothing here does, so this arm is unreachable — but a
+    # product that adds one must extend this case rather than discover it as a
+    # failed configure.
+    echo "postinst called with unknown argument \`$1'" >&2
+    exit 1
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# The unit
+# ---------------------------------------------------------------------------
+# **Outside the case, and on purpose.** debhelper runs the enable and restart
+# blocks for `configure` *and* for all three abort arguments, because an aborted
+# removal is a package that is staying — and if this only ran under `configure`,
+# a conflicting package whose unpack failed would leave the appliance stopped
+# with nothing to start it again.
+#
+# `DPKG_ROOT` is set when dpkg is operating on a filesystem that is not this
+# one, as when an image is assembled. Enabling a unit in the builder's own
+# systemd would be the wrong machine entirely.
+if [ -z "${DPKG_ROOT:-}" ] && [ -x /usr/bin/deb-systemd-helper ]; then
+    # An appliance is installed to run, so it is enabled rather than left for
+    # somebody to notice. update-state on an upgrade preserves a deliberate
+    # `systemctl disable`.
+    deb-systemd-helper unmask "$NAME.service" >/dev/null || true
+    if deb-systemd-helper --quiet was-enabled "$NAME.service"; then
+        deb-systemd-helper enable "$NAME.service" >/dev/null || true
+    else
+        deb-systemd-helper update-state "$NAME.service" >/dev/null || true
+    fi
+fi
+
+if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+    if [ -n "$2" ] && [ ! -e "$REMOVED_WHILE_RUNNING" ]; then
+        # An upgrade. try-restart leaves a stopped appliance stopped.
+        deb-systemd-invoke try-restart "$NAME.service" >/dev/null || true
+    else
+        # A first install, or one after a remove that stopped the daemon.
+        deb-systemd-invoke start "$NAME.service" >/dev/null || true
+    fi
+    rm -f "$REMOVED_WHILE_RUNNING"
+fi
+
+exit 0

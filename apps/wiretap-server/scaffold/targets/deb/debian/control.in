@@ -1,0 +1,17 @@
+Package: wiretap-server-ui
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Alex Ferrara <alex@wiredsquare.com>
+Section: admin
+Priority: optional
+Installed-Size: @INSTALLED_SIZE@
+Depends: init-system-helpers (>= 1.54), adduser, ca-certificates, wiretap-server
+Conflicts: wiretap-server-ui-image
+Replaces: wiretap-server-ui-image
+Description: web UI for the WireTAP capture daemon
+ Built on the Wired Square appliance chassis. Serves its interface over TLS.
+ .
+ It keeps a control socket for an operator in the wiretap-server-ui group, which is the
+ way in when nobody can sign in:
+ .
+   /run/wiretap-server-ui/wiretap-server-ui.sock

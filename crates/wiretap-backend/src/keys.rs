@@ -74,6 +74,8 @@ pub struct KeyInfo {
     pub name: String,
     pub role: Role,
     pub database_pin: Option<String>,
+    /// Set when an ApplianceOS console asserted the caller instead of a key.
+    pub console_user: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +141,7 @@ impl KeyStore {
                     name: row.get("name"),
                     role,
                     database_pin: row.get("database_pin"),
+                    console_user: None,
                 },
             );
         }
@@ -156,6 +159,7 @@ impl KeyStore {
                 name: "bootstrap-admin".into(),
                 role: Role::Admin,
                 database_pin: None,
+                console_user: None,
             });
         }
         let info = self.cache.read().await.get(&h).cloned()?;

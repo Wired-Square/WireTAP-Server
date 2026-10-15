@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { api, clearKey, getKey, setKey } from "./api";
+import { useEffect, useState } from "react";
+import { api, type Caller, clearKey, setKey } from "./api";
 import { canMigrate } from "./SchemaBadge";
 import { useDatabases } from "./useDatabases";
 import Activity from "./pages/Activity";
@@ -14,18 +14,39 @@ const TABS = ["Keys", "Databases", "Ingest", "Daemons", "Activity", "Logging", "
 type Tab = (typeof TABS)[number];
 
 export default function App() {
-  const [authed, setAuthed] = useState(() => getKey() !== null);
+  // undefined while asking; null when a key is needed.
+  const [caller, setCaller] = useState<Caller | null>();
   const [tab, setTab] = useState<Tab>("Keys");
 
-  if (!authed) {
-    return <Login onAuthed={() => setAuthed(true)} />;
+  useEffect(() => {
+    api<Caller>("/v1/whoami")
+      .then(setCaller)
+      .catch(() => {
+        clearKey();
+        setCaller(null);
+      });
+  }, []);
+
+  if (caller === undefined) return null;
+  if (caller === null) return <Login onAuthed={setCaller} />;
+  if (caller.role !== "admin") {
+    return (
+      <div className="login">
+        <h1>
+          Wire<span>TAP</span> Backend
+        </h1>
+        <p className="muted">
+          {caller.name} can read this gateway but not administer it. Ask an admin of this app.
+        </p>
+      </div>
+    );
   }
 
   return (
     <>
       <div className="topbar">
         <h1>
-          <img className="logo" src="/admin/logo.svg" alt="" />
+          <img className="logo" src="logo.svg" alt="" />
           Wire<span>TAP</span> Backend
         </h1>
         <nav className="tabs">
@@ -35,15 +56,19 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <button
-          className="btn"
-          onClick={() => {
-            clearKey();
-            setAuthed(false);
-          }}
-        >
-          Sign out
-        </button>
+        {caller.via === "console" ? (
+          <span className="muted">{caller.name}</span>
+        ) : (
+          <button
+            className="btn"
+            onClick={() => {
+              clearKey();
+              setCaller(null);
+            }}
+          >
+            Sign out
+          </button>
+        )}
       </div>
       <MigrationBanner key={tab} onOpen={() => setTab("Databases")} />
       {tab === "Keys" && <Keys />}
@@ -77,7 +102,7 @@ function MigrationBanner({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-function Login({ onAuthed }: { onAuthed: () => void }) {
+function Login({ onAuthed }: { onAuthed: (caller: Caller) => void }) {
   const [key, setKeyInput] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -87,8 +112,9 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
     setError("");
     setKey(key.trim());
     try {
-      await api("/v1/admin/keys"); // cheapest admin-role check
-      onAuthed();
+      const caller = await api<Caller>("/v1/whoami");
+      if (caller.role !== "admin") throw new Error("that key is not an admin key");
+      onAuthed(caller);
     } catch (e) {
       clearKey();
       setError(e instanceof Error ? e.message : "login failed");

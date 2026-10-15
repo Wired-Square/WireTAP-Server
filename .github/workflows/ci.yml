@@ -573,3 +573,107 @@ jobs:
 
       - name: Image verify checks
         run: scaffold/image/tests/run-verify-tests.sh
+
+  # The capture daemon's web UI, a third workspace on the private chassis: the
+  # appliance jobs' gates and browser half, in apps/wiretap-server.
+  server-ui:
+    name: Server UI gates
+    runs-on: ubuntu-latest
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    defaults:
+      run:
+        working-directory: apps/wiretap-server
+    steps:
+      - uses: actions/checkout@v7
+      - *reach
+      - *fetch
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustup target add aarch64-unknown-linux-musl
+          echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
+
+      - name: Install zig, the musl C cross-compiler
+        uses: ./.github/actions/zig-toolchain
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/wiretap-server/target
+          key: ${{ runner.os }}-cargo-server-ui-${{ env.RUSTC_VERSION }}-${{ hashFiles('apps/wiretap-server/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-server-ui-${{ env.RUSTC_VERSION }}-
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo clippy (aarch64 musl)
+        run: cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  server-ui-browser:
+    name: Server UI browser half
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/wiretap-server/frontend
+    steps:
+      - uses: actions/checkout@v7
+      - *reach
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/wiretap-server/frontend/package-lock.json
+
+      - name: Install exactly the lockfile
+        run: npm ci
+
+      - name: Typecheck, test and build
+        run: npm run ci
+
+  # The capture daemon's app image, built and thrown away as the gateway's is.
+  # It carries the UI, so it needs the chassis too. amd64 only: arm64 also
+  # needs appliance-xtask, for the Cortex-A53 erratum check.
+  server-image:
+    name: Server app image
+    runs-on: ubuntu-latest
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - *reach
+      - *fetch
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Install zig and cargo-zigbuild
+        uses: ./.github/actions/zig-toolchain
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/wiretap-server/frontend/package-lock.json
+
+      - name: Install the browser half's lockfile
+        working-directory: apps/wiretap-server/frontend
+        run: npm ci
+
+      - name: Build it, keep nothing
+        run: apps/wiretap-server/make-image.sh amd64

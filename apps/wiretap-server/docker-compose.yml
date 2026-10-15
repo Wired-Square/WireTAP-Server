@@ -1,0 +1,29 @@
+# The capture daemon and its web UI on plain Docker, from the image
+# make-image.sh builds:
+#
+#   docker load -i target/apps/wiretap-server-<version>-<arch>.tar
+#   export WIRETAP_SERVER_VERSION=<version>
+#   docker compose -f apps/wiretap-server/docker-compose.yml up -d
+#
+# Then make the first account at https://<host>:8443/.
+name: wiretap-server
+
+services:
+  wiretap-server:
+    image: ghcr.io/wired-square/wiretap-server:${WIRETAP_SERVER_VERSION:?set it to the version you loaded}
+    # The host's CAN interfaces, and GVRET on its port 23.
+    network_mode: host
+    # Never no-new-privileges: it strips the daemon's file capabilities.
+    cap_drop: [ALL]
+    cap_add: [NET_RAW, NET_BIND_SERVICE]
+    init: true
+    environment:
+      # The first person to reach the UI makes its admin. Remove this once that
+      # is you.
+      WIRETAP_SERVER_UI_ONBOARDING: browser
+    volumes:
+      - wiretap-server:/data
+    restart: unless-stopped
+
+volumes:
+  wiretap-server:

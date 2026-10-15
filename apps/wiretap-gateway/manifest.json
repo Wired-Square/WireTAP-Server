@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "name": "wiretap-gateway",
+  "arches": ["arm64", "amd64"],
+  "sockets": { "app": true },
+  "network": "bridge",
+  "volumes": [{ "name": "data", "at": "/data" }],
+  "listeners": [
+    { "name": "gateway", "protocol": "tcp", "port": 8423, "dns_sd": null, "enabled": true },
+    { "name": "ingest", "protocol": "tcp", "port": 9323, "dns_sd": null, "enabled": true }
+  ]
+}

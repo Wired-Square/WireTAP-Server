@@ -19,12 +19,14 @@
 # lives. Run without it and the report names a cache path under $HOME that the
 # unit never opens, and says nothing about a cache waiting to be adopted.
 #
-# EVERY SETTING IS COMMENTED OUT EXCEPT `iface`, deliberately. A key written
-# here is pinned on this machine forever - this file is never overwritten once
-# it has anything in it, so a value that merely restates today's default would
-# silently keep it across an upgrade that changed it. Uncomment what you mean to
-# control. `--help` documents every setting; the defaults shown here are what
-# you get by saying nothing.
+# EVERY SETTING IS COMMENTED OUT, deliberately, and the file is optional: with
+# nothing here the daemon runs on its defaults and on what its web UI has set.
+# A key written here is pinned on this machine. It wins over the UI, which shows
+# it as fixed and names this file, and it is kept forever - this file is never
+# overwritten once it has anything in it, so a value that merely restates
+# today's default would silently keep it across an upgrade that changed it.
+# Uncomment what you mean to control. `--help` documents every setting; the
+# defaults shown here are what you get by saying nothing.
 #
 # Unrecognised keys are warned about and ignored rather than refused, so a file
 # from an older install still starts. The exception is `[postgres].enable =
@@ -39,9 +41,10 @@
 # Shorthand for one [[device]] of kind = "can" each; see the end of this file
 # for what a [[device]] can say that this cannot.
 #
+# Absent, with no [[device]] below and none set from the UI, can0 is captured.
 # EMPTY ("") is a deployment with no CAN hardware - a collection host fed by
 # devices that push to [ingest], or a box with only serial devices.
-iface = "can0"
+# iface = "can0"
 
 # host = "0.0.0.0"       # where the GVRET listener binds
 # port = 23              # privileged; the unit grants CAP_NET_BIND_SERVICE
@@ -58,7 +61,7 @@ iface = "can0"
 #
 # Without it the server is still a GVRET bridge, it just keeps nothing. It says
 # so at startup rather than looking like it is archiving.
-enable = false
+# enable = true
 # host = "backend.example"
 # port = 9323
 
@@ -117,7 +120,7 @@ enable = false
 # nowhere to put it is the one thing at-least-once delivery must never do, so
 # the server refuses that combination rather than losing frames a device
 # believes are safe.
-enable = false
+# enable = true
 # host = "0.0.0.0"
 # port = 9323
 
@@ -137,8 +140,9 @@ enable = false
 # THIS TRANSMITS ON THE BUS. Everything else this server does is read-only, so
 # it is off unless you turn it on, it says so at WARN when it starts, and
 # `--check-config` prints ARMED and the interfaces. On a production capture bus
-# leave it disabled.
-enable = false
+# leave it disabled. `enable = false` here disarms it even against the
+# command line's --test-pattern-enable.
+# enable = true
 
 # Which interfaces answer. Absent or empty arms every captured interface, which
 # is rarely what you want on a multi-bus box: name the test bus.

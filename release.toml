@@ -31,7 +31,9 @@
 #      UNRELEASED entry the pre-release hook refuses.
 #   3. `git push origin main` — wait for CI to go green on that commit.
 #   4. `git push origin v<version>` — this is what drafts the release, builds
-#      both .deb files and pushes the two-architecture gateway image.
+#      both .deb files and pushes the two-architecture gateway image. It also
+#      leaves the ApplianceOS apps' unsigned source archive as a workflow
+#      artefact, to sign by hand (apps/README.md § Signing a release).
 #   5. Write the release notes over the draft's placeholder body, then publish
 #      it by hand:
 #

@@ -13,7 +13,7 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,7 @@ use wiretap_protocol::gvret::{
 };
 
 use crate::source::Transmit;
+use crate::status::Connected;
 
 /// One read of a client's command stream, as the Python's `recv(4096)`.
 const READ_BUF: usize = 4096;
@@ -82,6 +83,7 @@ pub struct Server {
     buses: Arc<BusInfo>,
     frames: broadcast::Sender<Arc<Sample>>,
     transmits: mpsc::Sender<Transmit>,
+    clients: Arc<AtomicUsize>,
 }
 
 impl Server {
@@ -100,7 +102,13 @@ impl Server {
             buses,
             frames,
             transmits,
+            clients: Arc::default(),
         })
+    }
+
+    /// How many clients are connected, as it changes.
+    pub fn clients(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.clients)
     }
 
     /// The address actually bound, which is how a test finds the port it was
@@ -131,7 +139,12 @@ impl Server {
                 buses: self.buses.clone(),
                 transmits: self.transmits.clone(),
             };
-            tokio::spawn(client.serve(stream, self.frames.subscribe()));
+            let connected = Connected::new(&self.clients);
+            let frames = self.frames.subscribe();
+            tokio::spawn(async move {
+                client.serve(stream, frames).await;
+                drop(connected);
+            });
         }
     }
 }

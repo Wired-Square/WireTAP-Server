@@ -163,6 +163,29 @@ printf '#!/bin/sh\ncase "$*" in *" type can "*) exit 2 ;; esac\n' > "$scratch/bi
 rm -rf "$scratch"
 ok "installed, nothing in can.d, unit and rule verify, can-up's ip calls right"
 
+# --- 1c. an earlier release's reference -----------------------------------
+# Unedited, it is replaced by this release's, keeping only [test_pattern]'s
+# enable = false; edited at all, it is somebody's configuration and kept.
+say "1c. upgrade over an earlier release's reference"
+OLD="$(dirname "${BASH_SOURCE[0]}")/v0.1.10-reference.toml"
+[ -f "$OLD" ] || die "missing $OLD"
+reinstall() { DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall "$DEB" >/dev/null; }
+sets() {  # what the config sets, as JSON
+	python3 -c 'import json, sys, tomllib
+print(json.dumps({k: v for k, v in tomllib.load(open(sys.argv[1], "rb")).items() if v}, sort_keys=True))' "$CONFIG"
+}
+cp "$OLD" "$CONFIG"
+reinstall
+[ "$(sets)" = '{"test_pattern": {"enable": false}}' ] \
+	|| die "the unedited reference became $(sets), wanted only test_pattern carried"
+grep -q '^# Carried over' "$CONFIG" || die "the carried key does not say why"
+sed 's/^iface = "can0"$/iface = "can1"/' "$OLD" > "$CONFIG"
+cp "$CONFIG" "$CONFIG.edited"
+reinstall
+cmp -s "$CONFIG" "$CONFIG.edited" || die "an edited reference was not kept as it was"
+rm "$CONFIG.edited"
+ok "unedited reference replaced with test_pattern carried; an edited one kept"
+
 # --- 2. it runs, under the unit's hardening -------------------------------
 # Ingest-only, because a runner has no CAN interface. The forward target is a
 # closed port on purpose: that is the outage path, so every frame pushed below

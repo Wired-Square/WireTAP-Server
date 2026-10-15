@@ -29,11 +29,18 @@ wiretap-catalog.workspace = true
 # interactive shell is one --help away): together they cost 33 KB and 7 crates.
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+# The control socket's HTTP/1, and nothing above it: no router, no TLS.
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+http-body-util.workspace = true
 # `bundled` compiles SQLite in, so the .deb depends on no libsqlite3 and the
 # musl cross-build has nothing to find on the host.
 rusqlite = { workspace = true, features = ["bundled"] }
-# `assignments.json`. wiretap-catalog links it already.
+# `assignments.json` and the control socket. wiretap-catalog links it already.
 serde_json.workspace = true
+# `ui.toml`. wiretap-model links both already.
+serde.workspace = true
+toml.workspace = true
 subtle.workspace = true
 # For naming the errno an open failed with, and the host's own name.
 libc = "0.2"

@@ -60,6 +60,9 @@ socketcan = { version = "3.6", default-features = false }
 
 # --- async runtime and HTTP ---
 axum = "0.8"
+http-body-util = "0.1"
+hyper = "1"
+hyper-util = "0.1"
 tokio = "1"
 tower-http = "0.6"
 futures-util = "0.3"

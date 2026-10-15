@@ -1,0 +1,6 @@
+# The image's settings for the capture daemon, which outrank the web UI's.
+# Mount a file over /etc/wiretap-server/wiretap-server.toml to replace them.
+
+[ingest]
+# Not 9323: on ApplianceOS the wiretap-gateway app holds that port on the host.
+port = 9324

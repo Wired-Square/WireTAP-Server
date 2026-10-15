@@ -2,6 +2,7 @@
 //! [`RawTap`], or both.
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -14,6 +15,7 @@ use super::modbus::RtuTap;
 use super::raw::RawTap;
 use crate::catalogues::Rules;
 use crate::settings::SerialSettings;
+use crate::status::DeviceStatus;
 
 /// A line's framer, and the catalogue rules it follows.
 pub struct Framed {
@@ -69,16 +71,22 @@ pub fn open(path: &str, line: &SerialSettings) -> io::Result<SerialTask> {
 /// missing at startup, is logged once and its end once.
 pub async fn drain(
     interface: String,
+    status: Arc<DeviceStatus>,
     mut task: SerialTask,
     mut framed: Option<Framed>,
     mut raw: Option<RawTap>,
     mut publish: impl FnMut(Sample),
 ) {
+    let mut publish = |sample| {
+        status.read(1);
+        publish(sample)
+    };
     let mut opened = false;
     let mut lost = false;
     while let Some(event) = task.next_event().await {
         match event {
             SerialEvent::Connected => {
+                status.up();
                 if let Some(raw) = &mut raw {
                     raw.reset();
                 }
@@ -88,6 +96,7 @@ pub async fn drain(
                 opened = true;
             }
             SerialEvent::Read { bytes, at } => {
+                status.up();
                 if let Some(raw) = &mut raw {
                     raw.push(&bytes, at)
                         .into_iter()
@@ -112,6 +121,7 @@ pub async fn drain(
                     1 => warn!("waiting for {interface}: {error}"),
                     _ => {}
                 }
+                status.lost(opened);
                 if let Some(framed) = &mut framed {
                     framed.tap.reset();
                 }
@@ -205,6 +215,7 @@ mod tests {
         let (samples, received) = mpsc::unbounded_channel();
         tokio::spawn(drain(
             path.to_owned(),
+            Default::default(),
             task,
             rules.map(|rules| Framed::new(bus, LINE.line, rules)),
             raw.then(|| RawTap::new(bus, LINE.line)),

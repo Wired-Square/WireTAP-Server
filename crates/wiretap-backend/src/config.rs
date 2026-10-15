@@ -3,6 +3,7 @@
 //! suitable for the shipped docker-compose stack.
 
 use std::env;
+use std::path::PathBuf;
 
 use wiretap_model::Secret;
 
@@ -30,7 +31,25 @@ pub struct Config {
     pub ingest_max_batch_frames: usize,
     /// Log records held in memory for the admin UI's Logging tab.
     pub log_buffer: usize,
+    /// Prefix every HTTP route on `http_listen` is served under, e.g.
+    /// `/apps/wiretap-gateway`; empty serves at the root.
+    pub base_path: String,
+    pub admin_dir: PathBuf,
+    pub app_socket: Option<AppSocket>,
 }
+
+/// The Unix socket an ApplianceOS console proxies the app's routes to.
+#[derive(Debug, Clone)]
+pub struct AppSocket {
+    pub path: PathBuf,
+    /// The only peer whose `Appliance-Identity` is believed.
+    pub console_uid: u32,
+    pub base_path: String,
+}
+
+/// The uid every unmapped uid appears as under userns-remap, so it cannot tell
+/// the console apart.
+const OVERFLOW_UID: u32 = 65534;
 
 fn var_or(name: &str, default: &str) -> String {
     env::var(name).unwrap_or_else(|_| default.to_string())
@@ -41,6 +60,56 @@ fn parse_or<T: std::str::FromStr>(name: &str, default: T) -> T {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// `apps/x/` becomes `/apps/x`, and `/` or nothing the root. Only plain path
+/// segments: the result is nested into the router as a literal prefix.
+fn normalise_base_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_start_matches('/').trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Some(String::new());
+    }
+    let plain = |segment: &str| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
+    };
+    trimmed.split('/').all(plain).then(|| format!("/{trimmed}"))
+}
+
+fn base_path_var(name: &str, default: &str) -> Result<String, String> {
+    let raw = var_or(name, default);
+    normalise_base_path(&raw).ok_or_else(|| {
+        format!("{name} {raw:?} must be plain path segments, like /apps/wiretap-gateway")
+    })
+}
+
+fn app_socket_from_env() -> Result<Option<AppSocket>, String> {
+    let Some(path) = env::var_os("WIRETAP_APP_SOCKET").filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(format!(
+            "WIRETAP_APP_SOCKET {path:?} must be an absolute path"
+        ));
+    }
+    let raw_uid = var_or("WIRETAP_CONSOLE_UID", "0");
+    let console_uid = raw_uid
+        .parse()
+        .ok()
+        .filter(|&uid| uid != OVERFLOW_UID)
+        .ok_or_else(|| {
+            format!("WIRETAP_CONSOLE_UID {raw_uid:?} must be a uid other than {OVERFLOW_UID}")
+        })?;
+    Ok(Some(AppSocket {
+        path,
+        console_uid,
+        base_path: base_path_var("WIRETAP_APP_BASE_PATH", "/apps/wiretap-gateway")?,
+    }))
 }
 
 impl Config {
@@ -65,6 +134,9 @@ impl Config {
             ingest_keepalive_secs: parse_or("WIRETAP_INGEST_KEEPALIVE_SECS", 30.0),
             ingest_max_batch_frames: parse_or("WIRETAP_INGEST_MAX_BATCH_FRAMES", 256),
             log_buffer: parse_or("WIRETAP_LOG_BUFFER", 2000),
+            base_path: base_path_var("WIRETAP_BASE_PATH", "")?,
+            admin_dir: var_or("WIRETAP_ADMIN_DIR", "/usr/share/wiretap-admin").into(),
+            app_socket: app_socket_from_env()?,
         })
     }
 
@@ -78,5 +150,41 @@ impl Config {
             self.pg_password.expose(),
             database
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalise_base_path;
+
+    #[test]
+    fn a_base_path_gains_a_leading_slash_and_loses_a_trailing_one() {
+        for (raw, want) in [
+            ("", ""),
+            ("/", ""),
+            ("  ", ""),
+            ("/apps/wiretap-gateway", "/apps/wiretap-gateway"),
+            ("apps/wiretap-gateway/", "/apps/wiretap-gateway"),
+            ("/v1.2_x~y/", "/v1.2_x~y"),
+        ] {
+            assert_eq!(normalise_base_path(raw).as_deref(), Some(want), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_base_path_that_is_not_plain_segments_is_refused() {
+        for raw in [
+            "/apps//x",
+            "/apps/../x",
+            "/./x",
+            "/apps/{name}",
+            "/apps/*rest",
+            "/apps/x?y",
+            "/apps x",
+            "https://host/apps",
+            "/apps/%2e%2e",
+        ] {
+            assert!(normalise_base_path(raw).is_none(), "{raw:?} was accepted");
+        }
     }
 }

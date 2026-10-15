@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "wiretap-server",
+  "arches": ["arm64", "amd64"],
+  "sockets": { "app": true },
+  "network": "host",
+  "capabilities": ["NET_RAW", "NET_BIND_SERVICE"],
+  "volumes": [{ "name": "data", "at": "/data" }],
+  "listeners": [
+    { "name": "gvret", "protocol": "tcp", "port": 23, "dns_sd": null, "enabled": true },
+    { "name": "ingest", "protocol": "tcp", "port": 9324, "dns_sd": null, "enabled": false }
+  ],
+  "health": { "start_timeout_s": 60 }
+}
