@@ -99,7 +99,8 @@ device, so either is a configuration choice.
 
 **Every read defaults to `protocol = can`.** `inventory`, `time-bounds` and
 `frames` take `?protocol=modbus` to see the rest; without it a deployed desktop
-sees exactly what it always did. A Modbus row's `id` is `unit << 8 | func`, its
+sees exactly what it always did. A Modbus RTU row is stored as `modbus_rtu`, the
+tag the desktop's own capture store uses, and its `id` is `unit << 8 | func`, its
 `dlc` the message length, and `unit`, `func` and `crc_valid` are its own
 columns.
 
@@ -308,7 +309,7 @@ which refuse a version mismatch until that `ALTER` has run. TimescaleDB does
 not downgrade; snapshot first. Only then move the gateway's tag.
 
 **An archive at schema v1** (any database the gateway has run since
-2026-09-10) is taken to v3, then on to v4 below, in one pass:
+2026-09-10) is taken to v3, then on to v4 and v5 below, in one pass:
 [0002_events_annotations.sql](schema/migrations/0002_events_annotations.sql)
 reshapes the never-used `events` table into the annotations table
 (milliseconds; refuses to run if that table holds a row, and says so in the
@@ -337,6 +338,12 @@ decompressed copy included. Updated uncompressed chunks keep their old row
 versions until autovacuum reclaims them, about 2 GB on such a chunk. Time it on
 a copy of the archive first.
 
+**Schema v5 stores Modbus RTU as `modbus_rtu`.**
+[0005_capture_frame_modbus_rtu.sql](schema/migrations/0005_capture_frame_modbus_rtu.sql)
+relabels the Modbus rows chunk by chunk, decompressing only their own segments,
+swaps both protocol CHECKs in one scan, and relabels the rollup's stored rows in
+place rather than rebuilding it. A CAN-only archive pays only for the scan.
+
 **A gateway does not migrate on start.** After an upgrade, each database
 behind waits, refusing reads and buffering ingest, and the admin UI counts it in
 a banner. Migrate each one when you choose, from the Databases page (**Migrate
@@ -360,6 +367,7 @@ psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0001_capture_frame
 psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0002_events_annotations.sql             # from v1
 psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0003_capture_frame_protocol_columns.sql # from v2
 psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0004_capture_frame_flags.sql            # from v3
+psql "postgresql://user:pass@old-host:5432/legacy_archive" -f 0005_capture_frame_modbus_rtu.sql       # from v4
 ```
 
 `-f`, not `< 0001_capture_frame.sql` and not `docker compose exec … psql`: the

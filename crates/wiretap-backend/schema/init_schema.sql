@@ -1,5 +1,5 @@
 -- wiretap-schema-postgres.sql
--- Version: 20261006
+-- Version: 20261014
 -- Schema for raw capture frames + decoded signals (TimescaleDB hypertable).
 -- CAN, Modbus and serial share one table, discriminated by `protocol`.
 --
@@ -95,6 +95,20 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- And for the Modbus RTU tag: the CHECK below would otherwise stay the one
+-- that refuses it, and every Modbus write with it.
+DO $$ BEGIN
+  IF to_regclass('public.capture_frame') IS NOT NULL
+     AND NOT EXISTS (SELECT FROM pg_constraint
+                     WHERE conrelid = to_regclass('public.capture_frame')
+                       AND conname = 'capture_frame_protocol_columns_check'
+                       AND pg_get_constraintdef(oid) LIKE '%modbus_rtu%')
+  THEN
+    RAISE EXCEPTION 'public.capture_frame stores Modbus RTU as modbus; apply '
+                    'crates/wiretap-backend/schema/migrations/0005_capture_frame_modbus_rtu.sql first';
+  END IF;
+END $$;
+
 -- ----------------------------------------
 -- Schema version
 -- ----------------------------------------
@@ -149,7 +163,7 @@ CREATE TABLE IF NOT EXISTS public.capture_frame (
   ts          timestamptz NOT NULL,               -- message/kernel receive time
   ingest_ts   timestamptz NOT NULL DEFAULT now(), -- ingest time
   protocol    text        NOT NULL DEFAULT 'can'  -- which wire this came off
-                CHECK (protocol IN ('can', 'modbus', 'serial')),
+                CHECK (protocol IN ('can', 'modbus_rtu', 'serial')),
   id          integer     NOT NULL,               -- CAN arbitration id; Modbus `unit << 8 | func`; serial frame id
   dlc         smallint    NOT NULL                -- CAN: length code 0..15, a remote frame's requested; bytes off any other wire, 0..256 Modbus
                 CHECK (dlc >= 0 AND dlc <= 256),
@@ -165,12 +179,12 @@ CREATE TABLE IF NOT EXISTS public.capture_frame (
   -- row whose `id` disagrees with the columns beside it.
   CONSTRAINT capture_frame_protocol_columns_check CHECK (
     CASE protocol
-      WHEN 'can'    THEN flags IS NOT NULL
-                         AND unit IS NULL AND func IS NULL AND crc_valid IS NULL
-      WHEN 'modbus' THEN flags IS NOT NULL AND flags IN (0, 32)
-                         AND unit IS NOT NULL AND func IS NOT NULL AND crc_valid IS NOT NULL
-      ELSE               flags IS NOT NULL AND flags IN (0, 32)
-                         AND unit IS NULL AND func IS NULL AND crc_valid IS NULL
+      WHEN 'can'        THEN flags IS NOT NULL
+                             AND unit IS NULL AND func IS NULL AND crc_valid IS NULL
+      WHEN 'modbus_rtu' THEN flags IS NOT NULL AND flags IN (0, 32)
+                             AND unit IS NOT NULL AND func IS NOT NULL AND crc_valid IS NOT NULL
+      ELSE                   flags IS NOT NULL AND flags IN (0, 32)
+                             AND unit IS NULL AND func IS NULL AND crc_valid IS NULL
     END)
 );
 
@@ -461,5 +475,5 @@ GRANT USAGE ON SEQUENCE public.events_id_seq TO wiretap;
 -- Everything above exists by the time this runs, which is the point: this row
 -- is the marker that the file completed, not that it started.
 INSERT INTO public.schema_version (version, description)
-  VALUES (4, 'capture_frame: flags packed into one column')
+  VALUES (5, 'capture_frame: Modbus RTU stored as modbus_rtu')
   ON CONFLICT (version) DO NOTHING;

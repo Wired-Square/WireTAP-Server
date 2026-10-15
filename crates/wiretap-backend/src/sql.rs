@@ -851,7 +851,7 @@ pub async fn frames_batch(
     let mut args = Args::default();
     let mut sql = format!(
         "SELECT (EXTRACT(EPOCH FROM ts) * 1000000)::float8 AS ts_us, \
-         id, flags, dlc, data_bytes, bus \
+         id, flags, dlc, data_bytes, bus, crc_valid \
          FROM public.capture_frame {}",
         protocol_clause(&mut args, protocol)
     );
@@ -895,6 +895,7 @@ pub async fn frames_batch(
                 }
                 .to_owned(),
                 data_hex: hex::encode(data),
+                crc_valid: row.get("crc_valid"),
             }
         })
         .collect();
@@ -1001,14 +1002,19 @@ mod tests {
         assert_eq!(payload_len(Protocol::Modbus, 256), 256);
     }
 
+    /// The API names Modbus RTU `modbus`, as the desktop sends it; the archive
+    /// stores `modbus_rtu`, as the desktop's own capture store does.
     #[test]
-    fn a_requested_protocol_filters_on_its_own_tag_and_none_on_can() {
+    fn a_requested_protocol_filters_on_its_stored_tag_and_none_on_can() {
         use wiretap_gateway::Protocol as Requested;
-        for requested in [Requested::Can, Requested::Modbus, Requested::Serial] {
-            assert_eq!(
-                serde_json::to_value(requested).unwrap(),
-                archive_protocol(Some(requested)).as_str()
-            );
+        use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
+        for (requested, api, stored) in [
+            (Requested::Can, "can", "can"),
+            (Requested::Modbus, "modbus", MODBUS_RTU_PROTOCOL),
+            (Requested::Serial, "serial", "serial"),
+        ] {
+            assert_eq!(serde_json::to_value(requested).unwrap(), api);
+            assert_eq!(archive_protocol(Some(requested)).as_str(), stored);
         }
         assert_eq!(archive_protocol(None), Protocol::Can);
     }

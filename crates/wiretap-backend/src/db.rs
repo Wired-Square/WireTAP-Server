@@ -1049,6 +1049,43 @@ pub(crate) mod tests {
         .await
     }
 
+    /// A database in v4's shape, with `days` of frames, `per_day` to a day's
+    /// chunk and CAN, Modbus (unit 1, function 3) and serial in turn, the older
+    /// half compressed and the rollup materialised.
+    pub(crate) async fn seeded_v4_database(prefix: &str, days: u32, per_day: u32) -> String {
+        let name = fresh_database(
+            prefix,
+            &format!(
+                "ALTER TABLE public.capture_frame
+                   DROP CONSTRAINT capture_frame_protocol_check,
+                   DROP CONSTRAINT capture_frame_protocol_columns_check;
+                 ALTER TABLE public.capture_frame
+                   ADD CONSTRAINT capture_frame_protocol_check
+                     CHECK (protocol IN ('can', 'modbus', 'serial')),
+                   ADD CONSTRAINT capture_frame_protocol_columns_check
+                     CHECK (CASE protocol WHEN 'modbus' THEN unit IS NOT NULL
+                                          ELSE unit IS NULL END);
+                 INSERT INTO public.capture_frame
+                   (ts, protocol, id, flags, dlc, data_bytes, bus, unit, func, crc_valid)
+                 SELECT now() - make_interval(secs => i * 86400.0 / {per_day}),
+                        (ARRAY['can', 'modbus', 'serial'])[i % 3 + 1],
+                        CASE i % 3 WHEN 0 THEN 256 WHEN 1 THEN 259 ELSE 0 END, 0, 8,
+                        '\\x0102030405060708', 0,
+                        CASE WHEN i % 3 = 1 THEN 1 END, CASE WHEN i % 3 = 1 THEN 3 END,
+                        CASE WHEN i % 3 = 1 THEN true END
+                   FROM generate_series(1, {days} * {per_day}) i;
+                 SELECT compress_chunk(c) FROM show_chunks('public.capture_frame',
+                   older_than => now() - INTERVAL '{} days') c;
+                 UPDATE public.schema_version SET version = 4;",
+                days / 2
+            ),
+        )
+        .await;
+        let client = live_databases(true).connect_raw(&name).await.unwrap();
+        schema::refresh_rollup(&client).await.unwrap();
+        name
+    }
+
     /// `n` CAN frames of `id`, a millisecond apart from `from_us`.
     pub(crate) fn frames(id: u32, from_us: i64, n: i64) -> Vec<FrameRow> {
         use wiretap_protocol::ingest::RecordKind;
@@ -1331,6 +1368,78 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .get(0)
+    }
+
+    async fn scalar(name: &str, sql: &str) -> i64 {
+        let client = live_databases(true).connect_raw(name).await.unwrap();
+        client.query_one(sql, &[]).await.unwrap().get(0)
+    }
+
+    /// Per stored tag: rows in `capture_frame`, and frames the rollup counts.
+    async fn per_protocol(name: &str) -> Vec<(String, i64, i64)> {
+        let client = live_databases(true).connect_raw(name).await.unwrap();
+        client
+            .query(
+                "SELECT protocol, count(*),
+                        (SELECT coalesce(sum(frame_count), 0)::bigint
+                           FROM public.capture_frame_hourly h WHERE h.protocol = f.protocol)
+                   FROM public.capture_frame f GROUP BY 1 ORDER BY 1",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_v4_archive_relabels_its_modbus_rows_and_rollup_in_place() {
+        use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
+        let name = seeded_v4_database("relabel", 6, 300).await;
+        let compressed = "SELECT count(*) FROM timescaledb_information.chunks \
+                           WHERE hypertable_name = 'capture_frame' AND is_compressed";
+        let compressed_before = scalar(&name, compressed).await;
+        assert!(compressed_before > 0);
+        let rollup = rollup_table(&name).await;
+        let relabelled: Vec<_> = per_protocol(&name)
+            .await
+            .into_iter()
+            .map(|(p, rows, rolled_up)| match p.as_str() {
+                "modbus" => (MODBUS_RTU_PROTOCOL.to_string(), rows, rolled_up),
+                _ => (p, rows, rolled_up),
+            })
+            .collect();
+        assert_eq!(relabelled.len(), 3);
+
+        let dbs = live_databases(false);
+        sweep(&dbs).await;
+        dbs.start_migration(&name).await.unwrap();
+        until_label(&dbs, &name, "current").await;
+
+        assert_eq!(per_protocol(&name).await, relabelled);
+        assert_eq!(scalar(&name, compressed).await, compressed_before);
+        assert_eq!(rollup_table(&name).await, rollup, "the rollup was rebuilt");
+        assert_eq!(
+            scalar(
+                &name,
+                &format!("SELECT count(*) FROM {rollup} WHERE protocol = 'modbus'")
+            )
+            .await,
+            0,
+            "the stored rollup still says modbus"
+        );
+        let client = dbs.connect_raw(&name).await.unwrap();
+        let refused = client
+            .batch_execute(
+                "INSERT INTO public.capture_frame
+                   (ts, protocol, id, flags, dlc, data_bytes, bus, unit, func, crc_valid)
+                 VALUES (now(), 'modbus', 259, 0, 1, '\\x01', 0, 1, 3, true)",
+            )
+            .await;
+        assert!(refused.is_err(), "the old tag is still accepted");
+        dbs.delete_database(&name).await.unwrap();
     }
 
     #[tokio::test]
