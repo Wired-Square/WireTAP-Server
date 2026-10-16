@@ -8,7 +8,7 @@ without it.
 
 This is a cargo workspace of its own on the Wired Square appliance chassis
 ([`wslib-appliance-rs`](https://github.com/Wired-Square/wslib-appliance-rs),
-pinned at `v0.8.0`), which is a private repository, as `appliance/` is. The
+pinned at `v0.12.0`), which is a private repository, as `appliance/` is. The
 root workspace and its release build without it.
 
 | Path | What |
@@ -23,7 +23,14 @@ One binary, chosen at start the chassis's way:
 - **Standalone** (`appliance-https`): its own HTTPS, accounts and sign-in, with
   a certificate it signs for itself on first start. The redirect is off.
   `WIRETAP_SERVER_UI_ONBOARDING=browser` lets the first person to reach it make
-  the first account; without it, the UI's own control socket makes it.
+  the first account; without it, the UI's own control socket makes it. Each
+  account may add TOTP, with recovery codes, and passkeys on the Users screen;
+  with TOTP on, a password sign-in asks for a code next. A passkey needs the UI
+  opened by a name, not an IP address, with a certificate the browser trusts.
+  An administrator's change to an account asks for their own password again,
+  or a code or a passkey while their TOTP is on. A password reset, by an
+  administrator or over the control socket, clears the account's second
+  factors.
 - **Behind an ApplianceOS console** (`appliance-server`): set
   `WIRETAP_SERVER_UI_APP_SOCKET` and `WIRETAP_SERVER_UI_CONSOLE_UID`, and it
   serves on that Unix socket under `WIRETAP_SERVER_UI_BASE_PATH` (for an app,
@@ -136,7 +143,8 @@ curl --unix-socket /tmp/wt/app.sock http://app/apps/wiretap-server/api/capture/s
 to the standalone UI on `https://localhost:8443`, or to
 `WIRETAP_SERVER_UI_API`, such as the dev console's `http://127.0.0.1:18080`.
 It asks for `/api` at the root, so a UI behind the dev console must then be
-started without `WIRETAP_SERVER_UI_BASE_PATH`.
+started without `WIRETAP_SERVER_UI_BASE_PATH`. A passkey runs only on the port
+the UI itself serves, so try one there rather than through the dev server.
 
 ## The API
 
