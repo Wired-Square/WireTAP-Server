@@ -12,9 +12,9 @@
 # ## Releasing ends in one push
 #
 # `push = false` below, which is the one deliberate difference from
-# wslib-wiretap-rs. CI runs on pull requests and not on main, so
-# `.github/workflows/release.yml` runs all of `ci.yml` on the tagged commit
-# before it drafts or builds anything:
+# wslib-wiretap-rs. GitHub runs CI only on a release tag (scripts/ci-local.sh
+# runs it locally before then), so `.github/workflows/release.yml` runs all of
+# `ci.yml` on the tagged commit before it drafts or builds anything:
 #
 #   0. Ask whether to move the pinned TimescaleDB image (the backend's deploy
 #      compose, its TrueNAS example, db/Dockerfile, CI's service in ci.yml).

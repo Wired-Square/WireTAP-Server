@@ -11,10 +11,9 @@
 
 name: CI
 
-# Not on a push to main: a PR has already run it, and a release tag runs it
-# through release.yml before anything is built.
+# On a release tag through release.yml, before anything is built, or by hand.
+# Everything else is local: scripts/ci-local.sh runs these jobs on a Mac.
 on:
-  pull_request:
   workflow_dispatch:
   workflow_call:
 
