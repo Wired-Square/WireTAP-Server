@@ -84,7 +84,7 @@ All notable changes to this project are documented here. Entries go under
   like one (`password`, `secret`, `token`, `*_key`, `*_hash`, …) is captured as
   `[redacted]`, and a URL's `user:password@` as `redacted@`. stdout is
   unchanged.
-- **The capture daemon's UI is on chassis v0.11.1**, from v0.8.0. Standalone,
+- **The capture daemon's UI is on chassis v0.11.2**, from v0.8.0. Standalone,
   an account can add TOTP with recovery codes and passkeys, and a password
   sign-in with TOTP on asks for a code next. Accounts is now Users, offered to
   every role: Passkeys, Password and 2FA for your own account, and Accounts for

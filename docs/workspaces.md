@@ -15,7 +15,7 @@ name the chassis and every build of it would need read access. Kept apart, the
 public root, its release and any fork build without the key. Each workspace has
 its own `Cargo.lock` and its own `rust-version`: 1.85 at the root, 1.88 in the
 other two. They pin different chassis tags: `appliance/` v0.1.4,
-`apps/wiretap-server/` v0.11.1.
+`apps/wiretap-server/` v0.11.2.
 
 The root's `.cargo/config.toml` still applies under `appliance/` and
 `apps/wiretap-server/`, since cargo reads config from parent directories, so a

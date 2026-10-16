@@ -8,7 +8,7 @@ without it.
 
 This is a cargo workspace of its own on the Wired Square appliance chassis
 ([`wslib-appliance-rs`](https://github.com/Wired-Square/wslib-appliance-rs),
-pinned at `v0.11.1`), which is a private repository, as `appliance/` is. The
+pinned at `v0.11.2`), which is a private repository, as `appliance/` is. The
 root workspace and its release build without it.
 
 | Path | What |
