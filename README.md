@@ -284,6 +284,10 @@ It needs `rustup target add aarch64-unknown-linux-musl` and `zig` on `PATH` —
 bundled SQLite means a build script compiles C, and `.cargo/config.toml` points
 that at [packaging/zigcc](packaging/zigcc).
 
+GitHub runs CI only on a release tag. Before one,
+[scripts/ci-local.sh](scripts/ci-local.sh) runs the same jobs on a Mac with
+Docker Desktop (`--list` names them); only the vcan capture job waits for the tag.
+
 Capture can only be *run* on Linux, so those tests are `#[ignore]`d and CI runs
 them against a virtual bus. On any Linux host:
 
