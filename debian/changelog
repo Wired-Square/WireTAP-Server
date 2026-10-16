@@ -1,4 +1,4 @@
-wiretap-server (0.1.13) UNRELEASED; urgency=medium
+wiretap-server (0.1.13) bookworm; urgency=medium
 
   * The gateway no longer takes captures into its own database, wiretap.
     Set [forward] database in /etc/wiretap-server/wiretap-server.toml (or
