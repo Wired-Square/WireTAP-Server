@@ -84,16 +84,19 @@ dependencies = [
 
 [[package]]
 name = "appliance-auth"
-version = "0.8.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.8.0#37b20dcb9e6f636385d95ccecdb6df74beb40ace"
+version = "0.11.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.11.1#c79672b446ae998272fe055076f33cef54c18e0a"
 dependencies = [
  "appliance-store",
  "appliance-types",
  "argon2",
+ "base64 0.23.1",
  "chrono",
  "getrandom 0.3.4",
  "jsonwebtoken",
+ "ring",
  "serde",
+ "serde_json",
  "subtle",
  "thiserror",
  "tokio",
@@ -102,13 +105,13 @@ dependencies = [
 
 [[package]]
 name = "appliance-build-id"
-version = "0.8.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.8.0#37b20dcb9e6f636385d95ccecdb6df74beb40ace"
+version = "0.11.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.11.1#c79672b446ae998272fe055076f33cef54c18e0a"
 
 [[package]]
 name = "appliance-config"
-version = "0.8.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.8.0#37b20dcb9e6f636385d95ccecdb6df74beb40ace"
+version = "0.11.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.11.1#c79672b446ae998272fe055076f33cef54c18e0a"
 dependencies = [
  "clap",
  "serde",
@@ -119,8 +122,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-core"
-version = "0.8.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.8.0#37b20dcb9e6f636385d95ccecdb6df74beb40ace"
+version = "0.11.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.11.1#c79672b446ae998272fe055076f33cef54c18e0a"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -159,8 +162,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-https"
-version = "0.8.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.8.0#37b20dcb9e6f636385d95ccecdb6df74beb40ace"
+version = "0.11.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.11.1#c79672b446ae998272fe055076f33cef54c18e0a"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -181,8 +184,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-server"
-version = "0.8.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.8.0#37b20dcb9e6f636385d95ccecdb6df74beb40ace"
+version = "0.11.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.11.1#c79672b446ae998272fe055076f33cef54c18e0a"
 dependencies = [
  "appliance-config",
  "appliance-core",
@@ -196,8 +199,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-store"
-version = "0.8.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.8.0#37b20dcb9e6f636385d95ccecdb6df74beb40ace"
+version = "0.11.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.11.1#c79672b446ae998272fe055076f33cef54c18e0a"
 dependencies = [
  "appliance-types",
  "chrono",
@@ -213,8 +216,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-test-support"
-version = "0.8.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.8.0#37b20dcb9e6f636385d95ccecdb6df74beb40ace"
+version = "0.11.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.11.1#c79672b446ae998272fe055076f33cef54c18e0a"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -222,8 +225,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-types"
-version = "0.8.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.8.0#37b20dcb9e6f636385d95ccecdb6df74beb40ace"
+version = "0.11.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.11.1#c79672b446ae998272fe055076f33cef54c18e0a"
 dependencies = [
  "chrono",
  "serde",

@@ -242,3 +242,40 @@ async fn served_self_an_account_meets_the_same_ladder() {
     let put = app.put(CHANGE).cookie(&admin).json(change).send().await;
     assert_eq!(put.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn served_self_an_account_with_totp_reaches_capture_after_its_code() {
+    use appliance_https::testing::{Harness, body_json, totp_code};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let browser_time = || {
+        let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        since.as_millis() as u64
+    };
+    let fake = Fake::start().await;
+    let app = Harness::builder().api(routes(fake.daemon())).build().await;
+    let operator = app.signed_in("operator", Role::Operator).await;
+    let enrol = app.post("/api/session/totp").cookie(&operator);
+    let enrolment = enrol.json(json!({ "password": Harness::PASSWORD }));
+    let secret = body_json(enrolment.send().await).await["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let code = totp_code(&secret, SystemTime::now());
+    let confirm = app.post("/api/session/totp/confirm").cookie(&operator);
+    let confirm = confirm.json(json!({ "code": code, "browser_time": browser_time() }));
+    assert_eq!(confirm.send().await.status(), StatusCode::OK);
+
+    let password = json!({ "username": "operator", "password": Harness::PASSWORD });
+    let waiting = app.post("/api/session").json(password).send().await;
+    assert_eq!(waiting.status(), StatusCode::ACCEPTED);
+    assert!(Harness::session_from(&waiting).is_none());
+    let pending = body_json(waiting).await["pending"].clone();
+    let code = totp_code(&secret, SystemTime::now() + Duration::from_secs(30));
+    let step = json!({ "pending": pending, "code": code, "browser_time": browser_time() });
+    let signed_in = app.post("/api/session/code").json(step).send().await;
+    assert_eq!(signed_in.status(), StatusCode::OK);
+    let session = Harness::session_from(&signed_in).expect("a session");
+    let read = app.get("/api/capture/status").cookie(&session);
+    assert_eq!(read.send().await.status(), StatusCode::OK);
+}
