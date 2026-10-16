@@ -1,3 +1,14 @@
+wiretap-server (0.1.13) UNRELEASED; urgency=medium
+
+  * The gateway no longer takes captures into its own database, wiretap.
+    Set [forward] database in /etc/wiretap-server/wiretap-server.toml (or
+    on the UI) before the gateway reaches 0.1.13, unless this server's key
+    is pinned to a database; a server naming none is refused with status 3,
+    and its log now says why.
+  * Install and restart.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Fri, 16 Oct 2026 22:48:48 +1100
+
 wiretap-server (0.1.12) bookworm; urgency=medium
 
   * No change to the capture server. This release fixes the gateway's

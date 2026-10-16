@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-10-16
+
+Export and import a capture database, rotate the gateway's secrets, and keep
+the gateway's own database free of captures. **Every capture server must name
+its database before the gateway is upgraded.**
+
 ### Added
 
 - **Export a capture database**, whole or a window `[from, to)`, as an archive
