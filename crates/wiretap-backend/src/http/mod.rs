@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, Path, Query, RawPathParams, Request, State};
+use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, patch, post, put, MethodRouter};
@@ -28,6 +28,7 @@ use wiretap_gateway::{
 use wiretap_protocol::import::{parse_header, parse_record, BODY_HEADER};
 use wiretap_protocol::ingest::RecordKind;
 
+use crate::archive::{self, ImportError};
 use crate::catalogs::AssignError;
 use crate::config::{AppSocket, Config};
 use crate::db;
@@ -134,6 +135,9 @@ fn routes(state: &St, config: &Config) -> Router<St> {
             polled(get(list_databases)).merge(post(create_database)),
         )
         .route("/v1/databases/{db}", delete(delete_database))
+        .route("/v1/databases/{db}/export", post(export_start))
+        .route("/v1/databases/{db}/export/estimate", get(export_estimate))
+        .route("/v1/databases/{db}/import", post(import_archive))
         .route("/v1/databases/{db}/migrate", post(migrate_database))
         .route("/v1/databases/{db}/rollup/refresh", post(refresh_rollup))
         .route("/v1/db/{db}/time-bounds", get(time_bounds))
@@ -186,6 +190,10 @@ fn routes(state: &St, config: &Config) -> Router<St> {
         )
         .route("/v1/admin/catalogs/{sha}", get(catalog_get))
         .route("/v1/admin/logs", polled(get(logs)))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            refuse_gateway_database_mw,
+        ))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw));
 
     // Admin SPA: static files with index.html fallback (client-side tabs).
@@ -210,6 +218,8 @@ fn routes(state: &St, config: &Config) -> Router<St> {
     Router::new()
         .route("/healthz", polled(get(healthz)))
         .route("/v1/health", polled(get(health)))
+        // The link is the credential: a browser cannot put a key on a download.
+        .route("/v1/exports/{token}", get(export_download))
         .merge(authed)
         .merge(admin)
 }
@@ -332,6 +342,38 @@ fn console_caller(
             reauthenticated_at: asserted.reauthenticated_at,
         }),
     })
+}
+
+/// Every route that names a `{db}` refuses the gateway's own database.
+async fn refuse_gateway_database_mw(
+    State(state): State<St>,
+    params: RawPathParams,
+    req: Request,
+    next: Next,
+) -> Response {
+    match params.iter().find(|(name, _)| *name == "db") {
+        Some((_, db)) if state.dbs.is_gateway_database(db) => {
+            read_refused_upload(req.into_body()).await;
+            forbidden(&db::protected(db)).into_response()
+        }
+        _ => next.run(req).await,
+    }
+}
+
+/// Of an upload refused before it is read: an answer sent over unread bytes
+/// resets the connection, and the client never sees it. A caller with no right
+/// to upload must not get to stream gigabytes, so past this it is reset.
+const REFUSED_UPLOAD_READ: usize = 4 << 20;
+
+async fn read_refused_upload(body: Body) {
+    let mut body = body.into_data_stream();
+    let mut read = 0;
+    while read < REFUSED_UPLOAD_READ {
+        match body.try_next().await {
+            Ok(Some(chunk)) => read += chunk.len(),
+            _ => break,
+        }
+    }
 }
 
 /// Who the caller is and by what, so the admin UI knows whether to ask for a key.
@@ -526,6 +568,8 @@ struct DatabaseRow {
     info: DatabaseInfo,
     migration: Option<schema::MigrationProgress>,
     buffered_rows: Option<u64>,
+    /// Seconds an archive import into it has been running.
+    import_busy_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -559,6 +603,7 @@ async fn list_databases(
     let states = state.dbs.schema_states().await;
     let rebuilding = state.dbs.rollup_rebuilds().await;
     let buffered = state.dbs.buffered_rows().await;
+    let importing = state.dbs.import_busy().await;
     let mut databases = Vec::new();
     for r in &rows {
         let name: String = r.get("datname");
@@ -569,7 +614,7 @@ async fn list_databases(
         // Same filter the sweep uses: a name this gateway would never manage is
         // not a capture database, and listing it as "unknown" would report the
         // deployment as mixed forever.
-        if !db::valid_database_name(&name) {
+        if !db::valid_database_name(&name) || state.dbs.is_gateway_database(&name) {
             continue;
         }
         if key.database_pin.as_ref().is_some_and(|pin| *pin != name) {
@@ -601,6 +646,7 @@ async fn list_databases(
         };
         databases.push(DatabaseRow {
             buffered_rows: buffered.get(&info.name).copied(),
+            import_busy_secs: importing.get(&info.name).copied(),
             info,
             migration,
         });
@@ -625,6 +671,9 @@ async fn create_database(
     Json(body): Json<CreateDatabaseBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     check_admin(&key)?;
+    if state.dbs.is_gateway_database(&body.name) {
+        return Err(forbidden(&db::protected(&body.name)));
+    }
     state
         .dbs
         .create_database(&body.name)
@@ -638,7 +687,7 @@ async fn delete_database(
     Extension(key): Extension<KeyInfo>,
     Path(db): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    check_admin(&key)?;
+    check_admin_reauthenticated(&key)?;
     // Refuse while a device is actively ingesting into this database.
     if state.sessions.list().await.iter().any(|s| s.database == db) {
         return Err(ApiError(
@@ -653,6 +702,12 @@ async fn delete_database(
         return Err(ApiError(
             StatusCode::CONFLICT,
             format!("database '{db}' is migrating"),
+        ));
+    }
+    if state.dbs.import_busy().await.contains_key(&db) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("database '{db}' is being imported from an archive"),
         ));
     }
     state
@@ -1051,6 +1106,155 @@ fn import_rows(buf: &[u8], rows: &mut Vec<FrameRow>) -> Result<usize, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Database archives: export and import
+// ---------------------------------------------------------------------------
+
+/// The whole database, or `[from_us, to_us)`.
+#[derive(Deserialize)]
+struct WindowQuery {
+    from_us: Option<i64>,
+    to_us: Option<i64>,
+}
+
+impl WindowQuery {
+    fn window(&self) -> Result<Option<archive::Window>, ApiError> {
+        match (self.from_us, self.to_us) {
+            (None, None) => Ok(None),
+            (Some(from_us), Some(to_us)) if from_us < to_us => {
+                Ok(Some(archive::Window { from_us, to_us }))
+            }
+            (Some(_), Some(_)) => Err(ApiError::from(
+                "the window's from_us must be before its to_us".to_string(),
+            )),
+            _ => Err(ApiError::from(
+                "a window needs both from_us and to_us".to_string(),
+            )),
+        }
+    }
+}
+
+/// The database's bounds, and roughly what an export of the window would hold.
+async fn export_estimate(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(db): Path<String>,
+    Query(q): Query<WindowQuery>,
+) -> Result<Json<archive::Estimate>, ApiError> {
+    check_admin(&key)?;
+    let window = q.window()?;
+    let client = client_for(&state, &db).await?;
+    Ok(Json(
+        archive::estimate(&client, window)
+            .await
+            .map_err(unavailable)?,
+    ))
+}
+
+/// A single-use link the browser then navigates to, for a minute.
+async fn export_start(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(db): Path<String>,
+    Json(q): Json<WindowQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_admin(&key)?;
+    let window = q.window()?;
+    let client = client_for(&state, &db).await?;
+    let estimate = archive::estimate(&client, window)
+        .await
+        .map_err(unavailable)?;
+    if estimate.empty {
+        return Err(ApiError::from(format!(
+            "database '{db}' holds nothing in that window to export"
+        )));
+    }
+    let token = state.exports.issue(&db, window);
+    Ok(Json(json!({ "url": format!("/v1/exports/{token}") })))
+}
+
+async fn export_download(
+    State(state): State<St>,
+    Path(token): Path<String>,
+) -> Result<Response, ApiError> {
+    let link = state
+        .exports
+        .redeem(&token)
+        .ok_or_else(|| not_found("this export link is unknown, used or expired"))?;
+    let client = state
+        .dbs
+        .connect_current(&link.database)
+        .await
+        .map_err(|e| match e {
+            db::DbError::Refused(m) => not_found(m),
+            db::DbError::Unavailable(m) => unavailable(m),
+        })?;
+    let (out, chunks) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(archive::export(
+        client,
+        link.database.clone(),
+        link.window,
+        out,
+    ));
+    let body = futures_util::stream::unfold(chunks, |mut chunks| async move {
+        chunks.recv().await.map(|chunk| (chunk, chunks))
+    });
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        archive::file_name(&link.database, link.window)
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, archive::CONTENT_TYPE.to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        Body::from_stream(body),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct ArchiveImportQuery {
+    #[serde(default)]
+    replace: bool,
+}
+
+/// An archive into a new database, or in place of an existing one.
+async fn import_archive(
+    State(state): State<St>,
+    Extension(key): Extension<KeyInfo>,
+    Path(db): Path<String>,
+    Query(q): Query<ArchiveImportQuery>,
+    req: Request<Body>,
+) -> Result<Json<archive::Imported>, ApiError> {
+    if let Err(e) = check_admin(&key) {
+        read_refused_upload(req.into_body()).await;
+        return Err(e);
+    }
+    let mut reader = archive::Reader::new(req.into_body().into_data_stream());
+    let proved = if q.replace {
+        check_admin_reauthenticated(&key)
+    } else {
+        Ok(())
+    };
+    // Read whole: an admin may upload this much anyway, as a new database.
+    if let Err(e) = proved {
+        reader.discard().await;
+        return Err(e);
+    }
+    // Owned by the process: a client gone partway must still leave the import
+    // finished or undone, never between.
+    let imported = tokio::spawn(archive::import(state.dbs.clone(), db, q.replace, reader))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    imported.map(Json).map_err(|e| match e {
+        ImportError::BadRequest(m) => ApiError(StatusCode::BAD_REQUEST, m),
+        ImportError::NotFound(m) => not_found(m),
+        ImportError::Conflict(m) => ApiError(StatusCode::CONFLICT, m),
+        ImportError::Unavailable(m) => unavailable(m),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Admin: keys + ingest sessions
 // ---------------------------------------------------------------------------
 
@@ -1386,6 +1590,7 @@ async fn logs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use std::collections::HashMap;
     use std::time::Instant;
     use wiretap_protocol::can::CanFrame;
@@ -1507,6 +1712,7 @@ mod tests {
             logs: crate::logbuf::LogBuffer::new(16),
             secret_files,
             rotation: Default::default(),
+            exports: Default::default(),
         })
     }
 
@@ -1753,10 +1959,90 @@ mod tests {
         assert_eq!(over_socket(&socket, "/healthz", "").await.0, 404);
     }
 
+    /// Every route that names a database.
+    const DATABASE_ROUTES: [(&str, &str); 28] = [
+        ("DELETE", "/v1/databases/{db}"),
+        ("POST", "/v1/databases/{db}/export"),
+        ("GET", "/v1/databases/{db}/export/estimate"),
+        ("POST", "/v1/databases/{db}/import"),
+        ("POST", "/v1/databases/{db}/import?replace=true"),
+        ("POST", "/v1/databases/{db}/migrate"),
+        ("POST", "/v1/databases/{db}/rollup/refresh"),
+        ("GET", "/v1/db/{db}/time-bounds"),
+        ("GET", "/v1/db/{db}/inventory"),
+        ("GET", "/v1/db/{db}/frames"),
+        ("POST", "/v1/db/{db}/payloads"),
+        ("GET", "/v1/db/{db}/events"),
+        ("POST", "/v1/db/{db}/events"),
+        ("PATCH", "/v1/db/{db}/events/1"),
+        ("DELETE", "/v1/db/{db}/events/1"),
+        ("POST", "/v1/db/{db}/query/byte-changes"),
+        ("POST", "/v1/db/{db}/query/frame-changes"),
+        ("POST", "/v1/db/{db}/query/mirror-validation"),
+        ("POST", "/v1/db/{db}/query/mux-statistics"),
+        ("POST", "/v1/db/{db}/query/first-last"),
+        ("POST", "/v1/db/{db}/query/frequency"),
+        ("POST", "/v1/db/{db}/query/distribution"),
+        ("POST", "/v1/db/{db}/query/gap-analysis"),
+        ("POST", "/v1/db/{db}/query/pattern-search"),
+        ("GET", "/v1/db/{db}/activity"),
+        ("POST", "/v1/db/{db}/activity/1/cancel"),
+        ("DELETE", "/v1/db/{db}/activity/1"),
+        ("POST", "/v1/db/{db}/import"),
+    ];
+
+    #[tokio::test]
+    async fn the_gateways_own_database_is_refused_wherever_a_database_is_named() {
+        let at = gateway(db::tests::unreachable_databases(true)).await;
+        let refusal = json!({ "error": db::protected("wiretap") });
+        let upload = vec![b'x'; 1 << 20];
+        for (method, path) in DATABASE_ROUTES {
+            let path = path.replace("{db}", "wiretap");
+            let answer = send_to(at, method, &path, Some("bootstrap"), "text/plain", &upload).await;
+            assert_eq!(answer, (403, refusal.clone()), "{method} {path}");
+            let other = path.replace("wiretap", "archive");
+            let (status, _) =
+                send_to(at, method, &other, Some("bootstrap"), "text/plain", b"").await;
+            assert_ne!(status, 403, "{method} {other}");
+        }
+        let create = json!({ "name": "wiretap" });
+        let answer = request_to(at, "POST", "/v1/databases", Some("bootstrap"), Some(create)).await;
+        assert_eq!(answer, (403, refusal));
+    }
+
+    #[tokio::test]
+    async fn a_refused_upload_is_read_only_so_far() {
+        let endless = futures_util::stream::repeat_with(|| {
+            Ok::<_, std::io::Error>(Bytes::from(vec![0; 1 << 16]))
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_refused_upload(Body::from_stream(endless)),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Refused before PostgreSQL is asked anything, and after the whole body
+    /// is read, so the client sees why.
+    #[tokio::test]
+    async fn an_upload_that_is_not_an_archive_is_a_400_saying_why() {
+        let (status, err) = send(
+            "POST",
+            "/v1/databases/archive/import",
+            Some("bootstrap"),
+            archive::CONTENT_TYPE,
+            &[b'x'; 1 << 20],
+        )
+        .await;
+        assert_eq!(status, 400, "{err}");
+        assert_eq!(err["error"], "this is not a WireTAP archive");
+    }
+
     /// A body only where the handler reads one: a server that answers without
     /// reading the body closes on unread bytes, which resets the connection
     /// before the client has read the answer.
-    const CREDENTIAL_ROUTES: [(&str, &str, &[u8]); 5] = [
+    const REAUTHENTICATED_ROUTES: [(&str, &str, &[u8]); 7] = [
         (
             "POST",
             "/v1/admin/keys",
@@ -1766,12 +2052,14 @@ mod tests {
         ("DELETE", "/v1/admin/keys/1", b""),
         ("POST", "/v1/admin/secrets/db-password/rotate", b""),
         ("POST", "/v1/admin/secrets/admin-key/rotate", b""),
+        ("DELETE", "/v1/databases/archive", b""),
+        ("POST", "/v1/databases/archive/import?replace=true", b""),
     ];
 
     /// The database is unreachable, so an allowed request fails further in,
     /// and only the gate answers 403.
     #[tokio::test]
-    async fn behind_the_console_a_credential_needs_a_recent_password() {
+    async fn behind_the_console_a_credential_or_a_database_needs_a_recent_password() {
         let (socket, tcp) = gateway_on_app_socket("reauth", 0).await;
         // Both on both listeners: the socket must not read the key, and TCP
         // must not read the assertion.
@@ -1798,7 +2086,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         let stale = now - console::REAUTHENTICATION_WINDOW.as_secs() as i64 - 1;
 
-        for (method, path, body) in CREDENTIAL_ROUTES {
+        for (method, path, body) in REAUTHENTICATED_ROUTES {
             for reauth in [None, Some(stale), Some(now + 60)] {
                 let (status, answer) = ask(method, path, body, reauth).await;
                 assert_eq!(status, 403, "{method} {path} {reauth:?}: {answer}");
@@ -1834,6 +2122,7 @@ mod tests {
             ("POST", "/v1/admin/keys/1/enable", b""),
             ("PATCH", "/v1/admin/keys/1", br#"{"name":"probe"}"#),
             ("GET", "/v1/admin/keys", b""),
+            ("POST", "/v1/databases/archive/import", b""),
         ] {
             let (status, answer) = ask(method, path, body, Some(stale)).await;
             assert_ne!(status, 403, "{method} {path}: {answer}");
@@ -2280,6 +2569,287 @@ mod tests {
             let msg = err["error"].as_str().unwrap_or_default();
             assert!(msg.contains(says), "{says}: {msg}");
         }
+    }
+
+    const T0: i64 = 1_700_000_000_000_000;
+
+    /// A capture database seeded as ingest seeds one: two runs of CAN frames
+    /// 200 s apart, a Modbus row and two events between.
+    async fn seeded(prefix: &str) -> (db::Databases, String) {
+        let name = db::tests::fresh_database(
+            prefix,
+            "INSERT INTO public.events (ts, duration_us, note)
+               VALUES (to_timestamp(1700000000), 0, 'start'),
+                      (to_timestamp(1700000100), 5000000, 'run');
+             INSERT INTO public.capture_frame
+               (ts, protocol, id, flags, dlc, data_bytes, bus, unit, func, crc_valid)
+               VALUES (to_timestamp(1700000050), 'modbus_rtu', 259, 0, 2, '\\x0103', 1, 1, 3, true)",
+        )
+        .await;
+        let dbs = db::tests::live_databases(false);
+        dbs.migrate_one(&name).await.unwrap();
+        for from in [T0, T0 + 200_000_000] {
+            dbs.write_rows(&name, &db::tests::frames(0x100, from, 1000))
+                .await
+                .unwrap();
+        }
+        (dbs, name)
+    }
+
+    /// Each table's rows and a digest of them, in or outside a window.
+    async fn fingerprint(name: &str, filter: &str) -> Vec<(i64, String)> {
+        let client = db::tests::live_databases(false)
+            .connect_raw(name)
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        for (table, columns) in [
+            (
+                "capture_frame",
+                "ts, ingest_ts, protocol, id, dlc, data_bytes, bus, flags, unit, func, crc_valid",
+            ),
+            (
+                "events",
+                "id, ts, duration_us, note, created_at, updated_at",
+            ),
+        ] {
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT count(*), coalesce(md5(string_agg(r::text, ',' \
+                           ORDER BY (r::text) COLLATE \"C\")), '') \
+                           FROM (SELECT {columns} FROM public.{table} {filter}) r"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            out.push((row.get(0), row.get(1)));
+        }
+        out
+    }
+
+    /// Status, head and body bytes through a real client: an archive is
+    /// binary, and its download chunked.
+    async fn fetch(
+        at: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+    ) -> (u16, axum::http::HeaderMap, Bytes) {
+        use http_body_util::{BodyExt, Full};
+        let stream = tokio::net::TcpStream::connect(at).await.unwrap();
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+                .await
+                .unwrap();
+        tokio::spawn(connection);
+        let request = hyper::Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "test")
+            .header(header::AUTHORIZATION, "Bearer bootstrap")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .unwrap();
+        let response = sender.send_request(request).await.unwrap();
+        let (head, body) = response.into_parts();
+        let body = body.collect().await.unwrap().to_bytes();
+        (head.status.as_u16(), head.headers, body)
+    }
+
+    /// Through `POST …/export` and the link it returns.
+    async fn exported(at: std::net::SocketAddr, name: &str, window: serde_json::Value) -> Bytes {
+        let path = format!("/v1/databases/{name}/export");
+        let (status, link) = request_to(at, "POST", &path, Some("bootstrap"), Some(window)).await;
+        assert_eq!(status, 200, "{link}");
+        let url = link["url"].as_str().unwrap();
+        let (status, head, archive) = fetch(at, "GET", url, Vec::new()).await;
+        assert_eq!(status, 200);
+        assert_eq!(head[header::CONTENT_TYPE], archive::CONTENT_TYPE);
+        assert_eq!(fetch(at, "GET", url, Vec::new()).await.0, 404, "used twice");
+        archive
+    }
+
+    async fn imported(
+        at: std::net::SocketAddr,
+        name: &str,
+        query: &str,
+        archive: &Bytes,
+    ) -> (u16, serde_json::Value) {
+        let path = format!("/v1/databases/{name}/import{query}");
+        let (status, _, body) = fetch(at, "POST", &path, archive.to_vec()).await;
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn a_whole_export_imports_as_a_new_database_holding_every_row() {
+        let (dbs, source) = seeded("p11_whole").await;
+        let at = gateway(dbs.clone()).await;
+        let archive = exported(at, &source, json!({})).await;
+
+        let copy = format!("{source}_copy");
+        let (status, done) = {
+            let _cluster = db::tests::CLUSTER.lock().await;
+            let truncated = archive.slice(..archive.len() - 8);
+            let (status, refused) = imported(at, &copy, "", &truncated).await;
+            assert_eq!(status, 400, "{refused}");
+            assert!(!dbs.database_exists(&copy).await.unwrap());
+            imported(at, &copy, "", &archive).await
+        };
+        assert_eq!(status, 200, "{done}");
+        assert_eq!(done["rows"], json!({ "capture_frame": 2001, "events": 2 }));
+        assert_eq!(done["source"], source.as_str());
+        assert_eq!(fingerprint(&copy, "").await, fingerprint(&source, "").await);
+        assert_eq!(db::tests::state_of(&dbs, &copy).await.label(), "current");
+        let note = json!({ "ts_us": T0, "note": "after" });
+        let path = format!("/v1/db/{copy}/events");
+        let (status, event) = request_to(at, "POST", &path, Some("bootstrap"), Some(note)).await;
+        assert_eq!((status, &event["id"]), (201, &json!(3)), "{event}");
+        let client = dbs.connect_raw(&copy).await.unwrap();
+        assert!(matches!(
+            schema::rollup_status(&client).await.unwrap(),
+            schema::RollupState::Covered { .. }
+        ));
+
+        let (status, again) = imported(at, &copy, "", &archive).await;
+        assert_eq!(status, 409, "{again}");
+        let (status, missing) =
+            imported(at, &format!("{source}_none"), "?replace=true", &archive).await;
+        assert_eq!(status, 404, "{missing}");
+        for name in [&source, &copy] {
+            dbs.delete_database(name).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn a_windowed_export_carries_only_its_window_and_a_replace_keeps_only_that() {
+        let (dbs, name) = seeded("p11_window").await;
+        let at = gateway(dbs.clone()).await;
+        let estimate = |query: String| {
+            let path = format!("/v1/databases/{name}/export/estimate{query}");
+            async move {
+                request_to(at, "GET", &path, Some("bootstrap"), None)
+                    .await
+                    .1
+            }
+        };
+        let whole = estimate(String::new()).await;
+        assert_eq!(whole["min_ts_us"], T0);
+        assert_eq!(whole["max_ts_us"], T0 + 200_000_000 + 999_000);
+        assert_eq!(
+            (whole["events"].as_i64(), whole["empty"].as_bool()),
+            (Some(2), Some(false))
+        );
+        let (from_us, to_us) = (T0 + 150_000_000, T0 + 300_000_000);
+        let window = estimate(format!("?from_us={from_us}&to_us={to_us}")).await;
+        // Frames to the hour, and all of them are in one.
+        assert_eq!(
+            (window["frames"].as_i64(), window["events"].as_i64()),
+            (Some(2001), Some(0))
+        );
+        let empty = estimate(format!("?from_us={to_us}&to_us={}", to_us + 1)).await;
+        assert_eq!(empty["empty"], true);
+        let path = format!("/v1/databases/{name}/export");
+        let nothing = json!({ "from_us": to_us, "to_us": to_us + 1 });
+        let (status, _) = request_to(at, "POST", &path, Some("bootstrap"), Some(nothing)).await;
+        assert_eq!(status, 400);
+
+        let archive = exported(at, &name, json!({ "from_us": from_us, "to_us": to_us })).await;
+        let within = format!(
+            "WHERE ts >= to_timestamp({}) AND ts < to_timestamp({})",
+            from_us / 1_000_000,
+            to_us / 1_000_000
+        );
+        let expected = fingerprint(&name, &within).await;
+        let (status, done) = {
+            let _cluster = db::tests::CLUSTER.lock().await;
+            imported(at, &name, "?replace=true", &archive).await
+        };
+        assert_eq!(status, 200, "{done}");
+        assert_eq!(
+            done["window"],
+            json!({ "from_us": from_us, "to_us": to_us })
+        );
+        assert_eq!(fingerprint(&name, "").await, expected);
+        assert_eq!(expected[0].0, 1000);
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    /// Ingest runs throughout, sent again when refused as a capture server
+    /// does. Every batch acknowledged once the replace began is in the
+    /// database after it; one sent before it began is replaced with the rest.
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn ingest_across_a_replace_lands_in_the_new_database_and_none_is_lost() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (dbs, name) = seeded("p11_swap").await;
+        let at = gateway(dbs.clone()).await;
+        let archive = exported(at, &name, json!({})).await;
+        let before = fingerprint(&name, "").await;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = tokio::spawn({
+            let (dbs, name, stop) = (dbs.clone(), name.clone(), stop.clone());
+            async move {
+                // Before the replace, while it runs, after it.
+                let mut sent = [0i64; 3];
+                let mut phase = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let busy = dbs.import_busy().await.contains_key(&name);
+                    phase = match (phase, busy) {
+                        (_, true) => 1,
+                        (0, false) => 0,
+                        _ => 2,
+                    };
+                    let id = 0x7B0 + phase as u32;
+                    let rows = db::tests::frames(id, T0 + 500_000_000 + sent[phase] * 1000, 10);
+                    if dbs.write_rows(&name, &rows).await.is_ok() {
+                        sent[phase] += 10;
+                    }
+                }
+                sent
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Slowly, so ingest is held for a while before the swap.
+        let parts: Vec<Result<Bytes, String>> = archive
+            .chunks(archive.len() / 16 + 1)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        let slow = futures_util::StreamExt::then(futures_util::stream::iter(parts), |part| async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            part
+        });
+        let done = {
+            let _cluster = db::tests::CLUSTER.lock().await;
+            archive::import(
+                dbs.clone(),
+                name.clone(),
+                true,
+                archive::Reader::new(Box::pin(slow)),
+            )
+            .await
+            .unwrap()
+        };
+        assert!(done.replaced);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        stop.store(true, Ordering::Relaxed);
+        let [_, held, after] = writer.await.unwrap();
+
+        assert!(held > 0, "nothing was held, so this proved nothing");
+        assert!(after > 0, "nothing was sent after the swap");
+        assert_eq!(db::tests::archived(&name, 0x7B1).await, (held, held));
+        assert_eq!(db::tests::archived(&name, 0x7B2).await, (after, after));
+        // At most the batch in flight as it began.
+        assert!(db::tests::archived(&name, 0x7B0).await.0 <= 10);
+        let original = format!("WHERE id NOT IN ({}, {}, {})", 0x7B0, 0x7B1, 0x7B2);
+        assert_eq!(fingerprint(&name, &original).await[0], before[0]);
+        assert!(!db::tests::buffer_exists(&name).await);
+        assert_eq!(db::tests::state_of(&dbs, &name).await.label(), "current");
+        dbs.delete_database(&name).await.unwrap();
     }
 
     async fn rotate(at: std::net::SocketAddr, secret: &str, key: &str) -> serde_json::Value {

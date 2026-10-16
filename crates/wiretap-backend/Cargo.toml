@@ -33,6 +33,7 @@ hyper-util = { workspace = true, features = ["tokio"] }
 base64.workspace = true
 bytes.workspace = true
 deadpool-postgres.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 postgres-protocol.workspace = true

@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { api, formatBytes } from "../api";
+import { useRef, useState } from "react";
+import { DatabaseEntry, api, apiUrl, formatBytes, formatElapsed } from "../api";
 import { useConfirm } from "../Confirm";
+import Menu from "../Menu";
 import {
   MigrationProgressView,
   RollupBadge,
@@ -9,12 +10,16 @@ import {
   rollupNeedsWork,
 } from "../SchemaBadge";
 import { useDatabases } from "../useDatabases";
+import { ExportChoice, ExportForm, ImportForm, ImportHandle } from "./DatabaseArchive";
 
 export default function Databases() {
   const { databases, target, error, setError, refresh } = useDatabases();
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [notice, setNotice] = useState("");
   const [dialog, ask] = useConfirm();
+  const exportChoice = useRef<ExportChoice>({ window: null, empty: true });
+  const importer = useRef<ImportHandle>(null);
 
   const create = async () => {
     setCreating(true);
@@ -55,6 +60,43 @@ export default function Databases() {
       },
     });
 
+  const exportDb = (dbName: string) =>
+    ask({
+      title: `Export "${dbName}"`,
+      message: <ExportForm db={dbName} choice={exportChoice} />,
+      verb: "Export",
+      act: async () => {
+        const { window: span, empty } = exportChoice.current;
+        if (empty) throw new Error("There is nothing in this window to export.");
+        const { url } = await api<{ url: string }>(`/v1/databases/${dbName}/export`, {
+          method: "POST",
+          body: span ?? {},
+        });
+        // An attachment: the page stays, and the browser saves the stream.
+        window.location.assign(apiUrl(url));
+      },
+    });
+
+  const importInto = (replacing?: string) =>
+    ask({
+      title: replacing ? `Replace "${replacing}" from an archive` : "Import an archive as a new database",
+      message: <ImportForm target={replacing} handle={importer} />,
+      verb: replacing ? "Replace" : "Import",
+      danger: !!replacing,
+      act: async () => {
+        setError("");
+        setNotice("");
+        const done = await importer.current!.submit();
+        const frames = done.rows.capture_frame ?? 0;
+        setNotice(
+          `${done.replaced ? "Replaced" : "Created"} "${done.database}" from "${done.source}": ` +
+            `${frames.toLocaleString()} frames and ${(done.rows.events ?? 0).toLocaleString()} events.`,
+        );
+        if (done.attention) setError(done.attention);
+        refresh();
+      },
+    });
+
   const remove = (dbName: string) =>
     ask({
       title: "Delete database",
@@ -70,6 +112,13 @@ export default function Databases() {
       },
     });
 
+  const unavailable = (d: DatabaseEntry) =>
+    d.import_busy_secs !== null
+      ? "an import is running"
+      : d.schema_state !== "current"
+        ? "not at the current schema"
+        : undefined;
+
   return (
     <div className="card">
       <div className="row" style={{ marginBottom: "0.75rem" }}>
@@ -84,8 +133,12 @@ export default function Databases() {
         <button className="btn primary" disabled={!name || creating} onClick={create}>
           Create
         </button>
+        <button className="btn" onClick={() => importInto()}>
+          Import…
+        </button>
       </div>
       {error && <p className="error">{error}</p>}
+      {notice && <p className="muted">{notice}</p>}
       <table>
         <thead>
           <tr>
@@ -102,7 +155,13 @@ export default function Databases() {
               <td className="mono">{d.name}</td>
               <td>{formatBytes(d.size_bytes)}</td>
               <td>
-                <SchemaBadge db={d} target={target} />{" "}
+                {d.import_busy_secs !== null ? (
+                  <span className="badge migrating" title="Reads are refused, and ingest held, until it is in place">
+                    Importing {formatElapsed(d.import_busy_secs)}
+                  </span>
+                ) : (
+                  <SchemaBadge db={d} target={target} />
+                )}{" "}
                 {canMigrate(d) && (
                   <button className="btn" onClick={() => migrate(d.name)}>
                     Migrate now
@@ -119,9 +178,19 @@ export default function Databases() {
                 )}
               </td>
               <td style={{ textAlign: "right" }}>
-                <button className="btn danger" onClick={() => remove(d.name)}>
-                  Delete
-                </button>
+                <Menu
+                  label={`Actions for database ${d.name}`}
+                  items={[
+                    { label: "Export…", onSelect: () => exportDb(d.name), unavailable: unavailable(d) },
+                    {
+                      label: "Import (replace)…",
+                      onSelect: () => importInto(d.name),
+                      unavailable: unavailable(d),
+                    },
+                    "separator",
+                    { label: "Delete…", onSelect: () => remove(d.name), danger: true },
+                  ]}
+                />
               </td>
             </tr>
           ))}
@@ -139,6 +208,13 @@ export default function Databases() {
         summaries do not reach this archive's first frame, so rollup queries are
         omitting the gap rather than recomputing it. The gateway repairs that on
         start; the button is for a rollup that has merely fallen behind.
+      </p>
+      <p className="muted" style={{ marginBottom: 0 }}>
+        Export saves a database, or a window of it, as an archive; Import makes a new
+        database from one, or replaces an existing one with it. A replace refuses the
+        database's reads while it runs, holds its ingest, and stores that in the new
+        one. The gateway's own database, which holds its keys and catalogues, is not
+        listed and takes no captures.
       </p>
       {dialog}
     </div>

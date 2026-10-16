@@ -90,6 +90,9 @@ chrono = "0.4"
 base64 = "0.22"
 bytes = "1"
 hex = "0.4"
+# A database archive's compression: gzip, which a browser can also read with
+# its own DecompressionStream, and pure Rust behind the default backend.
+flate2 = "1"
 
 # --- hashing and secrets ---
 # sha2 hashes API keys at rest; subtle compares an ingest token without leaking

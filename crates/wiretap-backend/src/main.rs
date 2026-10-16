@@ -8,6 +8,7 @@
 /// server, because the image's documented tag is the mutable `:latest`.
 pub const VERSION: &str = wiretap_build_id::build_version!();
 
+mod archive;
 mod catalogs;
 mod config;
 mod db;
@@ -103,8 +104,9 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
         }
     }
 
-    // Bootstrap: default capture database + schema, then the key store
-    dbs.create_database(&config.default_database).await?;
+    dbs.drop_import_leftovers().await?;
+    // Bootstrap: the gateway's own database, then the key store
+    dbs.create_gateway_database().await?;
     let keys = KeyStore::new(
         dbs.clone(),
         config.bootstrap_admin_key.as_ref().map(|k| k.expose()),
@@ -140,6 +142,7 @@ async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
         catalogs,
         secret_files: config.secret_files.clone(),
         rotation: Default::default(),
+        exports: Default::default(),
     });
     let listener = tokio::net::TcpListener::bind(&config.http_listen)
         .await

@@ -39,7 +39,8 @@ pub struct Forward {
     pub host: String,
     pub port: u16,
     pub api_key: Secret,
-    /// Empty means the gateway's default capture database.
+    /// Empty names none: the gateway takes the key's pinned database, and
+    /// refuses a key with no pin.
     pub database: String,
     pub batching: Batching,
     /// What the gateway knows this daemon by: `[forward] daemon_id`, or the
@@ -54,14 +55,14 @@ pub struct Forward {
 }
 
 impl Forward {
-    /// How a log line names the database: `<default>` for the gateway's.
+    /// How a log line names the database: `<pinned>` for the key's.
     pub fn label(&self) -> &str {
         Self::label_of(&self.database)
     }
 
     pub fn label_of(database: &str) -> &str {
         if database.is_empty() {
-            "<default>"
+            "<pinned>"
         } else {
             database
         }
@@ -111,8 +112,8 @@ pub struct Device {
     /// `can0`, or `/dev/ttyUSB0`.
     pub interface: String,
     pub mode: Mode,
-    /// The gateway database its frames land in; empty is the gateway's
-    /// default.
+    /// The gateway database its frames land in; empty is the key's pinned
+    /// one.
     pub database: String,
     /// CAN devices are numbered first, in order, so GVRET's bus arithmetic
     /// holds; serial devices take the numbers after.
@@ -1198,7 +1199,7 @@ impl Settings {
     }
 
     /// The database a device lands in when it names none: `[forward]`'s, which
-    /// is the gateway's own default when that is empty too.
+    /// is the key's pinned one when that is empty too.
     pub fn default_database(&self) -> &str {
         self.forward.as_ref().map_or("", |f| f.database.as_str())
     }

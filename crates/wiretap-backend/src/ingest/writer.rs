@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use bytes::Bytes;
 use chrono::DateTime;
 use deadpool_postgres::Pool;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, TryStreamExt};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::{Client, CopyInSink, GenericClient};
 use wiretap_model::Protocol;
@@ -213,8 +213,13 @@ pub enum Written {
 /// Buffer a batch for a database behind this build's schema, deciding under
 /// the drain's lock, so a batch either lands before the drain or finds the
 /// database current and goes to `capture_frame`; during the drain, it is
-/// refused.
-pub async fn buffer_rows(pool: &Pool, batch: &[FrameRow]) -> Result<Written, CopyError> {
+/// refused. A batch `held` for an import goes to the buffer whatever the
+/// schema.
+pub async fn buffer_rows(
+    pool: &Pool,
+    batch: &[FrameRow],
+    held: bool,
+) -> Result<Written, CopyError> {
     let text = copy_text(batch)?;
     let mut client = pool.get().await.map_err(pool_error)?;
     let tx = client
@@ -235,10 +240,11 @@ pub async fn buffer_rows(pool: &Pool, batch: &[FrameRow]) -> Result<Written, Cop
             message: "the buffer is being drained; retry shortly".into(),
         });
     }
-    let current = crate::schema::detect_version(&*tx)
-        .await
-        .map_err(pool_error)?
-        == Some(crate::schema::SCHEMA_VERSION);
+    let current = !held
+        && crate::schema::detect_version(&*tx)
+            .await
+            .map_err(pool_error)?
+            == Some(crate::schema::SCHEMA_VERSION);
     let table = if current {
         "public.capture_frame"
     } else {
@@ -332,6 +338,36 @@ pub async fn drain_pending(client: &mut Client) -> Result<u64, String> {
         .map_err(pg("drop"))?;
     tx.commit().await.map_err(pg("commit"))?;
     Ok(rows)
+}
+
+/// Move one database's buffer into another's, for the swap that replaces the
+/// first with the second. Its writers must have stopped.
+pub async fn move_pending(from: &Client, to: &Client) -> Result<u64, String> {
+    let pg = |what: &'static str| move |e: tokio_postgres::Error| format!("move {what}: {e}");
+    if !has_pending(from).await? {
+        return Ok(0);
+    }
+    to.batch_execute(CREATE_PENDING)
+        .await
+        .map_err(pg("create"))?;
+    let rows = from
+        .copy_out(&format!(
+            "COPY (SELECT ingest_ts, {COLUMNS} FROM public.capture_frame_pending) \
+             TO STDOUT (FORMAT binary)"
+        ))
+        .await
+        .map_err(pg("read"))?;
+    let sink = to
+        .copy_in(&format!(
+            "COPY public.capture_frame_pending (ingest_ts, {COLUMNS}) FROM STDIN (FORMAT binary)"
+        ))
+        .await
+        .map_err(pg("write"))?;
+    futures_util::pin_mut!(rows, sink);
+    while let Some(chunk) = rows.try_next().await.map_err(pg("read"))? {
+        sink.send(chunk).await.map_err(pg("write"))?;
+    }
+    sink.finish().await.map_err(pg("write"))
 }
 
 /// Materialise the rollup over every span drained and not yet refreshed, then

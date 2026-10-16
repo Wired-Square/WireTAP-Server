@@ -15,6 +15,7 @@ use tokio_postgres::error::SqlState;
 use tokio_postgres::NoTls;
 use wiretap_model::Secret;
 
+use crate::archive::ImportError;
 use crate::config::Config;
 use crate::ingest::writer::{self, CopyError, FrameRow, Written};
 use crate::schema;
@@ -163,7 +164,36 @@ impl std::fmt::Display for WriteError {
 enum Route {
     Live(Pool),
     Buffered(Pool),
+    /// Into the buffer of a database an import is replacing, for the swap to
+    /// carry across; refused while it swaps.
+    Held(Arc<RwLock<bool>>),
 }
+
+/// The refusal for anything that would treat the gateway's own database as a
+/// capture database.
+pub fn protected(name: &str) -> String {
+    format!(
+        "'{name}' is the gateway's own database (WIRETAP_DEFAULT_DB): it holds keys and \
+         catalogues, and takes no captures"
+    )
+}
+
+/// An archive being loaded into `staging`, to become its target.
+struct Import {
+    staging: String,
+    since: Instant,
+    /// A replace's: held writes take it shared, the swap exclusively, and it
+    /// is true from the swap on.
+    held: Option<Arc<RwLock<bool>>>,
+    /// Holds the import's advisory lock until it is done with.
+    _claim: tokio_postgres::Client,
+}
+
+/// Prefixes no capture database can have, so a start can drop what an import
+/// left behind. An import's staging and replaced databases share the suffix
+/// after them, which its advisory lock is keyed on.
+const STAGING_PREFIX: &str = "__import_";
+const REPLACED_PREFIX: &str = "__old_";
 
 impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -238,6 +268,8 @@ pub struct Databases {
     buffer_pools: Arc<Mutex<HashMap<String, Pool>>>,
     /// Rows this process has buffered per database since its last drain.
     buffered: Arc<Mutex<HashMap<String, u64>>>,
+    /// Archive imports in progress, by the database each will become.
+    imports: Arc<Mutex<HashMap<String, Import>>>,
     connect_timeout: Duration,
 }
 
@@ -253,6 +285,7 @@ impl Databases {
             rollup_rebuild: Arc::new(Mutex::new(HashMap::new())),
             buffer_pools: Arc::new(Mutex::new(HashMap::new())),
             buffered: Arc::new(Mutex::new(HashMap::new())),
+            imports: Arc::new(Mutex::new(HashMap::new())),
             connect_timeout: CONNECT_TIMEOUT,
         }
     }
@@ -299,7 +332,8 @@ impl Databases {
             .join(", ")
     }
 
-    /// Every capture database on the cluster, in name order.
+    /// Every capture database on the cluster, in name order: not the gateway's
+    /// own.
     pub async fn list_names(&self) -> Result<Vec<String>, String> {
         let client = self.connect_raw("postgres").await?;
         let rows = client
@@ -313,7 +347,7 @@ impl Databases {
         Ok(rows
             .iter()
             .map(|r| r.get::<_, String>(0))
-            .filter(|n| valid_database_name(n))
+            .filter(|n| valid_database_name(n) && !self.is_gateway_database(n))
             .collect())
     }
 
@@ -428,6 +462,7 @@ impl Databases {
                     );
                 }
                 self.note_drained(name, *drained).await;
+                self.start_background_workers(name).await;
                 self.set_state(name, DbSchemaState::current()).await;
             }
             Err(e) => {
@@ -468,13 +503,26 @@ impl Databases {
             Route::Live(pool) => writer::copy_rows(&pool, rows)
                 .await
                 .map_err(WriteError::Copy),
-            Route::Buffered(pool) => match writer::buffer_rows(&pool, rows)
+            Route::Held(gate) => {
+                let swapping = gate.read().await;
+                if *swapping {
+                    return Err(WriteError::Db(DbError::Unavailable(format!(
+                        "database '{name}' is being swapped for an imported archive; retry shortly"
+                    ))));
+                }
+                let pool = self.buffer_pool(name).await.map_err(WriteError::Db)?;
+                writer::buffer_rows(&pool, rows, true)
+                    .await
+                    .map_err(WriteError::Copy)?;
+                self.note_buffered(name, rows.len()).await;
+                Ok(())
+            }
+            Route::Buffered(pool) => match writer::buffer_rows(&pool, rows, false)
                 .await
                 .map_err(WriteError::Copy)?
             {
                 Written::Buffered => {
-                    *self.buffered.lock().await.entry(name.into()).or_default() +=
-                        rows.len() as u64;
+                    self.note_buffered(name, rows.len()).await;
                     Ok(())
                 }
                 // Migrated by hand meanwhile: drain it and serve it.
@@ -488,6 +536,10 @@ impl Databases {
         }
     }
 
+    async fn note_buffered(&self, name: &str, rows: usize) {
+        *self.buffered.lock().await.entry(name.into()).or_default() += rows as u64;
+    }
+
     async fn owes_migration(&self, name: &str, failed_too: bool) -> bool {
         match self.schema_state.lock().await.get(name) {
             Some(DbSchemaState::Pending { .. } | DbSchemaState::Migrating { .. }) => true,
@@ -499,6 +551,9 @@ impl Databases {
     /// A failed database is buffered too, but with automatic migration on it
     /// goes through `pool` first, which is what retries it.
     async fn route(&self, name: &str) -> Result<Route, DbError> {
+        if let Some(gate) = self.held(name).await {
+            return Ok(Route::Held(gate));
+        }
         if !self.owes_migration(name, !self.config.auto_migrate).await {
             match self.pool(name).await {
                 Ok(pool) => return Ok(Route::Live(pool)),
@@ -506,16 +561,17 @@ impl Databases {
                 Err(_) => {}
             }
         }
+        Ok(Route::Buffered(self.buffer_pool(name).await?))
+    }
+
+    async fn buffer_pool(&self, name: &str) -> Result<Pool, DbError> {
         let mut pools = self.buffer_pools.lock().await;
-        let pool = match pools.get(name) {
-            Some(pool) => pool.clone(),
-            None => {
-                let pool = self.build_pool(name)?;
-                pools.insert(name.to_string(), pool.clone());
-                pool
-            }
-        };
-        Ok(Route::Buffered(pool))
+        if let Some(pool) = pools.get(name) {
+            return Ok(pool.clone());
+        }
+        let pool = self.build_pool(name)?;
+        pools.insert(name.to_string(), pool.clone());
+        Ok(pool)
     }
 
     /// Sweep every capture database. Spawned after the listeners bind, so a slow
@@ -603,6 +659,36 @@ impl Databases {
             behind.iter().map(|(n, _)| n.as_str()).collect();
         for (name, _) in ours.iter().filter(|(n, _)| !migrated.contains(n.as_str())) {
             self.repair_rollup_if_incomplete(name).await;
+        }
+        self.warn_of_old_captures().await;
+    }
+
+    /// An older install captured into the gateway's own database when a client
+    /// named none. Those rows are no longer served, and are left where they are.
+    async fn warn_of_old_captures(&self) {
+        let name = self.default_database();
+        let counted = async {
+            let client = self.connect_raw(name).await?;
+            let table = match schema::detect_version(&client).await? {
+                None => return Ok(0),
+                Some(0) => "public.can_frame",
+                Some(_) => "public.capture_frame",
+            };
+            let row = client
+                .query_one(&format!("SELECT count(*) FROM {table}"), &[])
+                .await
+                .map_err(|e| schema::db_error_detail(&e))?;
+            Ok::<i64, String>(row.get(0))
+        };
+        match counted.await {
+            Ok(0) => {}
+            Ok(frames) => tracing::warn!(
+                database = name,
+                frames,
+                "the gateway's own database holds frames captured before it stopped taking \
+                 captures; they are left alone and no longer served"
+            ),
+            Err(e) => tracing::warn!(database = name, "could not count old captures: {e}"),
         }
     }
 
@@ -774,6 +860,29 @@ impl Databases {
         &self.config.default_database
     }
 
+    pub fn is_gateway_database(&self, name: &str) -> bool {
+        name == self.config.default_database
+    }
+
+    /// The gateway's own database, for its keys and catalogues: created
+    /// without the capture schema.
+    pub async fn create_gateway_database(&self) -> Result<(), String> {
+        let name = self.default_database();
+        if !valid_database_name(name) {
+            return Err(format!("invalid WIRETAP_DEFAULT_DB '{name}'"));
+        }
+        let _guard = self.create_lock.lock().await;
+        if !self.database_exists(name).await? {
+            let client = self.connect_raw("postgres").await?;
+            client
+                .batch_execute(&format!("CREATE DATABASE {name}"))
+                .await
+                .map_err(|e| format!("CREATE DATABASE {name} failed: {e}"))?;
+            tracing::info!("created the gateway's database '{name}'");
+        }
+        Ok(())
+    }
+
     fn build_pool(&self, database: &str) -> Result<Pool, String> {
         let mgr = Manager::from_connect(
             self.config.pg_config(database),
@@ -906,6 +1015,9 @@ impl Databases {
         if !valid_database_name(name) {
             return Err(format!("invalid database name '{name}'"));
         }
+        if self.importing(name).await {
+            return Err(being_imported(name));
+        }
         let created = {
             let _guard = self.create_lock.lock().await;
             let exists = self.database_exists(name).await?;
@@ -933,16 +1045,15 @@ impl Databases {
         }
     }
 
-    /// Drop a capture database (admin). Refuses the default database (it holds
-    /// the API-key store). Removes the pool first, then DROP ... WITH (FORCE)
-    /// to terminate any lingering query connections. Callers must ensure it is
-    /// not actively being ingested.
+    /// Drop a capture database (admin). Removes the pool first, then
+    /// DROP ... WITH (FORCE) to terminate any lingering query connections.
+    /// Callers must ensure it is not actively being ingested.
     pub async fn delete_database(&self, name: &str) -> Result<(), String> {
         if !valid_database_name(name) {
             return Err(format!("invalid database name '{name}'"));
         }
-        if name == self.config.default_database {
-            return Err("cannot delete the default database".into());
+        if self.is_gateway_database(name) {
+            return Err(protected(name));
         }
         self.pools.lock().await.remove(name);
         self.buffer_pools.lock().await.remove(name);
@@ -968,6 +1079,9 @@ impl Databases {
         if !valid_database_name(name) {
             return Err(DbError::Refused(format!("invalid database name '{name}'")));
         }
+        if self.importing(name).await {
+            return Err(DbError::Unavailable(being_imported(name)));
+        }
         {
             let pools = self.pools.lock().await;
             if let Some(pool) = pools.get(name) {
@@ -983,6 +1097,12 @@ impl Databases {
         }
         self.recheck_if_behind(name).await;
         self.pool_if_current(name).await
+    }
+
+    /// An unpooled connection to a database that is serving, for a long read.
+    pub async fn connect_current(&self, name: &str) -> Result<tokio_postgres::Client, DbError> {
+        self.pool(name).await?;
+        Ok(self.connect_raw(name).await?)
     }
 
     async fn pool_if_current(&self, name: &str) -> Result<Pool, DbError> {
@@ -1049,6 +1169,15 @@ impl Databases {
         if !valid_database_name(name) {
             return Err(DbError::Refused(format!("invalid database name '{name}'")));
         }
+        if self.is_gateway_database(name) {
+            return Err(DbError::Refused(protected(name)));
+        }
+        if self.held(name).await.is_some() {
+            return Ok(());
+        }
+        if self.importing(name).await {
+            return Err(DbError::Unavailable(being_imported(name)));
+        }
         if !self.database_exists(name).await? {
             if !(allow_create && self.config.auto_create_databases) {
                 return Err(DbError::Refused(format!(
@@ -1059,6 +1188,311 @@ impl Databases {
         }
         self.route(name).await.map(|_| ())
     }
+
+    async fn importing(&self, name: &str) -> bool {
+        self.imports.lock().await.contains_key(name)
+    }
+
+    async fn held(&self, name: &str) -> Option<Arc<RwLock<bool>>> {
+        self.imports.lock().await.get(name)?.held.clone()
+    }
+
+    /// Seconds each import in progress has been running, by its target.
+    pub async fn import_busy(&self) -> HashMap<String, u64> {
+        let imports = self.imports.lock().await;
+        imports
+            .iter()
+            .map(|(name, import)| (name.clone(), import.since.elapsed().as_secs()))
+            .collect()
+    }
+
+    /// Claim `target` for an archive and create the staging database it is
+    /// loaded into. From here a replace holds `target`'s ingest in its buffer
+    /// and refuses its reads, until [`Self::finish_import`] or
+    /// [`Self::abandon_import`].
+    pub async fn begin_import(&self, target: &str, replace: bool) -> Result<String, ImportError> {
+        if !valid_database_name(target) {
+            return Err(ImportError::BadRequest(format!(
+                "invalid database name '{target}'"
+            )));
+        }
+        match (replace, self.database_exists(target).await?) {
+            (false, true) => {
+                return Err(ImportError::Conflict(format!(
+                    "database '{target}' already exists; import under a new name, or replace it"
+                )))
+            }
+            (true, false) => {
+                return Err(ImportError::NotFound(format!(
+                    "database '{target}' does not exist"
+                )))
+            }
+            _ => {}
+        }
+        let suffix = &secrets::random_hex()[..16];
+        let staging = format!("{STAGING_PREFIX}{suffix}");
+        let claim = self.connect_raw("postgres").await?;
+        claim
+            .execute(
+                "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+                &[&suffix],
+            )
+            .await
+            .map_err(|e| schema::db_error_detail(&e))?;
+        {
+            let states = self.schema_state.lock().await;
+            if replace && !matches!(states.get(target), Some(DbSchemaState::Current { .. })) {
+                return Err(ImportError::Conflict(format!(
+                    "database '{target}' is not at the current schema; migrate it first"
+                )));
+            }
+            let mut imports = self.imports.lock().await;
+            if imports.contains_key(target) {
+                return Err(ImportError::Conflict(being_imported(target)));
+            }
+            imports.insert(
+                target.to_string(),
+                Import {
+                    staging: staging.clone(),
+                    since: Instant::now(),
+                    held: replace.then(Default::default),
+                    _claim: claim,
+                },
+            );
+        }
+        let created = async {
+            let client = self.connect_raw("postgres").await?;
+            client
+                .batch_execute(&format!("CREATE DATABASE {staging}"))
+                .await
+                .map_err(|e| format!("CREATE DATABASE {staging} failed: {e}"))?;
+            let staged = self.connect_raw(&staging).await?;
+            schema::migrate(&staged, None).await?;
+            // Its policies would otherwise race the load's own compression and
+            // refresh; `finish_import` starts them again.
+            staged
+                .batch_execute("SELECT _timescaledb_functions.stop_background_workers()")
+                .await
+                .map_err(|e| schema::db_error_detail(&e))
+        };
+        if let Err(e) = created.await {
+            self.abandon_import(target).await;
+            return Err(ImportError::Unavailable(e));
+        }
+        Ok(staging)
+    }
+
+    /// Put a loaded staging database in its target's place: a rename for a new
+    /// one, a swap for a replace, with the ingest held meanwhile moved across
+    /// first. Abandoned if it fails before the swap; from the swap on it has
+    /// happened, and what then fails is returned as `Ok`, for the caller to
+    /// report.
+    pub async fn finish_import(&self, target: &str) -> Result<Option<String>, ImportError> {
+        let replaced = match self.swap_in(target).await {
+            Ok(replaced) => replaced,
+            Err(e) => {
+                self.abandon_import(target).await;
+                return Err(e);
+            }
+        };
+        self.start_background_workers(target).await;
+        let served = self.migrate_one(target).await;
+        if let Some(old) = replaced {
+            if let Err(e) = self.drop_database(&old).await {
+                tracing::warn!("{e}; the next start drops it");
+            }
+        }
+        Ok(served.err().map(|e| {
+            format!(
+                "'{target}' now holds the archive, but is not serving yet: {e}. It is retried; \
+                 or migrate it from the Databases page"
+            )
+        }))
+    }
+
+    /// The name the replaced database now has, for a replace.
+    async fn swap_in(&self, target: &str) -> Result<Option<String>, ImportError> {
+        let (staging, held) = {
+            let imports = self.imports.lock().await;
+            let import = imports
+                .get(target)
+                .ok_or_else(|| ImportError::Unavailable(format!("no import into '{target}'")))?;
+            (import.staging.clone(), import.held.clone())
+        };
+        let Some(gate) = held else {
+            self.rename(&[(&staging, target)]).await?;
+            self.imports.lock().await.remove(target);
+            return Ok(None);
+        };
+        *gate.write().await = true;
+        self.pools.lock().await.remove(target);
+        self.buffer_pools.lock().await.remove(target);
+        let moved = async {
+            let from = self.connect_raw(target).await?;
+            let to = self.connect_raw(&staging).await?;
+            writer::move_pending(&from, &to).await
+        };
+        let moved = moved.await?;
+        let old = staging.replace(STAGING_PREFIX, REPLACED_PREFIX);
+        self.rename(&[(target, &old), (&staging, target)]).await?;
+        // Served once the rows moved across are drained into it.
+        self.set_state(target, DbSchemaState::migrating()).await;
+        self.imports.lock().await.remove(target);
+        tracing::info!(
+            database = target,
+            held = moved,
+            "replaced by an imported archive"
+        );
+        Ok(Some(old))
+    }
+
+    /// Undo [`Self::begin_import`]: drop the staging database, and for a
+    /// replace store the ingest held meanwhile in the database it was held for.
+    pub async fn abandon_import(&self, target: &str) {
+        let Some((staging, held)) = self
+            .imports
+            .lock()
+            .await
+            .get(target)
+            .map(|i| (i.staging.clone(), i.held.clone()))
+        else {
+            return;
+        };
+        if let Some(gate) = &held {
+            *gate.write().await = true;
+        }
+        self.imports.lock().await.remove(target);
+        if held.is_some() {
+            match self.drain(target).await {
+                Ok(drained) => self.note_drained(target, drained).await,
+                Err(e) => {
+                    tracing::warn!(
+                        database = target,
+                        "could not drain the ingest held for an import: {e}"
+                    );
+                    self.set_state(
+                        target,
+                        DbSchemaState::Pending {
+                            version: schema::SCHEMA_VERSION,
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        if let Err(e) = self.drop_database(&staging).await {
+            tracing::warn!("{e}; the next start drops it");
+        }
+    }
+
+    /// Rename databases in one transaction, so a swap happens whole or not at
+    /// all. Nothing may be connected to them, the TimescaleDB scheduler
+    /// included, and it can reconnect between the terminate and the rename.
+    async fn rename(&self, renames: &[(&str, &str)]) -> Result<(), ImportError> {
+        let names: Vec<&str> = renames.iter().map(|(from, _)| *from).collect();
+        let statements: String = renames
+            .iter()
+            .map(|(from, to)| format!("ALTER DATABASE {from} RENAME TO {to};"))
+            .collect();
+        let mut attempts = 0;
+        loop {
+            let client = self.connect_raw("postgres").await?;
+            client
+                .execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                      WHERE datname = ANY($1) AND pid <> pg_backend_pid()",
+                    &[&names],
+                )
+                .await
+                .map_err(|e| schema::db_error_detail(&e))?;
+            match client
+                .batch_execute(&format!("BEGIN; {statements} COMMIT"))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) if e.code() == Some(&SqlState::OBJECT_IN_USE) && attempts < 5 => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(e) if e.code() == Some(&SqlState::DUPLICATE_DATABASE) => {
+                    return Err(ImportError::Conflict(schema::db_error_detail(&e)))
+                }
+                Err(e) => return Err(ImportError::Unavailable(schema::db_error_detail(&e))),
+            }
+        }
+    }
+
+    /// Its TimescaleDB jobs run only under its scheduler, which an import stops
+    /// while it loads. Asked on every migration too, so a gateway that stopped
+    /// after the swap and before this still restarts it.
+    async fn start_background_workers(&self, name: &str) {
+        let started = async {
+            self.connect_raw(name)
+                .await?
+                .batch_execute("SELECT _timescaledb_functions.start_background_workers()")
+                .await
+                .map_err(|e| schema::db_error_detail(&e))
+        };
+        if let Err(e) = started.await {
+            tracing::warn!(
+                database = name,
+                "could not start its background workers: {e}"
+            );
+        }
+    }
+
+    async fn drop_database(&self, name: &str) -> Result<(), String> {
+        self.connect_raw("postgres")
+            .await?
+            .batch_execute(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+            .await
+            .map_err(|e| {
+                format!(
+                    "DROP DATABASE {name} failed: {}",
+                    schema::db_error_detail(&e)
+                )
+            })
+    }
+
+    /// Drop the staging and replaced databases an import left when the gateway
+    /// stopped partway, but not one another gateway on the cluster is running:
+    /// its lock is held from before it creates them, and taken here before
+    /// they are dropped. A replace's held ingest is in the database it was
+    /// held for, which the sweep drains.
+    pub async fn drop_import_leftovers(&self) -> Result<(), String> {
+        let client = self.connect_raw("postgres").await?;
+        let rows = client
+            .query(
+                "SELECT datname FROM pg_database \
+                  WHERE starts_with(datname, $1) OR starts_with(datname, $2)",
+                &[&STAGING_PREFIX, &REPLACED_PREFIX],
+            )
+            .await
+            .map_err(|e| format!("database list failed: {e}"))?;
+        for name in rows.iter().map(|r| r.get::<_, String>(0)) {
+            let suffix = name
+                .strip_prefix(STAGING_PREFIX)
+                .or_else(|| name.strip_prefix(REPLACED_PREFIX))
+                .unwrap_or_default();
+            let abandoned: bool = client
+                .query_one(
+                    "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
+                    &[&suffix],
+                )
+                .await
+                .map_err(|e| schema::db_error_detail(&e))?
+                .get(0);
+            if abandoned {
+                self.drop_database(&name).await?;
+                tracing::warn!("dropped '{name}', left by an import the gateway stopped partway");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn being_imported(name: &str) -> String {
+    format!("database '{name}' is being imported from an archive")
 }
 
 #[cfg(test)]
@@ -1116,10 +1550,10 @@ pub(crate) mod tests {
     /// runs race to create the role the schema grants to; and a sweep re-applies
     /// the schema to every current database on the cluster, which re-stamps one
     /// caught between its creation and `then`.
-    static CLUSTER: Mutex<()> = Mutex::const_new(());
+    pub(crate) static CLUSTER: Mutex<()> = Mutex::const_new(());
 
     /// A new capture database, with `then` run on it.
-    async fn fresh_database(prefix: &str, then: &str) -> String {
+    pub(crate) async fn fresh_database(prefix: &str, then: &str) -> String {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1887,6 +2321,120 @@ pub(crate) mod tests {
             ..Databases::new(Arc::new(config_at(port, true)))
         };
         (dbs, server)
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_failed_replace_keeps_the_original_and_stores_the_ingest_held_meanwhile() {
+        let name = fresh_database("unreplaced", "").await;
+        let dbs = live_databases(false);
+        dbs.migrate_one(&name).await.unwrap();
+        dbs.write_rows(&name, &frames(0x7C0, 1_700_000_000_000_000, 4))
+            .await
+            .unwrap();
+        let staging = dbs.begin_import(&name, true).await.unwrap();
+        dbs.write_rows(&name, &frames(0x7C1, 1_700_000_000_000_000, 5))
+            .await
+            .unwrap();
+        assert_eq!(archived(&name, 0x7C1).await, (0, 0), "not held");
+        let refused = dbs.pool(&name).await.err().unwrap().to_string();
+        assert!(refused.contains("being imported"), "{refused}");
+        let again = dbs.begin_import(&name, true).await;
+        assert!(matches!(again, Err(ImportError::Conflict(_))), "{again:?}");
+
+        dbs.abandon_import(&name).await;
+        assert!(!dbs.database_exists(&staging).await.unwrap());
+        assert_eq!(archived(&name, 0x7C0).await, (4, 4));
+        assert_eq!(archived(&name, 0x7C1).await, (5, 5));
+        assert!(!buffer_exists(&name).await);
+        assert!(dbs.pool(&name).await.is_ok());
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn a_start_drops_what_an_interrupted_import_left_and_nothing_else() {
+        let stamp = std::process::id();
+        let left = [format!("__import_t{stamp}"), format!("__old_t{stamp}")];
+        let kept = [
+            format!("kept__old_t{stamp}"),
+            format!("__import_busy{stamp}"),
+            format!("__old_busy{stamp}"),
+        ];
+        for name in left.iter().chain(&kept) {
+            run("postgres", &format!("CREATE DATABASE {name}")).await;
+        }
+        let dbs = live_databases(false);
+        // Another gateway's import, between its connections; and a connection
+        // to a leftover, as its TimescaleDB scheduler is after a restart.
+        let running = dbs.connect_raw("postgres").await.unwrap();
+        running
+            .execute(
+                "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+                &[&format!("busy{stamp}")],
+            )
+            .await
+            .unwrap();
+        let stray = dbs.connect_raw(&left[0]).await.unwrap();
+        {
+            let _cluster = CLUSTER.lock().await;
+            dbs.drop_import_leftovers().await.unwrap();
+        }
+        for name in &left {
+            assert!(!dbs.database_exists(name).await.unwrap(), "{name}");
+        }
+        drop((running, stray));
+        for name in &kept {
+            assert!(dbs.database_exists(name).await.unwrap(), "{name}");
+            dbs.drop_database(name).await.unwrap();
+        }
+    }
+
+    /// A fresh install's, and then an older install's that captured into it.
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see live_databases"]
+    async fn the_gateways_own_database_holds_no_captures_and_old_ones_are_counted_not_touched() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut config = live_databases(false).config.as_ref().clone();
+        config.default_database = format!("gateway_{stamp}");
+        let dbs = Databases::new(Arc::new(config));
+        let own = dbs.default_database().to_string();
+        dbs.create_gateway_database().await.unwrap();
+        assert_eq!(version_on_disk(&dbs, &own).await, None);
+        assert!(!dbs.list_names().await.unwrap().contains(&own));
+
+        let old_shape = dbs.connect_raw(&own).await.unwrap();
+        schema::migrate(&old_shape, None).await.unwrap();
+        run(
+            &own,
+            "INSERT INTO public.capture_frame (ts, protocol, id, flags, dlc, data_bytes, bus)
+             SELECT to_timestamp(1700000000 + i), 'can', 2001, 0, 1, '\\x01', 0
+               FROM generate_series(1, 3) i",
+        )
+        .await;
+        crate::keys::KeyStore::new(dbs.clone(), Some("bootstrap"))
+            .bootstrap()
+            .await
+            .unwrap();
+        let logs = crate::logbuf::LogBuffer::new(64);
+        let _logging =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
+        dbs.warn_of_old_captures().await;
+        let warned = logs.snapshot(Some(tracing::Level::WARN), 64);
+        assert!(
+            warned
+                .iter()
+                .any(|r| r.message.contains("no longer served") && r.fields.contains("frames=3")),
+            "{warned:?}"
+        );
+        assert_eq!(archived(&own, 2001).await, (3, 3));
+        assert!(!dbs.schema_states().await.contains_key(&own));
+        assert!(dbs.ensure_database(&own, true).await.is_err());
+        run("postgres", &format!("DROP DATABASE {own} WITH (FORCE)")).await;
     }
 
     pub(crate) async fn mark_migrating(dbs: &Databases, name: &str) {

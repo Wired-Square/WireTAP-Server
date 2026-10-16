@@ -113,7 +113,7 @@ export function MigrationProgressView({ db }: { db: DatabaseEntry }) {
  * `pending` database waits for an operator, so it is not polled for.
  */
 export function isBusy(d: DatabaseEntry, autoMigrate: boolean): boolean {
-  if (d.rollup_busy_secs !== null || d.schema_state === "migrating") return true;
+  if (d.rollup_busy_secs !== null || d.import_busy_secs !== null || d.schema_state === "migrating") return true;
   return autoMigrate && (d.schema_state === "pending" || d.schema_state === "failed");
 }
 

@@ -16,4 +16,5 @@ pub struct AppState {
     pub secret_files: SecretFiles,
     /// Held for the whole of a rotation, so two never interleave.
     pub rotation: tokio::sync::Mutex<()>,
+    pub exports: crate::archive::Links,
 }
