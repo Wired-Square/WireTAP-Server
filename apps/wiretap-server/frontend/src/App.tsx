@@ -9,10 +9,8 @@ import {
   About,
   AccountSettings,
   AuditLog,
-  Button,
   Chrome,
   Logs,
-  PasswordSettings,
   TabPanel,
   Tabs,
   allows,
@@ -24,7 +22,7 @@ import { Capture } from "./Capture";
 
 const TABS = [
   { id: "capture", label: "Capture", needs: "viewer" },
-  { id: "accounts", label: "Accounts", needs: "admin" },
+  { id: "users", label: "Users", needs: "viewer" },
   { id: "audit", label: "Audit log", needs: "admin" },
   { id: "logs", label: "Logs", needs: "admin" },
   { id: "about", label: "About", needs: "admin" },
@@ -32,14 +30,17 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-const opened = (): TabId => TABS.find((t) => `#${t.id}` === window.location.hash)?.id ?? "capture";
+const [openedTab, openedView] = window.location.hash.slice(1).split("/");
+const opened = (): TabId => TABS.find((t) => t.id === openedTab)?.id ?? "capture";
 
 export function App() {
   const { me } = useSession();
   const [tab, setTab] = createSignal<TabId>(opened());
-  const choose = (id: TabId) => {
+  const [view, setView] = createSignal<string | undefined>(openedView);
+  const choose = (id: TabId, to?: string) => {
     setTab(id);
-    history.replaceState(null, "", `#${id}`);
+    setView(to);
+    history.replaceState(null, "", to ? `#${id}/${to}` : `#${id}`);
   };
 
   return (
@@ -51,30 +52,21 @@ export function App() {
           return "enabled" in me ? me : undefined;
         };
         const offered = createMemo(() =>
-          TABS.filter((t) => allows(who().role, t.needs) && (t.id !== "accounts" || account())),
+          TABS.filter((t) => allows(who().role, t.needs) && (t.id !== "users" || account())),
         );
         const shown = createMemo(() => (offered().some((t) => t.id === tab()) ? tab() : "capture"));
 
         return (
           <Chrome
             nav={<Tabs aria-label="Sections" tabs={offered()} selected={shown()} onChange={choose} />}
-            changePassword={(close) => (
-              <PasswordSettings
-                actions={
-                  <Button tone="plain" onClick={close}>
-                    Close
-                  </Button>
-                }
-              />
-            )}
           >
             <TabPanel id="capture" selected={shown()}>
               <Capture me={who()} />
             </TabPanel>
             <Show when={account()}>
               {(user) => (
-                <TabPanel id="accounts" selected={shown()}>
-                  <AccountSettings me={user()} />
+                <TabPanel id="users" selected={shown()}>
+                  <AccountSettings me={user()} view={view()} onView={(to) => choose("users", to)} />
                 </TabPanel>
               )}
             </Show>

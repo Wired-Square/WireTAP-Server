@@ -22,7 +22,8 @@ render(
         <SignIn
           help={
             <p class="locked-out">
-              Locked out? Another administrator can reset your password, or a shell on the box can,
+              Locked out, or lost your authenticator and recovery codes? Another administrator can
+              reset your password, which clears your second factors too, or a shell on the box can,
               over this UI's control socket.
             </p>
           }
