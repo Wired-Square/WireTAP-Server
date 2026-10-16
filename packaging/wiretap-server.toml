@@ -70,9 +70,10 @@
 # here.
 # api_key = ""
 
-# Target capture database. Empty uses the gateway's default; a name it does not
-# know is created where the gateway permits it, so a new server can provision
-# its own on first connect.
+# Target capture database. The gateway has no default: empty works only with a
+# key pinned to a database, and the gateway refuses it otherwise. A name it does
+# not know is created where the gateway permits it, so a new server can
+# provision its own on first connect.
 # database = ""
 
 # What the gateway calls this server, and keys its catalogue assignments by.

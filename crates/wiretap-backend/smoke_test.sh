@@ -251,13 +251,13 @@ curl -fsS -H "$A" "$BASE/v1/admin/catalogs/$cat_sha" | python3 -c 'import sys,js
 check "the stored catalogue comes back byte for byte" $?
 cat_device 'assert (d["bus"],d["database"],d["last_seen_us"],d["active"])==(None,None,None,None) and d["assignment"]["blob_sha"]=="'"$cat_sha"'",d'
 check "daemons lists it assigned but never seen" $?
-PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ADMIN_KEY" "$CAT_DAEMON" "$cat_sha" "$CAT_CRLF" <<'PYEOF'
+PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ADMIN_KEY" "$CAT_DAEMON" "$cat_sha" "$CAT_CRLF" "$DB" <<'PYEOF'
 import struct, sys
 from test_ingest_client import ReferenceClient, frame_message
-host, port, token, daemon, sha, content = sys.argv[1:]
+host, port, token, daemon, sha, content, db = sys.argv[1:]
 c = ReferenceClient(host, int(port))
 name = b"/dev/ttySMOKE"
-hello = (b"WTAP" + bytes([3, 0, len(token)]) + token.encode() + b"\0"
+hello = (b"WTAP" + bytes([3, 0, len(token)]) + token.encode() + bytes([len(db)]) + db.encode()
          + bytes([len(daemon)]) + daemon.encode() + bytes([1, 7, len(name)]) + name)
 c.send_raw(frame_message(0x01, hello))
 mtype, ack = c.recv_message()
@@ -277,13 +277,13 @@ mtype, cat = c.recv_message()
 assert mtype == 0x84 and cat[0] == 1, cat[:1].hex()
 PYEOF
 check "a v3 HELLO gets its assignment, and CATALOG serves the blob byte for byte" $?
-PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ADMIN_KEY" "$CAT_DAEMON" "$cat_sha" "$BASE" <<'PYEOF'
+PYTHONPATH="$TOOLS" python3 - "${INGEST%:*}" "${INGEST##*:}" "$ADMIN_KEY" "$CAT_DAEMON" "$cat_sha" "$BASE" "$DB" <<'PYEOF'
 import json, sys, urllib.request
 from test_ingest_client import ReferenceClient, frame_message
-host, port, token, daemon, sha, base = sys.argv[1:]
+host, port, token, daemon, sha, base, db = sys.argv[1:]
 c = ReferenceClient(host, int(port))
 name = b"/dev/ttySMOKE"
-hello = (b"WTAP" + bytes([3, 0, len(token)]) + token.encode() + b"\0"
+hello = (b"WTAP" + bytes([3, 0, len(token)]) + token.encode() + bytes([len(db)]) + db.encode()
          + bytes([len(daemon)]) + daemon.encode() + bytes([1, 7, len(name)]) + name)
 c.send_raw(frame_message(0x01, hello))
 assert c.recv_message()[0] == 0x81

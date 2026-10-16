@@ -19,7 +19,7 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
     answered malformed, since no retry would store them.
   - **HTTP API** (8423) — the analytical query surface the desktop uses, plus
     events (a user's annotations on the archive), capture import, database
-    management and health.
+    management, export and import, and health.
   - **Admin UI** at `/admin` — API keys, databases, live ingest sessions,
     capture daemons and their catalogues, activity, the recent server log,
     health.
@@ -91,8 +91,8 @@ route; a malformed header from the console is a 400. The TCP listener ignores
 the header and still needs a key.
 
 Issuing or destroying a credential (creating, rotating or revoking a key, and
-rotating either secret) also needs the console to say its user confirmed their
-password in the last five minutes (`reauth=` in the header, the chassis's
+rotating either secret), and deleting or replacing a database, also needs the
+console to say its user confirmed their password in the last five minutes (`reauth=` in the header, the chassis's
 window). Otherwise it is a 403, `this needs the password confirmed in the last
 5 minutes`, as the console's own such routes answer: confirm the password in the
 console and try again. Editing, disabling and enabling a key are not asked, and
@@ -197,14 +197,80 @@ not buffered as ingest is: it is a 409 saying so, until the database is
 migrated.
 
 A database is created when: an admin creates it in the UI / API; an ingest
-client names an unknown one in its HELLO (auto-create, when enabled); or a
-capture import targets one with `?create=true`. Auto-create is gated by
-`WIRETAP_AUTO_CREATE` (default on).
+client names an unknown one in its HELLO (auto-create, when enabled); a
+capture import targets one with `?create=true`; or an archive is imported as a
+new one. Auto-create is gated by `WIRETAP_AUTO_CREATE` (default on).
 
-An admin can **delete** a capture database (UI Delete button or
+**An ingest client must name its database**, unless its key is pinned to one.
+There is no default: a HELLO that names none, from a key with no pin, is
+refused as a bad database (status 3), and the gateway logs why. Every capture
+daemon's `[forward] database` must be set, or its key pinned.
+
+An admin can **delete** a capture database (its ⋮ menu, or
 `DELETE /v1/databases/{db}`), after confirmation. It's refused while a device is
-actively ingesting into it or migrating (409), and for the default/meta database
-(`WIRETAP_DEFAULT_DB`, which holds the API-key store).
+actively ingesting into it, migrating or being imported (409).
+
+### The gateway's own database
+
+`WIRETAP_DEFAULT_DB` (`wiretap`) is the gateway's own database: it holds
+`wiretap_meta`, the API keys and the daemons' catalogues, and nothing else. It
+is not a capture database. It is not listed, takes no captures, and every route
+that names a database refuses it with a 403 (`'wiretap' is the gateway's own
+database …`), as do create, delete, migrate, export, import and ingest. A fresh
+install creates it without the capture schema. The variable keeps its name.
+
+A gateway up to 0.1.12 captured into it whatever a client sent without naming
+a database. Those rows are left where they are and no longer served,
+and each start logs how many there are (`the gateway's own database holds
+frames captured before …`, with `frames=`).
+
+**Before upgrading a deployment from 0.1.12 or older**, count the frames its own
+database holds, and check that every capture daemon names its database:
+
+```bash
+docker compose exec timescaledb psql -U postgres -d wiretap -tAc \
+  "SELECT count(*) FROM public.capture_frame"
+```
+
+A count above zero is captures the upgrade stops serving, and the gateway
+cannot export them: decide what to do with them first. An error that
+`capture_frame` does not exist means there are none, unless the database
+predates schema v1, whose frames are in `can_frame`. A daemon whose
+`[forward] database` is empty, with a key that is not pinned, is refused from
+the upgrade on, and keeps its frames in its disk cache until it names one.
+
+### Export and import
+
+Export writes a capture database, or a window of it, as an archive: one
+gzip-compressed file of its frames and events, read from one snapshot while
+ingest carries on. Import makes a new database from an archive, or replaces an
+existing one with it. The format is [docs/archive.md](../../docs/archive.md).
+All of it is the admin role's; behind a console, replacing needs a recently
+confirmed password, and exporting or importing as new does not.
+
+| Route | |
+| --- | --- |
+| `GET /v1/databases/{db}/export/estimate?from_us=&to_us=` | The database's bounds (`min_ts_us`, `max_ts_us`, across frames and events), and what an export of the window would hold: `frames` (from the hourly rollup, so to the hour), `events`, `approx_bytes`, and an exact `empty` |
+| `POST /v1/databases/{db}/export` | Body `{}` for the whole database, or `{"from_us", "to_us"}` for `[from, to)`. Answers `{"url"}`: a single-use link, good for 60 s, that a browser fetches without a key. An empty window is a 400 |
+| `GET /v1/exports/{token}` | The archive, streamed, as `<db>.wtar` or `<db>_<from>_<to>.wtar` |
+| `POST /v1/databases/{db}/import` | The archive as the body, into a new database `{db}`: 409 if it exists |
+| `POST /v1/databases/{db}/import?replace=true` | The archive in place of `{db}`: 404 if it does not exist, 409 unless it is at the current schema |
+
+An import answers with what it loaded: `{"database", "replaced", "source",
+"window", "rows": {"capture_frame", "events"}, "elapsed_ms", "attention"}`.
+`attention` is null, or says why the database is in place but not serving yet:
+its migration after the swap failed, and is retried. A bad archive is
+a 400 saying why, read to its end first so the client sees it. Nothing is
+touched until the archive has loaded and checked out in a staging database.
+While a replace runs, the database refuses reads and holds its ingest, which
+lands in the new database after the swap; a windowed archive leaves it holding
+only that window. A gateway stopped partway drops the staging database at its
+next start and stores the held ingest in the database it was held for.
+
+Measured on the gateway's host build against TimescaleDB 2.29.2: a million
+frames over 14 days (90% CAN, 10% Modbus, counting 8-byte payloads; the older
+half compressed) exported in 0.7 s to a 7.5 MB archive, and imported as new in
+2.9 s. The same with random 8-byte payloads is about 15 bytes a frame.
 
 ## Capture daemons and their catalogues
 
@@ -281,7 +347,7 @@ for, and `auto_migrate`.
 | `WIRETAP_ADMIN_KEY` | — | Break-glass admin key |
 | `WIRETAP_PG_PASSWORD_FILE` | — | Read the Postgres password from this file, where a rotation saves the new one. `POSTGRES_PASSWORD` wins over it |
 | `WIRETAP_ADMIN_KEY_FILE` | — | The same for the admin key. `WIRETAP_ADMIN_KEY` wins over it |
-| `WIRETAP_DEFAULT_DB` | `wiretap` | Default capture database |
+| `WIRETAP_DEFAULT_DB` | `wiretap` | The [gateway's own database](#the-gateways-own-database): keys and catalogues, never captures |
 | `WIRETAP_AUTO_CREATE` | `true` | Allow ingest/import to auto-create databases |
 | `WIRETAP_AUTO_MIGRATE` | `false` | Off, a capture database behind the schema waits for **Migrate now**, refusing reads and buffering ingest; on, every one is migrated on start. A new database is initialised either way |
 | `WIRETAP_BASE_PATH` | — | Serve every HTTP route under this prefix, e.g. `/apps/wiretap-gateway` gives `/apps/wiretap-gateway/v1/…` and `/apps/wiretap-gateway/admin/`; anything outside it is a 404. Plain path segments only; empty serves at the root |
@@ -372,7 +438,7 @@ docker compose exec timescaledb psql -U postgres -tAc \
 If it is older, move the engine **first, under the gateway you already run**:
 pin `timescale/timescaledb:2.29.2-pg16` (what the schema was measured on) in
 the compose, recreate the stack, then in *every* database that carries the
-extension — `postgres`, `template1`, the default database and each capture
+extension — `postgres`, `template1`, the gateway's own database and each capture
 database — run `ALTER EXTENSION timescaledb UPDATE` with `psql -X`, and restart
 the gateway. Its start re-applies the schema through TimescaleDB functions,
 which refuse a version mismatch until that `ALTER` has run. TimescaleDB does

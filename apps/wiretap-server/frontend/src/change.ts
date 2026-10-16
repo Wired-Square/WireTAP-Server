@@ -34,7 +34,7 @@ export const GROUPS: Group[] = [
         key: "forward.database",
         label: "Database",
         kind: "text",
-        hint: "Empty is the gateway's default database.",
+        hint: "Required unless the gateway key is pinned to a database.",
       },
       { key: "forward.api_key", label: "Gateway key", kind: "secret" },
     ],

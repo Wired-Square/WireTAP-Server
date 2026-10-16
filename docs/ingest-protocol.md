@@ -83,10 +83,16 @@ record's transmitted bit, and the CAN and Modbus columns NULL. The id is not
 the record's read sequence: compression segments by protocol and id, and an id
 per read would make every row its own segment.
 
+A `HELLO` must name its database unless its key is pinned to one: the gateway
+has no default, and its own database (`WIRETAP_DEFAULT_DB`, which holds its
+keys and catalogues) takes no captures.
+
 The gateway refuses a HELLO `status = 4` (unavailable) when it cannot serve
-the database yet: PostgreSQL is down, or the database's schema is being
-checked or migrated. `status = 3` (bad database) is only for an invalid name,
-or a database that does not exist while auto-create is off.
+the database yet: PostgreSQL is down, the database's schema is being checked
+or migrated, or a new database of that name is being imported from an
+archive. `status = 3` (bad database) is for an invalid name, no name from a
+key with no pin, the gateway's own database, or a database that does not exist
+while auto-create is off.
 
 The gateway ACKs a batch it fails to write `status = 3` (overloaded), unless
 PostgreSQL refused the rows themselves with a data exception or an integrity

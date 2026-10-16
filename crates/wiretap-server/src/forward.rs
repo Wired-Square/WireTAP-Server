@@ -417,6 +417,16 @@ impl BatchSink for ForwardSink {
                     self.version, ack.accepted_version
                 ),
                 proto::HELLO_UNAVAILABLE => ": the gateway's database is not available yet".into(),
+                proto::HELLO_BAD_DATABASE if self.database.is_empty() => {
+                    ": this server names no database, and the gateway key is not pinned to a \
+                     capture database; set [forward] database"
+                        .into()
+                }
+                proto::HELLO_BAD_DATABASE => format!(
+                    ": the gateway refused database {}: not one of its capture databases, or \
+                     missing while it does not create them",
+                    self.database
+                ),
                 _ => String::new(),
             };
             return Err(SinkError::Failed(format!(
@@ -1080,6 +1090,27 @@ mod tests {
         assert!(err.to_string().contains("HELLO rejected"), "{err}");
         assert!(err.to_string().contains("status=1"), "{err}");
         let _ = gateway.await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_database_says_whether_one_was_named() {
+        for (database, says) in [
+            ("", "names no database"),
+            ("wiretap", "refused database wiretap"),
+        ] {
+            let (port, gateway) = fake_gateway(Script {
+                hello_status: proto::HELLO_BAD_DATABASE,
+                ..Script::default()
+            })
+            .await;
+            let err = sink(port, database)
+                .connect()
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("status=3") && err.contains(says), "{err}");
+            let _ = gateway.await;
+        }
     }
 
     #[tokio::test]

@@ -7,6 +7,24 @@ All notable changes to this project are documented here. Entries go under
 
 ### Added
 
+- **Export a capture database**, whole or a window `[from, to)`, as an archive
+  (`.wtar`, [docs/archive.md](docs/archive.md)): a magic and format version,
+  then a gzip stream of a JSON manifest and each table's rows as PostgreSQL
+  binary COPY, read from one `REPEATABLE READ` snapshot while ingest carries
+  on. `GET /v1/databases/{db}/export/estimate` gives the database's bounds and
+  an estimate of a window; `POST /v1/databases/{db}/export` answers a
+  single-use link, good for 60 s, that the browser downloads from without a
+  key. A million frames export in under a second to 7.5 MB.
+- **Import an archive** as a new database (`POST /v1/databases/{db}/import`),
+  or in place of one (`?replace=true`, which behind a console needs a recently
+  confirmed password). It loads into a staging database, checks it, rebuilds
+  its rollup and compresses its older chunks, then renames it into place or
+  swaps it with the old one in one transaction. A failed import changes
+  nothing. During a replace the database refuses reads and holds its ingest,
+  which lands in the new one after the swap; a windowed archive leaves only its
+  window. A gateway stopped partway drops `__import_*` and `__old_*` databases
+  at its next start. Only an archive at the gateway's own capture schema is
+  taken.
 - **Behind an ApplianceOS console, issuing or destroying a credential needs a
   recent password.** Creating, rotating or revoking a key, and rotating either
   secret, is refused (403, `this needs the password confirmed in the last 5
@@ -35,9 +53,29 @@ All notable changes to this project are documented here. Entries go under
   button names the act, and a refusal stays in the dialog. The ⋮ menu opens in
   the top layer (no longer clipped by a table), flips above near the bottom of
   the window, takes Home and End, and says why an item is unavailable.
+- **Each database has a ⋮ menu** on the Databases tab: Export… (whole, the last
+  24 hours, 7 or 30 days, a calendar day or month, or a custom range, all within
+  the database's own bounds, with an estimate before it starts), Import
+  (replace)… and Delete…. **Import…** beside Create makes a new database from an
+  archive. An upload shows its progress, the dialog shows what the archive
+  holds before it is sent, and replacing with a windowed archive says the
+  database will hold only that window.
 
 ### Changed
 
+- **`WIRETAP_DEFAULT_DB` (`wiretap`) is the gateway's own database, and takes
+  no captures.** It holds the keys and catalogues only: it is not listed, every
+  route naming a database refuses it (403), and so do create, delete, migrate,
+  export, import and ingest. A fresh install creates it without the capture
+  schema. **An ingest client must name its database** unless its key is pinned
+  to one: a HELLO naming none was taken into `wiretap` and is now refused as a
+  bad database (status 3), and the capture server's log says why. Capture rows
+  an older gateway put in `wiretap` are left alone and no longer served; each
+  start logs how many. Before upgrading, count them and set every daemon's
+  `[forward] database` (see the gateway README). `/v1/health`'s `schema` is
+  `unknown` until a capture database exists.
+- **Deleting a database behind a console needs a recently confirmed password**,
+  as issuing or destroying a credential does.
 - **Revoke and Restore are now Disable and Enable**, at
   `/v1/admin/keys/{id}/disable` and `/enable`, and a key's `revoked` is now
   `disabled`; the column is renamed in place on start. **Revoke** now deletes a

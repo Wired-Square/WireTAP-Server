@@ -306,8 +306,8 @@ impl IngestServer {
             return Err(HELLO_BAD_AUTH);
         }
 
-        // Resolve the target database: explicit > key pin > server default.
-        // A pinned key may not name any other database.
+        // The database named, or else the key's pin. A pinned key may not name
+        // any other database.
         let database = match (&info.database_pin, hello.database.as_str()) {
             (Some(pin), "") => pin.clone(),
             (Some(pin), requested) if requested != pin => {
@@ -318,7 +318,14 @@ impl IngestServer {
                 return Err(HELLO_BAD_AUTH);
             }
             (Some(pin), _) => pin.clone(),
-            (None, "") => self.dbs.default_database().to_string(),
+            (None, "") => {
+                tracing::warn!(
+                    "ingest client {peer} key '{}' named no database, and the gateway has no \
+                     default: name one in the client's config, or pin the key to one",
+                    info.name
+                );
+                return Err(HELLO_BAD_DATABASE);
+            }
             (None, requested) => requested.to_string(),
         };
 
@@ -761,7 +768,7 @@ mod tests {
 
         let server = server(unreachable_databases(true));
         let session = Session {
-            database: "wiretap".into(),
+            database: "archive".into(),
             id: 0,
             daemon_id: String::new(),
             devices: Vec::new(),
@@ -780,6 +787,15 @@ mod tests {
     async fn an_invalid_database_name_at_hello_is_a_bad_database() {
         let status = hello_status(unreachable_databases(true), "no spaces").await;
         assert_eq!(status, HELLO_BAD_DATABASE);
+    }
+
+    /// Before anything asks PostgreSQL, which is down here.
+    #[tokio::test]
+    async fn a_hello_naming_no_database_or_the_gateways_own_is_a_bad_database() {
+        for database in ["", "wiretap"] {
+            let status = hello_status(unreachable_databases(true), database).await;
+            assert_eq!(status, HELLO_BAD_DATABASE, "{database:?}");
+        }
     }
 
     #[tokio::test]

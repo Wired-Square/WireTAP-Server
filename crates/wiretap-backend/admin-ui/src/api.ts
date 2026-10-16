@@ -21,35 +21,145 @@ const API_BASE = (() => {
   return admin < 0 ? "" : path.slice(0, admin);
 })();
 
+/** A path on the gateway, as the browser reaches it. */
+export function apiUrl(path: string): string {
+  return API_BASE + path;
+}
+
+function authorisation(): Record<string, string> {
+  const key = sessionStorage.getItem(KEY_STORAGE);
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
+function refusal(status: number, text: string): ApiError {
+  let message = `${status}`;
+  let body: unknown = null;
+  try {
+    body = JSON.parse(text);
+    message = (body as { error?: string }).error ?? message;
+  } catch {
+    /* non-JSON error body */
+  }
+  if (status === 403 && message.startsWith(STALE_PROOF)) {
+    message += ". Re-authenticate in the console, then try again.";
+  }
+  return new ApiError(status, message, body);
+}
+
 export async function api<T>(
   path: string,
   options: { method?: string; body?: unknown } = {},
 ): Promise<T> {
-  const headers: Record<string, string> = {};
-  const key = sessionStorage.getItem(KEY_STORAGE);
-  if (key) headers["Authorization"] = `Bearer ${key}`;
+  const headers = authorisation();
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
-  const resp = await fetch(API_BASE + path, {
+  const resp = await fetch(apiUrl(path), {
     method: options.method ?? "GET",
     headers,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
   });
-  if (!resp.ok) {
-    let message = `${resp.status}`;
-    let body: unknown = null;
-    try {
-      body = await resp.json();
-      message = (body as { error?: string }).error ?? message;
-    } catch {
-      /* non-JSON error body */
-    }
-    if (resp.status === 403 && message.startsWith(STALE_PROOF)) {
-      message += ". Re-authenticate in the console, then try again.";
-    }
-    throw new ApiError(resp.status, message, body);
-  }
+  if (!resp.ok) throw refusal(resp.status, await resp.text());
   if (resp.status === 204) return undefined as T;
   return resp.json() as Promise<T>;
+}
+
+/** POST a file, reporting bytes sent: fetch cannot report an upload's progress. */
+export function upload<T>(
+  path: string,
+  file: Blob,
+  onProgress: (sent: number, total: number) => void,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", apiUrl(path));
+    for (const [name, value] of Object.entries(authorisation())) xhr.setRequestHeader(name, value);
+    xhr.setRequestHeader("Content-Type", ARCHIVE_TYPE);
+    xhr.upload.onprogress = (e) => onProgress(e.loaded, e.total);
+    xhr.onload = () => {
+      if (xhr.status >= 300) return reject(refusal(xhr.status, xhr.responseText));
+      try {
+        resolve(JSON.parse(xhr.responseText) as T);
+      } catch {
+        reject(new Error(`The gateway answered ${xhr.status} without saying what it did.`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("The upload failed: the connection to the gateway was lost."));
+    xhr.send(file);
+  });
+}
+
+const ARCHIVE_TYPE = "application/vnd.wiretap.archive";
+
+/** `[from_us, to_us)`, in microseconds since the epoch. */
+export interface ArchiveWindow {
+  from_us: number;
+  to_us: number;
+}
+
+/** A database's bounds, and roughly what an export of a window would hold. */
+export interface ArchiveEstimate {
+  min_ts_us: number | null;
+  max_ts_us: number | null;
+  /** To the hour, from the rollup. */
+  frames: number;
+  events: number;
+  approx_bytes: number;
+  empty: boolean;
+}
+
+export interface ArchiveManifest {
+  schema_version: number;
+  gateway_version: string;
+  created_at: string;
+  database: string;
+  window: ArchiveWindow | null;
+  tables: { name: string; columns: string[]; rows: number }[];
+}
+
+export interface Imported {
+  database: string;
+  replaced: boolean;
+  source: string;
+  window: ArchiveWindow | null;
+  rows: Record<string, number>;
+  elapsed_ms: number;
+  /** Done, but not yet serving, and why. */
+  attention: string | null;
+}
+
+/**
+ * An archive's manifest, read in the browser: the magic and format version,
+ * then the first section of the gzip stream (docs/archive.md).
+ */
+export async function readManifest(file: Blob): Promise<ArchiveManifest> {
+  const head = new Uint8Array(await file.slice(0, 5).arrayBuffer());
+  if (new TextDecoder().decode(head.slice(0, 4)) !== "WTAR") {
+    throw new Error("This is not a WireTAP archive.");
+  }
+  if (head[4] !== 1) throw new Error(`Archive format v${head[4]} is newer than this page reads.`);
+  const reader = file
+    .slice(5)
+    .stream()
+    .pipeThrough(new DecompressionStream("gzip"))
+    .getReader();
+  let read = new Uint8Array(0);
+  try {
+    for (;;) {
+      if (read.length >= 4) {
+        const len = new DataView(read.buffer).getUint32(0);
+        if (read.length >= 4 + len) {
+          return JSON.parse(new TextDecoder().decode(read.slice(4, 4 + len))) as ArchiveManifest;
+        }
+      }
+      const { value, done } = await reader.read();
+      if (done) throw new Error("The archive ends before its manifest.");
+      const more = new Uint8Array(read.length + value.length);
+      more.set(read);
+      more.set(value, read.length);
+      read = more;
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
 }
 
 /** A refusal, with its status and JSON body for the callers that read them. */
@@ -128,6 +238,8 @@ export interface DatabaseEntry {
   migration: MigrationProgress | null;
   /** Frames this gateway has buffered while the database is behind, else null. */
   buffered_rows: number | null;
+  /** Seconds an archive import into it has been running, else null. */
+  import_busy_secs: number | null;
 }
 
 /** One migration's progress row, as `wiretap_migration_progress` keeps it. */
