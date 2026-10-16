@@ -11,6 +11,9 @@ export function clearKey() {
   sessionStorage.removeItem(KEY_STORAGE);
 }
 
+/** The start of the console's refusal when its user last proved their password too long ago. */
+const STALE_PROOF = "this needs the password confirmed";
+
 /** The gateway's base path: everything before the SPA's own `/admin/`. */
 const API_BASE = (() => {
   const path = location.pathname;
@@ -39,6 +42,9 @@ export async function api<T>(
       message = (body as { error?: string }).error ?? message;
     } catch {
       /* non-JSON error body */
+    }
+    if (resp.status === 403 && message.startsWith(STALE_PROOF)) {
+      message += ". Re-authenticate in the console, then try again.";
     }
     throw new ApiError(resp.status, message, body);
   }
@@ -71,7 +77,20 @@ export interface KeySummary {
   database_pin: string | null;
   created_at: string;
   last_used_at: string | null;
-  revoked: boolean;
+  disabled: boolean;
+}
+
+/** Whether each secret is saved in a file the gateway owns, or comes from env. */
+export interface SecretSources {
+  db_password: { persisted: boolean };
+  admin_key: { configured: boolean; persisted: boolean; stale_config: boolean };
+}
+
+/** A rotated secret, shown once, and what to do with it. */
+export interface RotatedSecret {
+  secret: string;
+  persisted: boolean;
+  note: string;
 }
 
 export type SchemaState =

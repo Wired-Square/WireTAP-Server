@@ -43,6 +43,8 @@ COPY wiretap-backend entrypoint.sh /usr/local/bin/
 ENV LANG=en_US.utf8 \
     WIRETAP_PG_HOST=/run/wiretap \
     WIRETAP_PG_USER=postgres \
+    WIRETAP_PG_PASSWORD_FILE=/data/secrets/postgres-password \
+    WIRETAP_ADMIN_KEY_FILE=/data/secrets/admin-key \
     WIRETAP_APP_SOCKET=/run/appliance/app.sock \
     WIRETAP_APP_BASE_PATH=/apps/wiretap-gateway \
     WIRETAP_CONSOLE_UID=0

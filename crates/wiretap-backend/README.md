@@ -59,8 +59,9 @@ WIRETAP_BUILD_ID=$(../../packaging/build-id.sh) docker compose up -d --build
 
 Keys live in the database (`wiretap_meta.api_keys`, sha256-hashed); the
 plaintext is shown once at creation in the admin UI. `WIRETAP_ADMIN_KEY` from
-the environment is a break-glass admin key that always works and can't be
-revoked from the UI.
+the environment is a break-glass admin key that can't be disabled or revoked
+from the UI, and works until it is
+[rotated](#rotating-the-database-password-and-the-admin-key).
 
 | Role | Can |
 |------|-----|
@@ -69,8 +70,11 @@ revoked from the UI.
 | `admin` | everything, plus key/database management and activity control |
 
 Create per-device `ingest` keys (optionally database-pinned) and per-user
-`read` keys from the admin UI. Keys can be **revoked** (instant, reversible),
-**restored**, or **permanently deleted**.
+`read` keys from the admin UI. Each key's ⋮ menu can **edit** its name and
+database pin (not its role: make a new key for that), **rotate** it (a new
+value for the same key, shown once, and the old one stops working at once),
+**disable** and **enable** it (instant, reversible), or **revoke** it (deleted
+for good).
 
 `GET /v1/whoami` answers who a caller is (`via` `key` or `console`, `name`,
 `role`); the admin UI asks it to decide whether to ask for a key.
@@ -85,6 +89,69 @@ here, and a `viewer` or `operator` is `read`. Any other uid on the socket gets
 `/healthz`, `/v1/health` and the admin UI's files, and a 401 from every other
 route; a malformed header from the console is a 400. The TCP listener ignores
 the header and still needs a key.
+
+Issuing or destroying a credential (creating, rotating or revoking a key, and
+rotating either secret) also needs the console to say its user confirmed their
+password in the last five minutes (`reauth=` in the header, the chassis's
+window). Otherwise it is a 403, `this needs the password confirmed in the last
+5 minutes`, as the console's own such routes answer: confirm the password in the
+console and try again. Editing, disabling and enabling a key are not asked, and
+neither is a key on the TCP listener.
+
+## Rotating the database password and the admin key
+
+The admin UI's Keys tab has a Secrets section with a Rotate… for each. From a
+shell,
+
+```bash
+docker compose exec backend wiretap-backend rotate db-password   # or admin-key
+```
+
+asks the running gateway to do the same, through
+`POST /v1/admin/secrets/{db-password|admin-key}/rotate` (admin only, and
+behind a console [a recent password](#behind-an-applianceos-console)), signed in
+with the admin key from its own environment (`WIRETAP_ADMIN_KEY`, else
+`WIRETAP_ADMIN_KEY_FILE`). After an admin key from the environment has been
+rotated, that one is stale: pass the new one with
+`docker compose exec -e WIRETAP_ADMIN_KEY=<new key> backend …`. Either way the
+new value is shown once, in full: the CLI prints it on stdout, and what to do
+next on stderr.
+
+The gateway sets its role's new password with `ALTER ROLE CURRENT_USER`, from a
+SCRAM verifier it computes itself, so the plaintext never reaches the server's
+log and no superuser is needed. Open connections stay up, and new ones use the
+new password at once. The old admin key stops working at once.
+
+Where the secret comes from decides what is left to do:
+
+- **A file**, `WIRETAP_PG_PASSWORD_FILE` or `WIRETAP_ADMIN_KEY_FILE`, as the
+  gateway app image has it: the gateway saves the new value there, and nothing
+  is left to do. A crash between the password change and the save is put right
+  at the next start.
+- **The environment**, `POSTGRES_PASSWORD` or `WIRETAP_ADMIN_KEY`, as the
+  compose deploys have it: nothing is saved there. Put the new password in
+  `.env` (or `gateway.env`) as `POSTGRES_PASSWORD`, for both the backend and the
+  timescaledb services, before the gateway next restarts: until then a
+  restarted gateway cannot reach the database. A new admin key is kept across
+  restarts in the database, and the old one stays dead even if the gateway
+  restarts with it; put the new one in `WIRETAP_ADMIN_KEY` too, so the env
+  matches. Until you do, the gateway logs a warning at start and the Secrets
+  section says the env holds a rotated key. Setting `WIRETAP_ADMIN_KEY` to a
+  value it has never seen is a break-glass reset: that key becomes the admin
+  key, and the previous one stops working.
+
+In the shipped compose files the gateway logs in as the `postgres` superuser,
+so a rotation changes that role's password: anything else that uses it, such as
+a backup job or the `postgresql://postgres:$POSTGRES_PASSWORD@…` DSN in
+[the migration runbook](#migrating-an-existing-archive-into-the-container),
+needs the new one too. `psql -U postgres` inside the timescaledb container is
+unaffected, because its local socket is trusted. If the gateway cannot reach the
+database at all, set the password there by hand, then put it in `.env` and
+`docker compose up -d`:
+
+```bash
+docker compose exec timescaledb psql -U postgres -c '\password postgres'
+```
 
 ## Databases (one per capture)
 
@@ -210,8 +277,10 @@ for, and `auto_migrate`.
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `POSTGRES_PASSWORD` | — (required) | Postgres superuser password (compose-internal) |
+| `POSTGRES_PASSWORD` | — (required, unless `WIRETAP_PG_PASSWORD_FILE` is set) | Postgres superuser password (compose-internal) |
 | `WIRETAP_ADMIN_KEY` | — | Break-glass admin key |
+| `WIRETAP_PG_PASSWORD_FILE` | — | Read the Postgres password from this file, where a rotation saves the new one. `POSTGRES_PASSWORD` wins over it |
+| `WIRETAP_ADMIN_KEY_FILE` | — | The same for the admin key. `WIRETAP_ADMIN_KEY` wins over it |
 | `WIRETAP_DEFAULT_DB` | `wiretap` | Default capture database |
 | `WIRETAP_AUTO_CREATE` | `true` | Allow ingest/import to auto-create databases |
 | `WIRETAP_AUTO_MIGRATE` | `false` | Off, a capture database behind the schema waits for **Migrate now**, refusing reads and buffering ingest; on, every one is migrated on start. A new database is initialised either way |
@@ -229,7 +298,8 @@ reachable and 503 when it is not, for a supervisor's probe. `/v1/health`
 answers 200 either way and says which.
 
 The Logging tab shows the newest `WIRETAP_LOG_BUFFER` records (2000) from
-memory; stdout remains the durable log.
+memory; stdout remains the durable log. A field named like a credential shows
+as `[redacted]`, and a URL's `user:password@` as `redacted@`.
 
 ## Optional: pgBackRest backups
 

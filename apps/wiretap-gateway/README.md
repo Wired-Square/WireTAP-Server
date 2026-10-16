@@ -42,6 +42,15 @@ capture daemons in its Keys tab. Outside ApplianceOS, read the admin key with
 `docker exec <container> cat /data/secrets/admin-key`. Setting
 `WIRETAP_ADMIN_KEY` on the container uses that key instead.
 
+The image points the gateway at both files with `WIRETAP_PG_PASSWORD_FILE` and
+`WIRETAP_ADMIN_KEY_FILE`, so either can be rotated from the admin UI's Keys tab
+(Secrets), or with `docker exec <container> wiretap-backend rotate
+db-password` (or `admin-key`), which prints the new value. The gateway saves it
+in the file, and nothing needs a restart. An admin key set with
+`WIRETAP_ADMIN_KEY` is rotated for good: put the new one there too, so the env
+matches. From the console, rotating a secret, or creating, rotating or revoking
+a key, needs your password confirmed in the console in the last five minutes.
+
 ## How it runs
 
 It runs as any uid in group 0, with no capabilities. `initdb` has to find its

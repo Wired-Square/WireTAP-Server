@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use wiretap_model::Secret;
 
+use crate::secrets::{self, SecretFiles};
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub http_listen: String,
@@ -18,9 +20,10 @@ pub struct Config {
     /// Database created on first start and used when an ingest client
     /// doesn't name one. Also hosts the wiretap_meta schema (API keys).
     pub default_database: String,
-    /// Break-glass admin API key, always honoured (cannot be revoked from
-    /// the admin UI). Optional — without it, keys must be seeded in SQL.
+    /// Break-glass admin API key, honoured until rotated (cannot be revoked
+    /// from the admin UI). Optional — without it, keys must be seeded in SQL.
     pub bootstrap_admin_key: Option<Secret>,
+    pub secret_files: SecretFiles,
     /// Allow ingest clients / imports to auto-create unknown databases.
     pub auto_create_databases: bool,
     /// Migrate capture databases to the current schema on start. Off by
@@ -112,11 +115,27 @@ fn app_socket_from_env() -> Result<Option<AppSocket>, String> {
     }))
 }
 
+/// A secret from `var`, or else from the file `file_var` names, which is then
+/// where it is persisted.
+fn secret_var(var: &str, file_var: &str) -> Result<(Option<Secret>, Option<PathBuf>), String> {
+    if let Some(value) = env::var(var).ok().filter(|v| !v.is_empty()) {
+        return Ok((Some(Secret::new(value)), None));
+    }
+    let Some(path) = env::var_os(file_var).filter(|p| !p.is_empty()) else {
+        return Ok((None, None));
+    };
+    let path = PathBuf::from(path);
+    Ok((Some(secrets::read(&path)?), Some(path)))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let pg_password = env::var("POSTGRES_PASSWORD")
-            .map(Secret::new)
-            .map_err(|_| "POSTGRES_PASSWORD is required".to_string())?;
+        let (pg_password, pg_password_file) =
+            secret_var("POSTGRES_PASSWORD", "WIRETAP_PG_PASSWORD_FILE")?;
+        let pg_password = pg_password
+            .ok_or("POSTGRES_PASSWORD or WIRETAP_PG_PASSWORD_FILE is required".to_string())?;
+        let (bootstrap_admin_key, admin_key_file) =
+            secret_var("WIRETAP_ADMIN_KEY", "WIRETAP_ADMIN_KEY_FILE")?;
         Ok(Self {
             http_listen: var_or("WIRETAP_HTTP_LISTEN", "0.0.0.0:8423"),
             ingest_listen: var_or("WIRETAP_INGEST_LISTEN", "0.0.0.0:9323"),
@@ -125,10 +144,11 @@ impl Config {
             pg_user: var_or("WIRETAP_PG_USER", "postgres"),
             pg_password,
             default_database: var_or("WIRETAP_DEFAULT_DB", "wiretap"),
-            bootstrap_admin_key: env::var("WIRETAP_ADMIN_KEY")
-                .ok()
-                .filter(|k| !k.is_empty())
-                .map(Secret::new),
+            bootstrap_admin_key,
+            secret_files: SecretFiles {
+                pg_password: pg_password_file,
+                admin_key: admin_key_file,
+            },
             auto_create_databases: parse_or("WIRETAP_AUTO_CREATE", true),
             auto_migrate: parse_or("WIRETAP_AUTO_MIGRATE", false),
             ingest_keepalive_secs: parse_or("WIRETAP_INGEST_KEEPALIVE_SECS", 30.0),
@@ -140,22 +160,44 @@ impl Config {
         })
     }
 
-    /// libpq-style connection string for one database.
-    pub fn pg_dsn(&self, database: &str) -> String {
-        format!(
-            "host={} port={} user={} password={} dbname={}",
-            self.pg_host,
-            self.pg_port,
-            self.pg_user,
-            self.pg_password.expose(),
-            database
-        )
+    /// One database, without the password: that is added per connection,
+    /// so a rotated one reaches every pool.
+    pub fn pg_config(&self, database: &str) -> tokio_postgres::Config {
+        let mut config = tokio_postgres::Config::new();
+        config
+            .host(&self.pg_host)
+            .port(self.pg_port)
+            .user(&self.pg_user)
+            .dbname(database);
+        config
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalise_base_path;
+    use super::{normalise_base_path, secret_var};
+
+    /// Each test owns its variable names: the environment is the process's.
+    #[test]
+    fn a_secret_in_the_environment_wins_over_its_file_which_is_then_not_its_source() {
+        let file = std::env::temp_dir().join(format!("wiretap-secret-var-{}", std::process::id()));
+        std::fs::write(&file, "from-file\n").unwrap();
+        std::env::set_var("WIRETAP_TEST_SV_FILE", &file);
+
+        let (value, source) = secret_var("WIRETAP_TEST_SV_UNSET", "WIRETAP_TEST_SV_FILE").unwrap();
+        assert_eq!(value.unwrap().expose(), "from-file");
+        assert_eq!(source.as_deref(), Some(file.as_path()));
+
+        std::env::set_var("WIRETAP_TEST_SV_ENV", "from-env");
+        let (value, source) = secret_var("WIRETAP_TEST_SV_ENV", "WIRETAP_TEST_SV_FILE").unwrap();
+        assert_eq!(value.unwrap().expose(), "from-env");
+        assert!(source.is_none());
+
+        std::env::set_var("WIRETAP_TEST_SV_MISSING", file.with_extension("missing"));
+        assert!(secret_var("WIRETAP_TEST_SV_UNSET", "WIRETAP_TEST_SV_MISSING").is_err());
+        let (value, source) = secret_var("WIRETAP_TEST_SV_UNSET", "WIRETAP_TEST_SV_UNSET").unwrap();
+        assert!(value.is_none() && source.is_none());
+    }
 
     #[test]
     fn a_base_path_gains_a_leading_slash_and_loses_a_trailing_one() {

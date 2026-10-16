@@ -71,7 +71,7 @@ export default function App() {
         )}
       </div>
       <MigrationBanner key={tab} onOpen={() => setTab("Databases")} />
-      {tab === "Keys" && <Keys />}
+      {tab === "Keys" && <Keys caller={caller} />}
       {tab === "Databases" && <Databases />}
       {tab === "Ingest" && <Ingest />}
       {tab === "Daemons" && <Daemons />}

@@ -106,7 +106,11 @@ so, until storage is mounted at `/srv/wiretap-gateway`. On the card:
 3. `systemctl enable --now wiretap-gateway`.
 
 The admin UI is then at `http://<card>:8423/admin`, signed in with the admin
-key. Make an `ingest` key there and point `wiretap-server`'s `[forward]` at
+key. A password rotated there is not saved: put it in `gateway.env` before the
+gateway next restarts. A rotated admin key is kept, but put it there too (see
+the backend's
+[Rotating the database password and the admin key](../crates/wiretap-backend/README.md#rotating-the-database-password-and-the-admin-key)).
+Make an `ingest` key there and point `wiretap-server`'s `[forward]` at
 `127.0.0.1:9323` with it.
 
 dockerd is not started at boot. The gateway's unit starts it through its

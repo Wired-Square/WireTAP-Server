@@ -5,6 +5,48 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **Behind an ApplianceOS console, issuing or destroying a credential needs a
+  recent password.** Creating, rotating or revoking a key, and rotating either
+  secret, is refused (403, `this needs the password confirmed in the last 5
+  minutes`) unless the console's `reauth=` is within its five-minute window.
+  Keys on :8423 are not asked.
+- **Rotate the database password and the admin key** from the admin UI's Keys
+  tab (Secrets), `POST /v1/admin/secrets/{db-password|admin-key}/rotate`, or
+  `wiretap-backend rotate db-password|admin-key`, which asks the running gateway
+  over its own listener. The new value is shown once, in full. The password is
+  set with `ALTER ROLE CURRENT_USER` from a SCRAM verifier computed by the
+  gateway, so no superuser is needed and the plaintext never reaches the
+  server's log; open connections stay up, and ingest carries on. The gateway app
+  image saves both in `/data/secrets`, through the new `WIRETAP_PG_PASSWORD_FILE`
+  and `WIRETAP_ADMIN_KEY_FILE`, and a crash between the change and the save is
+  put right at the next start. A compose deploy keeps them in its env, so a new
+  password must be copied into `.env` before the next restart. A new admin key
+  is kept across restarts in `wiretap_meta.bootstrap_keys`, and the old one
+  stays dead even if the gateway restarts with it; until `.env` has the new one,
+  the gateway warns at start and the Secrets section says so. A
+  `WIRETAP_ADMIN_KEY` the gateway has never seen is a break-glass reset.
+- **Each API key has a ⋮ menu**: Edit… (its name and database pin, through
+  `PATCH /v1/admin/keys/{id}`; the role stays), Rotate… (`POST
+  /v1/admin/keys/{id}/rotate`: a new value for the same key, shown once), Disable
+  or Enable, and Revoke….
+- **Confirmations are an in-page dialog**, not the browser's `confirm()`: the
+  button names the act, and a refusal stays in the dialog. The ⋮ menu opens in
+  the top layer (no longer clipped by a table), flips above near the bottom of
+  the window, takes Home and End, and says why an item is unavailable.
+
+### Changed
+
+- **Revoke and Restore are now Disable and Enable**, at
+  `/v1/admin/keys/{id}/disable` and `/enable`, and a key's `revoked` is now
+  `disabled`; the column is renamed in place on start. **Revoke** now deletes a
+  key for good, as Delete did.
+- **The Logging tab redacts the credentials it can recognise.** A field named
+  like one (`password`, `secret`, `token`, `*_key`, `*_hash`, …) is captured as
+  `[redacted]`, and a URL's `user:password@` as `redacted@`. stdout is
+  unchanged.
+
 ## [0.1.12] — 2026-10-15
 
 Fixes v0.1.11's Migrate now to v5 on a large Modbus archive. The capture server
