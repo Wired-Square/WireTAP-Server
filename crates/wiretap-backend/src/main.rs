@@ -3,10 +3,10 @@
 //! desktop client authenticate with API keys.
 
 /// `0.1.0 (g36bfab1729af)` — the package version and the commit `build.rs`
-/// stamps in, reported by `/v1/health`. See `wiretap-build-id` for why the
+/// stamps in, reported by `/v1/health`. See `wslib-build-id` for why the
 /// version alone is not enough; it matters more here than for the capture
 /// server, because the image's documented tag is the mutable `:latest`.
-pub const VERSION: &str = wiretap_build_id::build_version!();
+pub const VERSION: &str = wslib_build_id::build_version!();
 
 mod archive;
 mod catalogs;

@@ -112,7 +112,7 @@ if [ -z "${version_given}" ]; then
 		commit_date="$(git -C "${ROOT}" show -s --format=%cd --date=format:%Y%m%d HEAD 2>/dev/null || true)"
 		if [ -n "${commit_date}" ] && [ -n "${head_sha}" ]; then
 			deb_version="${version}~git${commit_date}.${head_sha}"
-			# The same question wiretap-build-id asks, asked the same way. It
+			# The same question wslib-build-id asks, asked the same way. It
 			# is asked twice and at different moments, so agreement is not
 			# guaranteed here - the guard in build_arch compares the two and
 			# refuses the package if they have diverged.
@@ -341,8 +341,8 @@ build_arch() {  # build_arch <arch>
 	# reason as above: a cross-built binary cannot be run here to be asked.
 	if grep -qa ' (unknown)' "${bin}"; then
 		die "[${arch}] ${PKG} cannot name the commit it was built from.
-     build.rs found no git and WIRETAP_BUILD_ID was unset. Build inside a
-     checkout, or pass the commit in WIRETAP_BUILD_ID."
+     WSLIB_BUILD_ID was unset and build.rs found no git. Build inside a
+     checkout, or pass the commit in WSLIB_BUILD_ID."
 	fi
 
 	# And it has to be the build this package claims. --skip-build packages
@@ -353,7 +353,7 @@ build_arch() {  # build_arch <arch>
 	# The whole stamp, not a prefix: `-dirty` is part of the claim, so this is
 	# also the only thing that catches a release package cut from an edited
 	# tree. It is what makes the two `git status` calls - this script's and
-	# wiretap-build-id's - safe to be separate, because a disagreement between
+	# wslib-build-id's - safe to be separate, because a disagreement between
 	# them fails here rather than shipping.
 	#
 	# Skipped for --version, which is the documented escape hatch: that label

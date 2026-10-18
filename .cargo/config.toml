@@ -13,3 +13,9 @@ CC_aarch64_unknown_linux_musl = { value = "packaging/zigcc", relative = true }
 CC_x86_64_unknown_linux_musl = { value = "packaging/zigcc", relative = true }
 AR_aarch64_unknown_linux_musl = "zig ar"
 AR_x86_64_unknown_linux_musl = "zig ar"
+
+# The wslib-* crates. Cargo's default provider reads
+# CARGO_REGISTRIES_WIRED_SQUARE_TOKEN, as `Bearer <token>`. Off the network,
+# mirror.toml reads the mirror instead.
+[registries.wired-square]
+index = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"

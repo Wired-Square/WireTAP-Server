@@ -51,11 +51,11 @@ ENV LANG=en_US.utf8 \
 
 ARG VERSION
 ARG MANIFEST
-ARG WIRETAP_BUILD_ID=
+ARG WSLIB_BUILD_ID=
 LABEL com.wiredsquare.appliance.manifest="${MANIFEST}" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.source=https://github.com/Wired-Square/WireTAP-Server \
-      org.opencontainers.image.revision="${WIRETAP_BUILD_ID}"
+      org.opencontainers.image.revision="${WSLIB_BUILD_ID}"
 
 VOLUME /data
 EXPOSE 8423 9323

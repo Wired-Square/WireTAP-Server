@@ -7,6 +7,17 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **Building the root workspace needs the private `wired-square` Cargo
+  registry**, which the `wslib-*` crates come from, and its read token
+  (`CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`, or `~/.cargo/credentials.toml`). A
+  fork can no longer build it. The gateway image reads the registry's mirror,
+  with its token as the BuildKit secret `cargo-mirror-token` (`docker build
+  --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN`);
+  `scripts/cargo-mirror-token.sh` finds it, and the compose file passes it.
+- **The build id comes from `wslib-build-id`**, which replaces
+  `wiretap-build-id`. Its variable is now `WSLIB_BUILD_ID`, in place of
+  `WIRETAP_BUILD_ID`, for the image build arguments too, and a value it is given
+  now wins over the checkout's own commit.
 - **The minimum Rust is 1.88**, from 1.85.
 
 ## [0.1.13] — 2026-10-16

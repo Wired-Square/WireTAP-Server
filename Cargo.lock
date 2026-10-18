@@ -2643,16 +2643,12 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "wiretap-build-id",
  "wiretap-catalog",
  "wiretap-gateway",
  "wiretap-model",
  "wiretap-protocol",
+ "wslib-build-id",
 ]
-
-[[package]]
-name = "wiretap-build-id"
-version = "0.1.13"
 
 [[package]]
 name = "wiretap-catalog"
@@ -2756,12 +2752,12 @@ dependencies = [
  "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
- "wiretap-build-id",
  "wiretap-catalog",
  "wiretap-checksum",
  "wiretap-io",
  "wiretap-model",
  "wiretap-protocol",
+ "wslib-build-id",
 ]
 
 [[package]]
@@ -2857,6 +2853,12 @@ dependencies = [
  "unicode-xid",
  "wasmparser",
 ]
+
+[[package]]
+name = "wslib-build-id"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
 
 [[package]]
 name = "zerocopy"

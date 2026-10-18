@@ -13,8 +13,8 @@
 
 /// `0.1.0 (g4bf526d44891)` — the package version and the commit `build.rs`
 /// stamps in, reported by `--version` and by the journal's first line. See
-/// `wiretap-build-id` for why the version alone is not enough.
-pub const VERSION: &str = wiretap_build_id::build_version!();
+/// `wslib-build-id` for why the version alone is not enough.
+pub const VERSION: &str = wslib_build_id::build_version!();
 
 pub mod archive;
 pub mod cache;

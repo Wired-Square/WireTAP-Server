@@ -9,13 +9,12 @@ authors.workspace = true
 repository.workspace = true
 
 [build-dependencies]
-# Stamps the commit into /v1/health; shared with the capture server so the two
-# cannot drift on what a build id looks like.
-wiretap-build-id = { path = "../wiretap-build-id" }
+# Stamps the commit into /v1/health.
+wslib-build-id.workspace = true
 
 [dependencies]
 # Also a build-dependency above; this side is the build_version! macro only.
-wiretap-build-id = { path = "../wiretap-build-id" }
+wslib-build-id.workspace = true
 # Only the sample types; default-features off keeps the TOML parser out.
 wiretap-model = { path = "../wiretap-model", default-features = false }
 # The ingest codec, and the DLC table: a CAN row's `dlc` column and the `len`

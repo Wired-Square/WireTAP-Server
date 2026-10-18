@@ -284,6 +284,9 @@ It needs `rustup target add aarch64-unknown-linux-musl` and `zig` on `PATH` —
 bundled SQLite means a build script compiles C, and `.cargo/config.toml` points
 that at [packaging/zigcc](packaging/zigcc).
 
+The `wslib-*` crates come from a private Cargo registry, so every build needs
+its read token: [docs/workspaces.md](docs/workspaces.md#the-private-registry).
+
 GitHub runs CI only on a release tag. Before one,
 [scripts/ci-local.sh](scripts/ci-local.sh) runs the same jobs on a Mac with
 Docker Desktop (`--list` names them); only the vcan capture job waits for the tag.

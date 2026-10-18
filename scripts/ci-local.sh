@@ -69,8 +69,8 @@ browser_half() {
 
 package_lifecycle() {
 	local arch=$1 deb
-	# Changing it reruns wiretap-build-id, which no edit outside a crate's src/ does.
-	WIRETAP_BUILD_ID="$(packaging/build-id.sh)" packaging/make-deb.sh --arch "$arch"
+	# Changing it reruns wslib-build-id, which no edit outside a crate's src/ does.
+	WSLIB_BUILD_ID="$(packaging/build-id.sh)" packaging/make-deb.sh --arch "$arch"
 	# shellcheck disable=SC2012
 	deb="$(ls -t target/deb/wiretap-server_*_"$arch".deb | head -1)"
 	docker build --quiet --platform "linux/$arch" --tag "ci-local-systemd:$arch" - <<-'EOF'
@@ -100,9 +100,14 @@ job_package_amd64() { package_lifecycle amd64; }
 job_package_arm64() { package_lifecycle arm64; }
 
 job_image() {
+	{ set +x; } 2>/dev/null # keeps the token out of the trace and the log
+	CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN="$(scripts/cargo-mirror-token.sh)"
+	export CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN
+	set -x
 	docker buildx build \
 		--file crates/wiretap-backend/Dockerfile \
-		--build-arg "WIRETAP_BUILD_ID=$(packaging/build-id.sh)" \
+		--build-arg "WSLIB_BUILD_ID=$(packaging/build-id.sh)" \
+		--secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN \
 		--output type=cacheonly \
 		.
 }

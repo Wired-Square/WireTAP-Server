@@ -50,6 +50,9 @@ wiretap-checksum = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git
 # The gateway's HTTP types, shared with the desktop. Same tag again.
 wiretap-gateway = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.10.2" }
 
+# --- the wslib-rs toolkit, from the private registry (.cargo/config.toml) ---
+wslib-build-id = { version = "0.1", registry = "wired-square" }
+
 # --- CLI ---
 clap = { version = "4", default-features = false }
 

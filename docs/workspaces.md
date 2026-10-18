@@ -12,10 +12,25 @@ appliance chassis,
 [`wslib-appliance-rs`](https://github.com/Wired-Square/wslib-appliance-rs), which
 is a private repository. Were either a member, the root's lockfile would
 name the chassis and every build of it would need read access. Kept apart, the
-public root, its release and any fork build without the key. Each workspace has
-its own `Cargo.lock` and its own `rust-version`: 1.85 at the root, 1.88 in the
-other two. They pin different chassis tags: `appliance/` v0.1.4,
+root and its release build without the key, though not without the registry
+below. Each workspace has its own `Cargo.lock` and its own `rust-version`: 1.88
+in all three. They pin different chassis tags: `appliance/` v0.1.4,
 `apps/wiretap-server/` v0.12.0.
+
+## The private registry
+
+The root takes the `wslib-*` crates from the `wired-square` Cargo registry on
+Forgejo, which `.cargo/config.toml` declares, so a fork cannot build it. Cargo
+reads its read token from `CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`, as
+`Bearer <token>`, or from `~/.cargo/credentials.toml`.
+
+Off the network, Forgejo is out of reach and a read-only mirror stands in:
+[`.cargo/mirror.toml`](../.cargo/mirror.toml) in `$CARGO_HOME/config.toml`
+replaces the Forgejo source with it, and its token is
+`CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN`. `Cargo.lock` records Forgejo
+either way. The gateway image always reads the mirror, with that token as the
+BuildKit secret `cargo-mirror-token`;
+[`scripts/cargo-mirror-token.sh`](../scripts/cargo-mirror-token.sh) finds it.
 
 The root's `.cargo/config.toml` still applies under `appliance/` and
 `apps/wiretap-server/`, since cargo reads config from parent directories, so a
