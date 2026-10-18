@@ -370,7 +370,8 @@ answers 200 either way and says which.
 
 The Logging tab shows the newest 200 of the last 1000 records the gateway's own
 crates logged, held in memory; stdout remains the durable log. A field named
-like a credential shows as `[redacted]`. `GET /v1/admin/logs` answers them in
+like a credential shows as `[redacted]`, and a URL's `user:password@` as
+`redacted@`. `GET /v1/admin/logs` answers them in
 `wslib-telemetry`'s `LogSnapshot`, oldest first; `?level=warn` keeps that level
 and louder, and `?limit=` sets how many (200).
 

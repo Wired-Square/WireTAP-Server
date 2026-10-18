@@ -2880,9 +2880,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-telemetry"
-version = "0.1.0"
+version = "0.1.1"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "58a13e67b53229d558fb1f09ae3b0190c1dfe5c31d8dc5ebe7c5454830f034c5"
+checksum = "5baf07882d91335f09052754ae5cbf590dbf824a73f8a7c1290669c8ca1012fb"
 dependencies = [
  "chrono",
  "serde",
