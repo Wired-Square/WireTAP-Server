@@ -13,7 +13,6 @@ use http_body_util::{BodyExt, Empty};
 use hyper_util::rt::TokioIo;
 use rand::RngCore;
 use serde::Deserialize;
-use wiretap_model::Secret;
 
 use crate::config::Config;
 
@@ -29,16 +28,6 @@ pub fn random_hex() -> String {
     let mut raw = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut raw);
     hex::encode(raw)
-}
-
-/// A trailing newline is not part of it, as `initdb --pwfile` reads it.
-pub fn read(path: &Path) -> Result<Secret, String> {
-    let raw = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let value = raw.trim_end_matches(['\r', '\n']);
-    if value.is_empty() {
-        return Err(format!("{} is empty", path.display()));
-    }
-    Ok(Secret::new(value))
 }
 
 pub fn staged(file: &Path) -> PathBuf {
@@ -175,6 +164,8 @@ pub async fn rotate_command(config: &Config, which: &str) -> Result<(), String> 
 
 #[cfg(test)]
 mod tests {
+    use wslib_secret::Secret;
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
@@ -186,15 +177,6 @@ mod tests {
     }
 
     #[test]
-    fn a_trailing_newline_is_not_part_of_the_secret() {
-        let file = scratch("newline");
-        fs::write(&file, "abc\n").unwrap();
-        assert_eq!(read(&file).unwrap().expose(), "abc");
-        fs::write(&file, "\n").unwrap();
-        assert!(read(&file).is_err());
-    }
-
-    #[test]
     fn a_leftover_staged_file_with_a_looser_mode_is_replaced() {
         use std::os::unix::fs::PermissionsExt;
         let file = scratch("leftover");
@@ -203,7 +185,7 @@ mod tests {
         stage(&file, "new").unwrap();
         let mode = fs::metadata(staged(&file)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        assert_eq!(read(&staged(&file)).unwrap().expose(), "new");
+        assert_eq!(Secret::from_file(staged(&file)).unwrap().expose(), "new");
     }
 
     #[test]
@@ -212,9 +194,9 @@ mod tests {
         let file = scratch("stage");
         fs::write(&file, "old").unwrap();
         stage(&file, "new").unwrap();
-        assert_eq!(read(&file).unwrap().expose(), "old");
+        assert_eq!(Secret::from_file(&file).unwrap().expose(), "old");
         promote(&file).unwrap();
-        assert_eq!(read(&file).unwrap().expose(), "new");
+        assert_eq!(Secret::from_file(&file).unwrap().expose(), "new");
         assert!(!staged(&file).exists());
         assert_eq!(
             fs::metadata(&file).unwrap().permissions().mode() & 0o777,

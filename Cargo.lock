@@ -2642,17 +2642,14 @@ dependencies = [
  "tokio-postgres",
  "tower-http",
  "tracing",
- "tracing-subscriber",
- "wiretap-build-id",
  "wiretap-catalog",
  "wiretap-gateway",
  "wiretap-model",
  "wiretap-protocol",
+ "wslib-build-id",
+ "wslib-secret",
+ "wslib-telemetry",
 ]
-
-[[package]]
-name = "wiretap-build-id"
-version = "0.1.13"
 
 [[package]]
 name = "wiretap-catalog"
@@ -2751,17 +2748,18 @@ dependencies = [
  "serde",
  "serde_json",
  "socketcan",
- "subtle",
  "tokio",
  "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
- "wiretap-build-id",
  "wiretap-catalog",
  "wiretap-checksum",
  "wiretap-io",
  "wiretap-model",
  "wiretap-protocol",
+ "wslib-backoff",
+ "wslib-build-id",
+ "wslib-secret",
 ]
 
 [[package]]
@@ -2856,6 +2854,41 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "wslib-backoff"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "27a90db8a9c74e6dd46a9fea5c7cee4f6451856bd34b17213c5f27e54fa9367e"
+
+[[package]]
+name = "wslib-build-id"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
+
+[[package]]
+name = "wslib-secret"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "1cecb90fec3688b4d4e14cfcd6aca61f6b41500f1244f65e3e697abf1b0da931"
+dependencies = [
+ "serde",
+ "subtle",
+]
+
+[[package]]
+name = "wslib-telemetry"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "5baf07882d91335f09052754ae5cbf590dbf824a73f8a7c1290669c8ca1012fb"
+dependencies = [
+ "chrono",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

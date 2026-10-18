@@ -358,7 +358,7 @@ pub fn apply(
 mod tests {
     use super::*;
     use crate::catalogues::tests::TempDir;
-    use wiretap_model::Secret;
+    use wslib_secret::Secret;
 
     /// A daemon started with `args` and, if given, a config file.
     struct Rig {

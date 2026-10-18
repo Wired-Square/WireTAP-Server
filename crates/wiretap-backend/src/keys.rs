@@ -614,7 +614,7 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert!(!first.stale_config());
-        let saved = secrets::read(&file).unwrap();
+        let saved = wslib_secret::Secret::from_file(&file).unwrap();
         assert_eq!(saved.expose(), rotated);
 
         let again = restarted(&dbs, Some(saved.expose())).await;

@@ -15,7 +15,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.13"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 authors = ["Alex Ferrara <alex@wiredsquare.com>"]
 repository = "https://github.com/Wired-Square/WireTAP-Server"
@@ -49,6 +49,12 @@ wiretap-io = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag
 wiretap-checksum = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.10.2" }
 # The gateway's HTTP types, shared with the desktop. Same tag again.
 wiretap-gateway = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.10.2" }
+
+# --- the wslib-rs toolkit, from the private registry (.cargo/config.toml) ---
+wslib-backoff = { version = "0.1", registry = "wired-square" }
+wslib-build-id = { version = "0.1", registry = "wired-square" }
+wslib-secret = { version = "0.1", registry = "wired-square" }
+wslib-telemetry = { version = "0.1", registry = "wired-square" }
 
 # --- CLI ---
 clap = { version = "4", default-features = false }
@@ -95,14 +101,11 @@ hex = "0.4"
 flate2 = "1"
 
 # --- hashing and secrets ---
-# sha2 hashes API keys at rest; subtle compares an ingest token without leaking
-# its length or contents to a timing attack, which is what the Python used
-# `hmac.compare_digest` for.
+# sha2 hashes API keys at rest.
 sha2 = "0.10"
 # A catalogue is named by its Git blob SHA-1, as `git hash-object` names it.
 sha1 = "0.10"
 rand = "0.8"
-subtle = "2"
 
 # --- logging ---
 tracing = "0.1"

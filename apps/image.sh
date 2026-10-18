@@ -57,7 +57,7 @@ for arch; do
 	image="$OUT/$NAME-$VERSION-$arch.tar"
 	docker buildx build --builder "$BUILDER" --platform "linux/$arch" --file "$HERE/Dockerfile" \
 		--build-arg "VERSION=$VERSION" --build-arg "MANIFEST=$MANIFEST" \
-		--build-arg "WIRETAP_BUILD_ID=$BUILD_ID" \
+		--build-arg "WSLIB_BUILD_ID=$BUILD_ID" \
 		--tag "ghcr.io/wired-square/$NAME:$VERSION" \
 		--output "type=docker,dest=$image.part" "$CONTEXT"
 	mv "$image.part" "$image"

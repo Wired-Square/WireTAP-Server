@@ -13,7 +13,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tokio::task::JoinHandle;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::NoTls;
-use wiretap_model::Secret;
+use wslib_secret::Secret;
 
 use crate::archive::ImportError;
 use crate::config::Config;
@@ -931,7 +931,8 @@ impl Databases {
         let staged = secrets::staged(file);
         match self.reach("postgres").await {
             Err(Unreached::Failed(e)) if e.code() == Some(&SqlState::INVALID_PASSWORD) => {
-                let previous = self.set_pg_password(secrets::read(&staged)?).await;
+                let password = Secret::from_file(&staged).map_err(|e| e.to_string())?;
+                let previous = self.set_pg_password(password).await;
                 if let Err(e) = self.connect_raw("postgres").await {
                     self.set_pg_password(previous).await;
                     return Err(e);
@@ -1523,7 +1524,6 @@ pub(crate) mod tests {
             auto_migrate,
             ingest_keepalive_secs: 30.0,
             ingest_max_batch_frames: 256,
-            log_buffer: 0,
             base_path: String::new(),
             admin_dir: "/nonexistent".into(),
             app_socket: None,
@@ -2261,7 +2261,7 @@ pub(crate) mod tests {
         )
         .await;
         let new = dbs.rotate_pg_password(Some(&file)).await.unwrap();
-        assert_eq!(secrets::read(&file).unwrap(), new);
+        assert_eq!(Secret::from_file(&file).unwrap().expose(), new.expose());
         assert!(!secrets::staged(&file).exists());
     }
 
@@ -2283,7 +2283,7 @@ pub(crate) mod tests {
         config.pg_password = old;
         let started = Databases::new(Arc::new(config));
         started.reach_postgres().await.unwrap();
-        assert_eq!(secrets::read(&file).unwrap(), new);
+        assert_eq!(Secret::from_file(&file).unwrap().expose(), new.expose());
         assert!(!secrets::staged(&file).exists());
         started.connect_raw("postgres").await.unwrap();
     }
@@ -2301,7 +2301,7 @@ pub(crate) mod tests {
         secrets::stage(&file, "never-applied").unwrap();
 
         dbs.reach_postgres().await.unwrap();
-        assert_eq!(secrets::read(&file).unwrap(), old);
+        assert_eq!(Secret::from_file(&file).unwrap().expose(), old.expose());
         assert!(!secrets::staged(&file).exists());
     }
 
@@ -2394,7 +2394,6 @@ pub(crate) mod tests {
     #[tokio::test]
     #[ignore = "needs TimescaleDB; see live_databases"]
     async fn the_gateways_own_database_holds_no_captures_and_old_ones_are_counted_not_touched() {
-        use tracing_subscriber::layer::SubscriberExt;
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2420,15 +2419,16 @@ pub(crate) mod tests {
             .bootstrap()
             .await
             .unwrap();
-        let logs = crate::logbuf::LogBuffer::new(64);
-        let _logging =
-            tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
+        let logs = wslib_telemetry::Logs::new(&["wiretap_backend"]);
+        let _logging = tracing::subscriber::set_default(logs.subscriber());
         dbs.warn_of_old_captures().await;
-        let warned = logs.snapshot(Some(tracing::Level::WARN), 64);
+        let warned = logs.snapshot().records;
         assert!(
             warned
                 .iter()
-                .any(|r| r.message.contains("no longer served") && r.fields.contains("frames=3")),
+                .any(|r| r.level == wslib_telemetry::LogLevel::Warn
+                    && r.message.contains("no longer served")
+                    && r.fields.contains(&("frames".into(), "3".into()))),
             "{warned:?}"
         );
         assert_eq!(archived(&own, 2001).await, (3, 3));

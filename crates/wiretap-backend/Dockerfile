@@ -22,9 +22,8 @@ COPY Cargo.toml Cargo.lock ./
 # Every workspace member has to be here, because `members = ["crates/*"]` is a
 # glob and the workspace inside this image is whatever was copied — cargo loads
 # every member's manifest, and every path dependency's, before it builds
-# anything. Copying only the backend leaves its path dependencies
-# (`wiretap-model`, `wiretap-build-id`) missing, a build failure rather than a
-# smaller build.
+# anything. Copying only the backend leaves its path dependency
+# (`wiretap-model`) missing, a build failure rather than a smaller build.
 #
 # What each member needs differs, and the rule is below: a *dependency* gets its
 # real source, a member that is only a member gets a stub. The capture server is
@@ -36,10 +35,6 @@ COPY Cargo.toml Cargo.lock ./
 # unnoticed for two days.
 COPY crates/wiretap-model/Cargo.toml        crates/wiretap-model/
 COPY crates/wiretap-model/src               crates/wiretap-model/src
-# A build-dependency of the backend, so it needs its real source like any other
-# dependency — the stub treatment below would fail the build script that uses it.
-COPY crates/wiretap-build-id/Cargo.toml     crates/wiretap-build-id/
-COPY crates/wiretap-build-id/src            crates/wiretap-build-id/src
 # The capture server is a member and not a dependency: cargo has to load its
 # manifest and find *a* target, and never builds it. Its real source is the
 # largest and fastest-moving in the workspace, and putting it here would gate
@@ -68,11 +63,18 @@ COPY crates/wiretap-backend/schema          crates/wiretap-backend/schema
 # COPYs above are ordered as they are: this value changes with every commit,
 # and every layer after it inherits the cache miss. The build script needs it
 # only when cargo runs, and that layer has to rerun anyway.
-ARG WIRETAP_BUILD_ID=
-ENV WIRETAP_BUILD_ID=${WIRETAP_BUILD_ID}
+ARG WSLIB_BUILD_ID=
+ENV WSLIB_BUILD_ID=${WSLIB_BUILD_ID}
 # --locked for the same reason `npm ci` is used above: a build that may quietly
 # re-resolve is a build that can drift off what was committed and tested.
-RUN cargo build --release --locked -p wiretap-backend
+#
+# The wslib-* crates come from the registry mirror, wherever this runs: the
+# image does not trust the CA that signs Forgejo. The token is a BuildKit
+# secret, so it reaches no layer, and the two configs are mounted, not copied.
+RUN --mount=type=bind,source=.cargo/config.toml,target=/src/.cargo/config.toml \
+    --mount=type=bind,source=.cargo/mirror.toml,target=/usr/local/cargo/config.toml \
+    --mount=type=secret,id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN,required=true \
+    cargo build --release --locked -p wiretap-backend
 
 # --- runtime ---
 FROM debian:bookworm-slim
@@ -95,8 +97,8 @@ LABEL org.opencontainers.image.source=https://github.com/Wired-Square/WireTAP-Se
 # Redeclared, not duplicated: docker scopes an ARG to the stage it appears in,
 # so the one in the build stage is out of scope here and deleting this line
 # would silently label every image with an empty revision.
-ARG WIRETAP_BUILD_ID=
-LABEL org.opencontainers.image.revision=${WIRETAP_BUILD_ID}
+ARG WSLIB_BUILD_ID=
+LABEL org.opencontainers.image.revision=${WSLIB_BUILD_ID}
 EXPOSE 8423 9323
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
     CMD p="${WIRETAP_BASE_PATH#/}"; curl -fsS -o /dev/null "http://localhost:8423/${p:+${p%/}/}healthz" || exit 1

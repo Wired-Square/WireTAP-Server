@@ -3,10 +3,10 @@
 //! desktop client authenticate with API keys.
 
 /// `0.1.0 (g36bfab1729af)` — the package version and the commit `build.rs`
-/// stamps in, reported by `/v1/health`. See `wiretap-build-id` for why the
+/// stamps in, reported by `/v1/health`. See `wslib-build-id` for why the
 /// version alone is not enough; it matters more here than for the capture
 /// server, because the image's documented tag is the mutable `:latest`.
-pub const VERSION: &str = wiretap_build_id::build_version!();
+pub const VERSION: &str = wslib_build_id::build_version!();
 
 mod archive;
 mod catalogs;
@@ -16,7 +16,6 @@ mod events;
 mod http;
 mod ingest;
 mod keys;
-mod logbuf;
 mod running;
 mod schema;
 mod secrets;
@@ -27,20 +26,17 @@ mod types;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-
 use catalogs::Catalogs;
 use config::Config;
 use db::Databases;
 use ingest::{IngestServer, Sessions};
 use keys::KeyStore;
-use logbuf::LogBuffer;
 use state::AppState;
+use wslib_telemetry::{Logs, Telemetry};
 
 #[tokio::main]
 async fn main() {
-    // Config first: it sizes the log buffer, and nothing in it logs.
+    // Config first: nothing in it logs.
     let config = match Config::from_env() {
         Ok(c) => Arc::new(c),
         Err(e) => {
@@ -62,16 +58,10 @@ async fn main() {
             std::process::exit(2);
         }
     }
-    // One filter over both layers: the admin UI sees exactly what stdout sees,
-    // and `RUST_LOG` governs both.
-    let logs = LogBuffer::new(config.log_buffer);
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "wiretap_backend=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .with(logs.clone())
+    // One filter over stdout and the ring, so `RUST_LOG` governs both.
+    let logs = Logs::new(&["wiretap_*", "wslib_telemetry"]);
+    Telemetry::new("wiretap_backend=info")
+        .with_ring(&logs)
         .init();
 
     if let Err(e) = run(config, logs).await {
@@ -80,7 +70,7 @@ async fn main() {
     }
 }
 
-async fn run(config: Arc<Config>, logs: LogBuffer) -> Result<(), String> {
+async fn run(config: Arc<Config>, logs: Logs) -> Result<(), String> {
     // Before anything that can fail or retry. /v1/health carries this too, but
     // only once the listener is up: a gateway looping in the Postgres wait
     // below, or one that never binds, would otherwise be a container with no

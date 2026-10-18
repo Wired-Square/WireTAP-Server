@@ -44,7 +44,7 @@ use socketcan::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use wiretap_io::can::{CanEvent, CanRead, CanTask};
-use wiretap_model::{Direction, Sample, Secret, SourceId};
+use wiretap_model::{Direction, Sample, SourceId};
 use wiretap_protocol::testpattern::{
     encode, sweep_payload, Command, Flags, Message, ID_CONTROL, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
 };
@@ -54,6 +54,7 @@ use wiretap_server::settings::{
     Batching, Device, DeviceKind, Forward, LogLevel, Settings, TestPattern,
 };
 use wiretap_server::source::{socketcan as server_can, system_time_to_us, Bitrates};
+use wslib_secret::Secret;
 
 /// Long enough to absorb a loaded CI runner, short enough that a wedged read
 /// fails the test instead of hanging the job.

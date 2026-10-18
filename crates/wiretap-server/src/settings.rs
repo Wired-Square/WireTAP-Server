@@ -18,8 +18,9 @@ use std::path::{Path, PathBuf};
 
 use wiretap_catalog::{rtu_rules, LineSettings, ModbusRtuOptions, Parity};
 use wiretap_model::config::{DeviceSection, FileConfig};
-use wiretap_model::{parse_ifaces, Direction, Secret, SourceId};
+use wiretap_model::{parse_ifaces, Direction, SourceId};
 use wiretap_protocol::ingest::{self as proto, valid_daemon_id, valid_database_name};
+use wslib_secret::Secret;
 
 use crate::catalogues::Catalogues;
 use crate::cli::Cli;

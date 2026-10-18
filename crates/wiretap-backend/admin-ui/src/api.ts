@@ -376,14 +376,22 @@ export interface StoredCatalog {
   created_at_us: number;
 }
 
+export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
+
 export interface LogRecord {
   seq: number;
-  ts: string;
-  level: string;
+  at: string;
+  level: LogLevel;
   target: string;
   message: string;
-  /** `database=x elapsed_ms=n` — structured fields, empty when there are none. */
-  fields: string;
+  fields: [string, string][];
+}
+
+/** Oldest first. */
+export interface LogSnapshot {
+  started_at: string;
+  records: LogRecord[];
+  log_file: string | null;
 }
 
 export interface Activity {

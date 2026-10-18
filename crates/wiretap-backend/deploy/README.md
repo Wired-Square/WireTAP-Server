@@ -48,11 +48,17 @@ yourself:
 host, then:
 ```bash
 docker build -f crates/wiretap-backend/Dockerfile \
-  --build-arg "WIRETAP_BUILD_ID=$(packaging/build-id.sh)" \
+  --build-arg "WSLIB_BUILD_ID=$(packaging/build-id.sh)" \
+  --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN \
   -t wiretap-backend:latest .
 ```
 Run it from the repo root — `wiretap-backend` is a workspace member, so cargo
 needs the root `Cargo.toml` and `Cargo.lock`, and the context must include them.
+
+`--secret` is the read token of the private Cargo registry's mirror, which the
+build fetches the `wslib-*` crates from; it reaches no image layer. Export
+`CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN` first, or take it from
+`~/.cargo/credentials.toml` with `scripts/cargo-mirror-token.sh`.
 
 `--build-arg` is what lets the image name the commit it came from, on
 `/v1/health` and in its `org.opencontainers.image.revision` label — a container
@@ -63,14 +69,15 @@ particular build.
 `packaging/build-id.sh` rather than a `git rev-parse` by hand: it adds the
 `-dirty` marker an edited tree needs, and it *fails* in an export with no
 `.git` instead of quietly stamping a bare `g`. If you are building from such an
-export, pass `WIRETAP_BUILD_ID` yourself or accept `unknown` — never a value the
+export, pass `WSLIB_BUILD_ID` yourself or accept `unknown` — never a value the
 shell built from a failed command.
 
 **B. Build elsewhere, copy the image** (no registry, cross-machine). Build for
 the target's architecture, then stream it over SSH:
 ```bash
 docker build --platform linux/amd64 -f crates/wiretap-backend/Dockerfile \
-  --build-arg "WIRETAP_BUILD_ID=$(packaging/build-id.sh)" \
+  --build-arg "WSLIB_BUILD_ID=$(packaging/build-id.sh)" \
+  --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN \
   -t wiretap-backend:latest .
 docker save wiretap-backend:latest | ssh root@nas 'docker load'
 ```

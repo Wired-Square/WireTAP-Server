@@ -31,8 +31,16 @@ jobs:
   gates:
     name: Gates
     runs-on: ubuntu-latest
+    env:
+      # The one place this workflow names the secret: Actions holds only the
+      # mirror's read token, and cannot reach Forgejo.
+      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: &mirror-token ${{ secrets.CARGO_REGISTRIES_WIRED_SQUARE_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+
+      - &cargo-mirror
+        name: Read the wslib crates from the registry mirror
+        run: cat .cargo/mirror.toml >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
 
       - name: Install the toolchain
         run: |
@@ -143,9 +151,11 @@ jobs:
       CANGEN_FRAMES: "1000"
       # Eight hex digits is how cansend is told an id is 29-bit.
       EXTENDED_ID: "01ABCDEF"
+      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
 
     steps:
       - uses: actions/checkout@v7
+      - *cargo-mirror
 
       - name: Install the toolchain
         run: |
@@ -373,8 +383,11 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
     steps:
       - uses: actions/checkout@v7
+      - *cargo-mirror
 
       - name: Install the toolchain
         run: |
@@ -449,6 +462,8 @@ jobs:
   image:
     name: Gateway image
     runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
     steps:
       - uses: actions/checkout@v7
 
@@ -460,7 +475,8 @@ jobs:
         run: |
           docker buildx build \
             --file crates/wiretap-backend/Dockerfile \
-            --build-arg "WIRETAP_BUILD_ID=g${GITHUB_SHA:0:12}" \
+            --build-arg "WSLIB_BUILD_ID=g${GITHUB_SHA:0:12}" \
+            --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN \
             --output type=cacheonly \
             .
 
@@ -655,6 +671,7 @@ jobs:
       - uses: actions/checkout@v7
       - *reach
       - *fetch
+      - *cargo-mirror
 
       - name: Install the toolchain
         run: |
@@ -675,5 +692,8 @@ jobs:
         working-directory: apps/wiretap-server/frontend
         run: npm ci
 
+      # Here, not on the job, so the third-party ssh-agent action never sees it.
       - name: Build it, keep nothing
+        env:
+          CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
         run: apps/wiretap-server/make-image.sh amd64
