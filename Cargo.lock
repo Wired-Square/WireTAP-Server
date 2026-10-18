@@ -2870,9 +2870,9 @@ checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
 
 [[package]]
 name = "wslib-secret"
-version = "0.1.0"
+version = "0.1.1"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "c66d474692106fe0a1e8e6281b853f95c24da92a54b5970553178d3a3d084848"
+checksum = "1cecb90fec3688b4d4e14cfcd6aca61f6b41500f1244f65e3e697abf1b0da931"
 dependencies = [
  "subtle",
 ]

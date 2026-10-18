@@ -18,10 +18,7 @@ All notable changes to this project are documented here. Entries go under
   `wiretap-build-id`. Its variable is now `WSLIB_BUILD_ID`, in place of
   `WIRETAP_BUILD_ID`, for the image build arguments too, and a value it is given
   now wins over the checkout's own commit.
-- **Secrets come from `wslib-secret`**, which replaces the server's own type. A
-  secret file (`WIRETAP_PG_PASSWORD_FILE`, `WIRETAP_ADMIN_KEY_FILE`) now loses
-  one trailing newline (`\n` or `\r\n`) and no more, where it lost every
-  trailing `\r` and `\n`.
+- **Secrets come from `wslib-secret`**, which replaces the server's own type.
 - **The archive's reconnect delay comes from `wslib-backoff`**, on the same
   schedule: 0.5 s doubling to 10 s, restarting once the gateway connects.
 - **The minimum Rust is 1.88**, from 1.85.
