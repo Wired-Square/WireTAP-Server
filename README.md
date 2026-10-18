@@ -262,7 +262,7 @@ Known behaviour, with fixes to come:
 | --- | --- |
 | [crates/wiretap-backend/](crates/wiretap-backend/) | The gateway: HTTP API, ingest listener, admin SPA, Docker stack, capture schema |
 | [appliance/](appliance/) | The Raspberry Pi appliance: its web daemon and card image, a workspace of its own |
-| [docs/workspaces.md](docs/workspaces.md) | Why there are two cargo workspaces, how each is built, and the appliance's cross-build on a Mac |
+| [docs/workspaces.md](docs/workspaces.md) | Why there are three cargo workspaces, how each is built, and the appliance's cross-build on a Mac |
 | [docs/ingest-protocol.md](docs/ingest-protocol.md) | Where the binary ingest spec lives, for anyone writing capture-device firmware, and the `[ingest]` settings |
 | [tools/](tools/) | Test and admin scripts. Never packaged, never shipped |
 | [debian/](debian/), [packaging/](packaging/) | Package metadata, maintainer scripts, `make-deb.sh`, the systemd unit and the lifecycle test |
