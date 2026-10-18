@@ -361,16 +361,18 @@ for, and `auto_migrate`.
 | `WIRETAP_CONSOLE_UID` | `0` | The uid whose requests on the app socket may assert a caller; not `65534` |
 | `RUST_LOG` | `wiretap_backend=info` | Log filter |
 
-Full list (listen addresses, ingest keepalive/batch caps, log buffer size, the
-admin UI's directory) is in [src/config.rs](src/config.rs).
+Full list (listen addresses, ingest keepalive/batch caps, the admin UI's
+directory) is in [src/config.rs](src/config.rs).
 
 `GET /healthz` (under each listener's base path) answers 200 while Postgres is
 reachable and 503 when it is not, for a supervisor's probe. `/v1/health`
 answers 200 either way and says which.
 
-The Logging tab shows the newest `WIRETAP_LOG_BUFFER` records (2000) from
-memory; stdout remains the durable log. A field named like a credential shows
-as `[redacted]`, and a URL's `user:password@` as `redacted@`.
+The Logging tab shows the newest 200 of the last 1000 records the gateway's own
+crates logged, held in memory; stdout remains the durable log. A field named
+like a credential shows as `[redacted]`. `GET /v1/admin/logs` answers them in
+`wslib-telemetry`'s `LogSnapshot`, oldest first; `?level=warn` keeps that level
+and louder, and `?limit=` sets how many (200).
 
 ## Optional: pgBackRest backups
 

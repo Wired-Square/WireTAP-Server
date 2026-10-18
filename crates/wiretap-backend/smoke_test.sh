@@ -327,7 +327,7 @@ resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "$A" "$BASE/v1/admin/assignments
 check "clear again with the old expected -> 409, current null" $?
 
 # --- logs ---
-curl -fsS -H "$A" "$BASE/v1/admin/logs" | grep -q records; check "logs" $?
+curl -fsS -H "$A" "$BASE/v1/admin/logs" | python3 -c 'import sys,json;d=json.load(sys.stdin);assert isinstance(d["records"],list) and d["started_at"]'; check "logs" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/admin/logs")
 [ "$code" = "401" ]; check "logs: no token -> 401" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "$R" "$BASE/v1/admin/logs")

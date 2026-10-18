@@ -2642,13 +2642,13 @@ dependencies = [
  "tokio-postgres",
  "tower-http",
  "tracing",
- "tracing-subscriber",
  "wiretap-catalog",
  "wiretap-gateway",
  "wiretap-model",
  "wiretap-protocol",
  "wslib-build-id",
  "wslib-secret",
+ "wslib-telemetry",
 ]
 
 [[package]]
@@ -2876,6 +2876,19 @@ checksum = "1cecb90fec3688b4d4e14cfcd6aca61f6b41500f1244f65e3e697abf1b0da931"
 dependencies = [
  "serde",
  "subtle",
+]
+
+[[package]]
+name = "wslib-telemetry"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "58a13e67b53229d558fb1f09ae3b0190c1dfe5c31d8dc5ebe7c5454830f034c5"
+dependencies = [
+ "chrono",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

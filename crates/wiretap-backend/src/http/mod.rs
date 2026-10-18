@@ -27,6 +27,7 @@ use wiretap_gateway::{
 };
 use wiretap_protocol::import::{parse_header, parse_record, BODY_HEADER};
 use wiretap_protocol::ingest::RecordKind;
+use wslib_telemetry::{LogLevel, LogRecord, LogSnapshot};
 
 use crate::archive::{self, ImportError};
 use crate::catalogs::AssignError;
@@ -1563,28 +1564,32 @@ struct LogsQuery {
     limit: Option<usize>,
 }
 
-#[derive(Serialize)]
-struct LogsResponse {
-    records: Vec<crate::logbuf::LogRecord>,
-    capacity: usize,
-}
-
-/// Recent log records, newest first.
+/// The ring's newest `limit` records (200 by default) at `level` or louder,
+/// oldest first.
 async fn logs(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Query(q): Query<LogsQuery>,
-) -> Result<Json<LogsResponse>, ApiError> {
+) -> Result<Json<LogSnapshot>, ApiError> {
     check_admin(&key)?;
-    let level = q
-        .level
-        .as_deref()
-        .map(|s| s.parse().map_err(|_| format!("unknown level '{s}'")))
-        .transpose()?;
-    Ok(Json(LogsResponse {
-        records: state.logs.snapshot(level, q.limit.unwrap_or(200)),
-        capacity: state.logs.capacity(),
-    }))
+    let level = q.level.as_deref().map(log_level).transpose()?;
+    let mut snapshot = state.logs.snapshot();
+    keep_newest(&mut snapshot.records, level, q.limit.unwrap_or(200));
+    Ok(Json(snapshot))
+}
+
+fn log_level(name: &str) -> Result<LogLevel, String> {
+    LogLevel::LADDER
+        .into_iter()
+        .find(|level| level.as_str().eq_ignore_ascii_case(name))
+        .ok_or_else(|| format!("unknown level '{name}'"))
+}
+
+/// The limit applies after the filter, or the last two errors in a busy INFO
+/// stream would be none.
+fn keep_newest(records: &mut Vec<Arc<LogRecord>>, min: Option<LogLevel>, limit: usize) {
+    records.retain(|r| min.is_none_or(|min| r.level >= min));
+    records.drain(..records.len().saturating_sub(limit));
 }
 
 #[cfg(test)]
@@ -1697,6 +1702,51 @@ mod tests {
         assert_eq!(schema_consensus(&HashMap::new()), "unknown");
     }
 
+    fn logged(levels: &[LogLevel]) -> Vec<Arc<LogRecord>> {
+        let logs = wslib_telemetry::Logs::new(&["wiretap_backend"]);
+        tracing::subscriber::with_default(logs.subscriber(), || {
+            for (i, level) in levels.iter().enumerate() {
+                match level {
+                    LogLevel::Error => tracing::error!("{i}"),
+                    LogLevel::Warn => tracing::warn!("{i}"),
+                    LogLevel::Info => tracing::info!("{i}"),
+                    _ => tracing::debug!("{i}"),
+                }
+            }
+        });
+        logs.snapshot().records
+    }
+
+    fn messages(records: &[Arc<LogRecord>]) -> Vec<&str> {
+        records.iter().map(|r| r.message.as_str()).collect()
+    }
+
+    #[test]
+    fn a_level_filter_keeps_everything_at_least_that_severe_oldest_first() {
+        use LogLevel::*;
+        let mut records = logged(&[Error, Warn, Info, Debug, Warn]);
+        keep_newest(&mut records, Some(Warn), 10);
+        assert_eq!(messages(&records), ["0", "1", "4"]);
+    }
+
+    #[test]
+    fn the_limit_keeps_the_newest_after_the_filter() {
+        use LogLevel::*;
+        let mut records = logged(&[Error, Info, Info, Info, Error, Info]);
+        keep_newest(&mut records, Some(Error), 2);
+        assert_eq!(messages(&records), ["0", "4"]);
+        let mut records = logged(&[Error, Info, Info]);
+        keep_newest(&mut records, None, 2);
+        assert_eq!(messages(&records), ["1", "2"]);
+    }
+
+    #[test]
+    fn a_level_is_named_in_either_case() {
+        assert_eq!(log_level("WARN"), Ok(LogLevel::Warn));
+        assert_eq!(log_level("info"), Ok(LogLevel::Info));
+        assert!(log_level("loud").is_err());
+    }
+
     /// The router over `dbs`, taking the key `bootstrap` as admin.
     async fn gateway(dbs: db::Databases) -> std::net::SocketAddr {
         gateway_with(dbs, &db::tests::config_at(0, false)).await
@@ -1709,7 +1759,7 @@ mod tests {
             catalogs: crate::catalogs::Catalogs::new(dbs.clone(), sessions.clone()),
             dbs,
             sessions,
-            logs: crate::logbuf::LogBuffer::new(16),
+            logs: wslib_telemetry::Logs::new(&[]),
             secret_files,
             rotation: Default::default(),
             exports: Default::default(),
@@ -2484,6 +2534,18 @@ mod tests {
         let no_content = json!({ "daemon_id": "bench", "interface": "can0", "provenance": {} });
         let (status, _) = request("PUT", "/v1/admin/assignments", key, Some(no_content)).await;
         assert_eq!(status, 422);
+    }
+
+    #[tokio::test]
+    async fn the_log_is_the_chassis_snapshot() {
+        let key = Some("bootstrap");
+        let (status, body) = request("GET", "/v1/admin/logs?level=info&limit=5", key, None).await;
+        assert_eq!(status, 200);
+        assert!(body["started_at"].is_string(), "{body}");
+        assert!(body["records"].is_array(), "{body}");
+        assert!(body["log_file"].is_null(), "{body}");
+        let (status, _) = request("GET", "/v1/admin/logs?level=loud", key, None).await;
+        assert_eq!(status, 400);
     }
 
     #[tokio::test]

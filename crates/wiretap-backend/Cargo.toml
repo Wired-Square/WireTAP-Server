@@ -50,6 +50,9 @@ chrono = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 tokio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
 tower-http = { workspace = true, features = ["fs"] }
-# `RUST_LOG` filtering, which pulls a regex engine the capture server does not
-# want in a static musl binary.
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# Its `setup` brings `RUST_LOG` filtering, and so a regex engine the capture
+# server does not want in a static musl binary.
+wslib-telemetry = { workspace = true, features = ["ring"] }
+
+[dev-dependencies]
+wslib-telemetry = { workspace = true, features = ["test-support"] }

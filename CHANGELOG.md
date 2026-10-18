@@ -21,6 +21,16 @@ All notable changes to this project are documented here. Entries go under
 - **Secrets come from `wslib-secret`**, which replaces the server's own type.
 - **The archive's reconnect delay comes from `wslib-backoff`**, on the same
   schedule: 0.5 s doubling to 10 s, restarting once the gateway connects.
+- **The gateway's logging comes from `wslib-telemetry`, and
+  `GET /v1/admin/logs` answers its `LogSnapshot`**: `{started_at, records:
+  [{seq, at, level: "info", target, message, fields: [["database", "x"]]}],
+  log_file}`, oldest first with `seq` from 1, where it was `{records: [{seq,
+  ts, level: "INFO", target, message, fields: "database=x"}], capacity}`,
+  newest first with `seq` from 0. `?level=` (in either case) and `?limit=`
+  still apply. The ring holds the last 1000 records from the gateway's own
+  crates, and `WIRETAP_LOG_BUFFER` is gone. Stdout is coloured only on a
+  terminal, and a `RUST_LOG` that does not parse is now warned about rather
+  than silently replaced by the default.
 - **The minimum Rust is 1.88**, from 1.85.
 
 ## [0.1.13] — 2026-10-16

@@ -1524,7 +1524,6 @@ pub(crate) mod tests {
             auto_migrate,
             ingest_keepalive_secs: 30.0,
             ingest_max_batch_frames: 256,
-            log_buffer: 0,
             base_path: String::new(),
             admin_dir: "/nonexistent".into(),
             app_socket: None,
@@ -2395,7 +2394,6 @@ pub(crate) mod tests {
     #[tokio::test]
     #[ignore = "needs TimescaleDB; see live_databases"]
     async fn the_gateways_own_database_holds_no_captures_and_old_ones_are_counted_not_touched() {
-        use tracing_subscriber::layer::SubscriberExt;
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2421,15 +2419,16 @@ pub(crate) mod tests {
             .bootstrap()
             .await
             .unwrap();
-        let logs = crate::logbuf::LogBuffer::new(64);
-        let _logging =
-            tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
+        let logs = wslib_telemetry::Logs::new(&["wiretap_backend"]);
+        let _logging = tracing::subscriber::set_default(logs.subscriber());
         dbs.warn_of_old_captures().await;
-        let warned = logs.snapshot(Some(tracing::Level::WARN), 64);
+        let warned = logs.snapshot().records;
         assert!(
             warned
                 .iter()
-                .any(|r| r.message.contains("no longer served") && r.fields.contains("frames=3")),
+                .any(|r| r.level == wslib_telemetry::LogLevel::Warn
+                    && r.message.contains("no longer served")
+                    && r.fields.contains(&("frames".into(), "3".into()))),
             "{warned:?}"
         );
         assert_eq!(archived(&own, 2001).await, (3, 3));
