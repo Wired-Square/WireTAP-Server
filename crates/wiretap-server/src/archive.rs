@@ -39,6 +39,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 use wiretap_model::Sample;
+use wslib_backoff::Backoff;
 
 use crate::cache::{CacheError, FrameCache, SqliteCache};
 use crate::catalogues::Catalogues;
@@ -501,7 +502,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// so they block; they go through [`tokio::task::block_in_place`] rather
     /// than stalling a worker that a reader task is sharing.
     pub async fn run(mut self) {
-        let mut backoff = BACKOFF_START;
+        let mut backoff = Backoff::new(BACKOFF_START, BACKOFF_MAX);
         loop {
             self.report();
             self.maybe_log_stats();
@@ -511,7 +512,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
                 match self.sink.connect().await {
                     Ok(()) => {
                         self.connected = true;
-                        backoff = BACKOFF_START;
+                        backoff.reset();
                         if self.sink_down {
                             self.sink_down = false;
                             info!("database connection restored{}", self.tag);
@@ -636,26 +637,23 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// stop: every path back to the top of the loop goes through a failing
     /// connect. What is on disk stays there for the next run, which is what the
     /// cache is for.
-    async fn wait_to_retry(&mut self, delay: &mut Duration) -> bool {
+    async fn wait_to_retry(&mut self, backoff: &mut Backoff) -> bool {
         if self.queue_finished() {
             return false;
         }
-        {
-            let Self { rx, stop, .. } = self;
-            tokio::select! {
-                biased;
-                // Without this a stop during an outage waits out the backoff,
-                // which is up to `BACKOFF_MAX`. What is queued is not lost —
-                // `shutdown_flush` still takes it, and with the sink down that
-                // means the disk cache, for the next run to drain.
-                _ = stop.changed() => {
-                    rx.close();
-                    return false;
-                }
-                _ = tokio::time::sleep(*delay) => {}
+        let Self { rx, stop, .. } = self;
+        tokio::select! {
+            biased;
+            // Without this a stop during an outage waits out the backoff,
+            // which is up to `BACKOFF_MAX`. What is queued is not lost —
+            // `shutdown_flush` still takes it, and with the sink down that
+            // means the disk cache, for the next run to drain.
+            _ = stop.changed() => {
+                rx.close();
+                return false;
             }
+            _ = tokio::time::sleep(backoff.next()) => {}
         }
-        *delay = (*delay * 2).min(BACKOFF_MAX);
         true
     }
 
@@ -768,12 +766,7 @@ impl<S: BatchSink, C: FrameCache> Batcher<S, C> {
     /// queue behind it so the capture keeps its own path clear, and wait to
     /// retry. A session the far end closed caches `batch` too, but reconnects
     /// at once. `false` once there is no point retrying.
-    async fn fail(
-        &mut self,
-        e: SinkError,
-        batch: Vec<Arc<Sample>>,
-        backoff: &mut Duration,
-    ) -> bool {
+    async fn fail(&mut self, e: SinkError, batch: Vec<Arc<Sample>>, backoff: &mut Backoff) -> bool {
         let closed = matches!(e, SinkError::Closed(_));
         if closed {
             info!("{e}; reconnecting{}", self.tag);
@@ -986,7 +979,7 @@ mod tests {
     struct SinkState {
         frames: Arc<Mutex<Vec<u32>>>,
         fault: Arc<Mutex<Option<String>>>,
-        connects: Arc<AtomicUsize>,
+        connects: Arc<Mutex<Vec<tokio::time::Instant>>>,
         keepalives: Arc<AtomicUsize>,
     }
 
@@ -1011,7 +1004,11 @@ mod tests {
 
     impl BatchSink for FakeSink {
         async fn connect(&mut self) -> SinkResult {
-            self.0.connects.fetch_add(1, Ordering::Relaxed);
+            self.0
+                .connects
+                .lock()
+                .unwrap()
+                .push(tokio::time::Instant::now());
             self.0.check()
         }
 
@@ -1402,6 +1399,40 @@ mod tests {
         })
         .await;
         r.finish().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnects_back_off_from_half_a_second_to_ten_and_restart_once_connected() {
+        let r = rig(100);
+        let start = tokio::time::Instant::now();
+        r.sink.fail(Some("gateway down"));
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        r.sink.fail(None);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        r.sink.fail(Some("gateway down again"));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let connects: Vec<Duration> = r
+            .sink
+            .connects
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| *t - start)
+            .collect();
+        let (outage, again) = connects.split_at(9);
+        assert_eq!(
+            outage,
+            [0, 500, 1500, 3500, 7500, 15500, 25500, 35500, 45500].map(Duration::from_millis),
+            "0.5 s doubling to 10 s, the last one connecting"
+        );
+        assert_eq!(again.len(), 2, "{again:?}");
+        assert_eq!(
+            again[1] - again[0],
+            Duration::from_secs(1),
+            "the schedule restarted"
+        );
+        r.finish_by_signal().await;
     }
 
     /// What is still queued at shutdown is written, not dropped.

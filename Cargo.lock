@@ -2757,6 +2757,7 @@ dependencies = [
  "wiretap-io",
  "wiretap-model",
  "wiretap-protocol",
+ "wslib-backoff",
  "wslib-build-id",
  "wslib-secret",
 ]
@@ -2854,6 +2855,12 @@ dependencies = [
  "unicode-xid",
  "wasmparser",
 ]
+
+[[package]]
+name = "wslib-backoff"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "27a90db8a9c74e6dd46a9fea5c7cee4f6451856bd34b17213c5f27e54fa9367e"
 
 [[package]]
 name = "wslib-build-id"

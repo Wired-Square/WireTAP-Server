@@ -51,6 +51,7 @@ wiretap-checksum = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git
 wiretap-gateway = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git", tag = "v0.10.2" }
 
 # --- the wslib-rs toolkit, from the private registry (.cargo/config.toml) ---
+wslib-backoff = { version = "0.1", registry = "wired-square" }
 wslib-build-id = { version = "0.1", registry = "wired-square" }
 wslib-secret = { version = "0.1", registry = "wired-square" }
 

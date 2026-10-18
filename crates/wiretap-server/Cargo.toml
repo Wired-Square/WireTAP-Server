@@ -16,6 +16,7 @@ wslib-build-id.workspace = true
 # Also a build-dependency above; this side is the build_version! macro only.
 wslib-build-id.workspace = true
 wiretap-model = { path = "../wiretap-model" }
+wslib-backoff.workspace = true
 wslib-secret.workspace = true
 # The GVRET, ingest and test-pattern codecs and the DLC table. No frame type crosses the
 # boundary: the codecs take scalars and this crate adapts, which is what will
@@ -58,7 +59,8 @@ wiretap-checksum.workspace = true
 # The outage drill and the vcan loopback are integration tests, so they link
 # against the crate rather than into it and need their own runtime. `net` and
 # `io-util` are the vcan drill's: it drives the GVRET listener over a socket.
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+# `test-util` pauses the clock for the archive's reconnect schedule.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "test-util"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 socketcan = { workspace = true, features = ["tokio"] }

@@ -22,6 +22,8 @@ All notable changes to this project are documented here. Entries go under
   secret file (`WIRETAP_PG_PASSWORD_FILE`, `WIRETAP_ADMIN_KEY_FILE`) now loses
   one trailing newline (`\n` or `\r\n`) and no more, where it lost every
   trailing `\r` and `\n`.
+- **The archive's reconnect delay comes from `wslib-backoff`**, on the same
+  schedule: 0.5 s doubling to 10 s, restarting once the gateway connects.
 - **The minimum Rust is 1.88**, from 1.85.
 
 ## [0.1.13] — 2026-10-16
