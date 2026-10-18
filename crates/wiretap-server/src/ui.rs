@@ -64,7 +64,6 @@ pub struct UiForward {
     pub enable: Option<bool>,
     pub host: Option<String>,
     pub port: Option<u16>,
-    #[serde(with = "secret")]
     pub api_key: Option<Secret>,
     pub database: Option<String>,
     pub batch_size: Option<usize>,
@@ -79,7 +78,6 @@ pub struct UiForward {
 pub struct UiIngest {
     pub enable: Option<bool>,
     pub port: Option<u16>,
-    #[serde(with = "secret")]
     pub token: Option<Secret>,
 }
 
@@ -87,26 +85,6 @@ pub struct UiIngest {
 #[serde(default, deny_unknown_fields)]
 pub struct UiLogging {
     pub level: Option<String>,
-}
-
-mod secret {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use wslib_secret::Secret;
-
-    pub fn serialize<S: Serializer>(v: &Option<Secret>, s: S) -> Result<S::Ok, S::Error> {
-        v.as_ref().map(Secret::expose).serialize(s)
-    }
-
-    /// Not a plain `String`, whose error quotes the value it was handed.
-    #[derive(Deserialize)]
-    #[serde(untagged, expecting = "a secret must be a string")]
-    enum Text {
-        Text(String),
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Secret>, D::Error> {
-        Ok(Option::<Text>::deserialize(d)?.map(|Text::Text(s)| Secret::new(s)))
-    }
 }
 
 impl UiDevice {
