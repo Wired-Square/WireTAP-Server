@@ -5,9 +5,9 @@
 use std::env;
 use std::path::PathBuf;
 
-use wiretap_model::Secret;
+use wslib_secret::Secret;
 
-use crate::secrets::{self, SecretFiles};
+use crate::secrets::SecretFiles;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -125,7 +125,8 @@ fn secret_var(var: &str, file_var: &str) -> Result<(Option<Secret>, Option<PathB
         return Ok((None, None));
     };
     let path = PathBuf::from(path);
-    Ok((Some(secrets::read(&path)?), Some(path)))
+    let secret = Secret::from_file(&path).map_err(|e| e.to_string())?;
+    Ok((Some(secret), Some(path)))
 }
 
 impl Config {

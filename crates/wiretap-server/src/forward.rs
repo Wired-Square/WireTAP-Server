@@ -23,8 +23,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{info, warn};
-use wiretap_model::{blob_sha1_hex, Sample, Secret};
+use wiretap_model::{blob_sha1_hex, Sample};
 use wiretap_protocol::ingest as proto;
+use wslib_secret::Secret;
 
 use crate::archive::{BatchSink, SinkError, SinkResult, WriteError};
 use crate::cache::{FrameCache, SqliteCache};

@@ -2958,7 +2958,7 @@ mod tests {
         let at = live_gateway_with("p10_admin_cli", &db::tests::config_at(0, false)).await;
         let mut config = db::tests::config_at(0, false);
         config.http_listen = format!("0.0.0.0:{}", at.port());
-        config.bootstrap_admin_key = Some(wiretap_model::Secret::new("bootstrap"));
+        config.bootstrap_admin_key = Some(wslib_secret::Secret::new("bootstrap"));
         crate::secrets::rotate_command(&config, "admin-key")
             .await
             .unwrap();

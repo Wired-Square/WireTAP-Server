@@ -20,14 +20,14 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
-use wiretap_model::{Sample, Secret};
+use wiretap_model::Sample;
 use wiretap_protocol::ingest::{
     self as proto, Action, CloseReason, IncomingBatch, ServerConfig, ServerSession, ShortBatch,
 };
+use wslib_secret::Secret;
 
 use crate::archive::Archive;
 use crate::settings::Ingest;
@@ -208,11 +208,8 @@ impl Session {
 
     fn hello(&self, hello: &proto::Hello) -> u8 {
         if !self.config.token.is_empty() {
-            let expected = self.config.token.expose().as_bytes();
-            // Constant time, and length-independent: a plain `==` would leak
-            // the token a byte at a time to anything that can reconnect and
-            // measure.
-            if !bool::from(hello.token.ct_eq(expected)) {
+            let presented = String::from_utf8(hello.token.clone()).map(Secret::from);
+            if !presented.is_ok_and(|token| token.matches(&self.config.token)) {
                 warn!("Ingest client {} failed auth", self.peer);
                 return proto::HELLO_BAD_AUTH;
             }
@@ -536,6 +533,15 @@ mod tests {
         // attempt.
         let mut buf = [0u8; 8];
         assert_eq!(c.read(&mut buf).await.unwrap(), 0, "closed after bad auth");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_token_that_is_not_utf8_is_refused() {
+        let (addr, _, _stop) = listener("sekrit", 100).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&hello(b"sekrit\xff", false)).await.unwrap();
+        let ack = proto::parse_hello_ack(&reply(&mut c).await.body).unwrap();
+        assert_eq!(ack.status, proto::HELLO_BAD_AUTH);
     }
 
     #[tokio::test(flavor = "multi_thread")]

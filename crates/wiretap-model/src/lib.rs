@@ -13,10 +13,8 @@ pub mod blob;
 #[cfg(feature = "config")]
 pub mod config;
 pub mod sample;
-pub mod secret;
 
 pub use blob::{blob_sha1, blob_sha1_hex};
 #[cfg(feature = "config")]
 pub use config::{parse_ifaces, FileConfig};
 pub use sample::{CanSample, Direction, ModbusSample, Protocol, Sample, SerialSample, SourceId};
-pub use secret::Secret;

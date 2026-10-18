@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use wiretap_model::config::{DeviceSection, FileConfig};
-use wiretap_model::Secret;
+use wslib_secret::Secret;
 
 use crate::cli::Cli;
 use crate::pipeline;
@@ -38,7 +38,7 @@ macro_rules! scalar_settings {
     };
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiConfig {
     /// `None` leaves the device set to the defaults; empty captures nothing
@@ -58,7 +58,7 @@ pub struct UiDevice {
     pub database: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiForward {
     pub enable: Option<bool>,
@@ -74,7 +74,7 @@ pub struct UiForward {
     pub queue_flush_pct: Option<u8>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiIngest {
     pub enable: Option<bool>,
@@ -91,7 +91,7 @@ pub struct UiLogging {
 
 mod secret {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use wiretap_model::Secret;
+    use wslib_secret::Secret;
 
     pub fn serialize<S: Serializer>(v: &Option<Secret>, s: S) -> Result<S::Ok, S::Error> {
         v.as_ref().map(Secret::expose).serialize(s)
@@ -527,6 +527,15 @@ mod tests {
         toml::from_str(toml).expect("test ui.toml parses")
     }
 
+    /// Compared as text, since a `Secret` has no `==`.
+    fn as_toml(ui: &UiConfig) -> String {
+        toml::to_string(ui).unwrap()
+    }
+
+    fn is_empty(ui: &UiConfig) -> bool {
+        as_toml(ui) == as_toml(&UiConfig::default())
+    }
+
     fn env() -> Env {
         Env {
             hostname: Some("bench".into()),
@@ -629,12 +638,12 @@ mod tests {
     fn ui_toml_round_trips_through_an_atomic_write() {
         let dir = TempDir::new("ui-write");
         let path = dir.0.join("ui.toml");
-        assert_eq!(load(&path), Ok(UiConfig::default()), "absent is empty");
+        assert!(is_empty(&load(&path).unwrap()), "absent is empty");
 
         let written =
             ui("[[devices]]\ninterface = \"can1\"\n[forward]\nenable = true\napi_key = \"k\"\n");
         write(&path, &written).unwrap();
-        assert_eq!(load(&path), Ok(written));
+        assert_eq!(as_toml(&load(&path).unwrap()), as_toml(&written));
         assert!(!dir.0.join("ui.toml.tmp").exists());
         let mode = fs::metadata(&path).unwrap().permissions();
         assert_eq!(
@@ -710,12 +719,12 @@ mod tests {
 
         fs::write(&path, "[forward\n").unwrap();
         let (r, applied) = start();
-        assert_eq!(applied, UiConfig::default());
+        assert!(is_empty(&applied), "{applied:?}");
         assert!(ignored(&r), "{:?}", r.warnings);
 
         fs::write(&path, "[forward]\ndatabase = \"Not A Name\"\n").unwrap();
         let (r, applied) = start();
-        assert_eq!(applied, UiConfig::default());
+        assert!(is_empty(&applied), "{applied:?}");
         assert_eq!(r.settings.forward.as_ref().unwrap().database, "");
         assert!(ignored(&r));
 
@@ -735,7 +744,7 @@ mod tests {
         let path = dir.0.join("ui.toml");
         fs::write(&path, "[ingest]\nenable = true\n").unwrap();
         let (r, applied) = resolve_at_start(&cli(&[]), None, Some(&path), &env()).unwrap();
-        assert_eq!(applied, UiConfig::default());
+        assert!(is_empty(&applied), "{applied:?}");
         assert!(r.settings.ingest.is_none());
         assert!(r
             .warnings

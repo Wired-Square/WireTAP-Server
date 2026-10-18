@@ -52,6 +52,7 @@ wiretap-gateway = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git"
 
 # --- the wslib-rs toolkit, from the private registry (.cargo/config.toml) ---
 wslib-build-id = { version = "0.1", registry = "wired-square" }
+wslib-secret = { version = "0.1", registry = "wired-square" }
 
 # --- CLI ---
 clap = { version = "4", default-features = false }
@@ -98,14 +99,11 @@ hex = "0.4"
 flate2 = "1"
 
 # --- hashing and secrets ---
-# sha2 hashes API keys at rest; subtle compares an ingest token without leaking
-# its length or contents to a timing attack, which is what the Python used
-# `hmac.compare_digest` for.
+# sha2 hashes API keys at rest.
 sha2 = "0.10"
 # A catalogue is named by its Git blob SHA-1, as `git hash-object` names it.
 sha1 = "0.10"
 rand = "0.8"
-subtle = "2"
 
 # --- logging ---
 tracing = "0.1"

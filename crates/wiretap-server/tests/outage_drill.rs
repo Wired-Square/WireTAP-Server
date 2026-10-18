@@ -22,11 +22,12 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use wiretap_model::{CanSample, Direction, Sample, Secret, SourceId};
+use wiretap_model::{CanSample, Direction, Sample, SourceId};
 use wiretap_server::archive;
 use wiretap_server::cache::{FrameCache, SqliteCache};
 use wiretap_server::settings::{Batching, Forward};
 use wiretap_server::source::system_time_to_us;
+use wslib_secret::Secret;
 
 /// Frames pushed through the drill. Enough that batching, chunking at the
 /// protocol's 256-record cap, and a cache spanning several batches all happen.

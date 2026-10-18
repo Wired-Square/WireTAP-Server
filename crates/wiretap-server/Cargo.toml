@@ -16,6 +16,7 @@ wslib-build-id.workspace = true
 # Also a build-dependency above; this side is the build_version! macro only.
 wslib-build-id.workspace = true
 wiretap-model = { path = "../wiretap-model" }
+wslib-secret.workspace = true
 # The GVRET, ingest and test-pattern codecs and the DLC table. No frame type crosses the
 # boundary: the codecs take scalars and this crate adapts, which is what will
 # let the desktop adopt them without touching the serde type its frontend reads.
@@ -40,7 +41,6 @@ serde_json.workspace = true
 # `ui.toml`. wiretap-model links both already.
 serde.workspace = true
 toml.workspace = true
-subtle.workspace = true
 # For naming the errno an open failed with, and the host's own name.
 libc = "0.2"
 tracing.workspace = true
