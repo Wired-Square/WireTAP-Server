@@ -5,6 +5,10 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Changed
+
+- **The minimum Rust is 1.88**, from 1.85.
+
 ## [0.1.13] — 2026-10-16
 
 Export and import a capture database, rotate the gateway's secrets, and keep

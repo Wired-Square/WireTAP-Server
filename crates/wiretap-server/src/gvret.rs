@@ -476,7 +476,7 @@ mod tests {
             h.frames.send(sample(0, id)).unwrap();
         }
         let got = expect_bytes(&mut c, 20 * (12 + 2)).await;
-        for (id, frame) in got.chunks_exact(12 + 2).enumerate() {
+        for (id, frame) in got.as_chunks::<{ 12 + 2 }>().0.iter().enumerate() {
             assert_eq!(
                 u32::from_le_bytes(frame[6..10].try_into().unwrap()),
                 id as u32,
@@ -559,7 +559,9 @@ mod tests {
             "capacity 2, five sent: three are gone"
         );
         let ids: Vec<u32> = out
-            .chunks_exact(12 + 2)
+            .as_chunks::<{ 12 + 2 }>()
+            .0
+            .iter()
             .map(|f| u32::from_le_bytes(f[6..10].try_into().unwrap()))
             .collect();
         assert_eq!(

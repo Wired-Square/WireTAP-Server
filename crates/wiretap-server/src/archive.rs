@@ -263,7 +263,7 @@ impl Archive {
     /// so all but one drop in `DROPS_PER_CLOCK_CHECK` returns without taking
     /// the lock or reading the time.
     fn log_queue_full(&self, prior: u64) {
-        if prior % DROPS_PER_CLOCK_CHECK != 0 {
+        if !prior.is_multiple_of(DROPS_PER_CLOCK_CHECK) {
             return;
         }
         let now = Instant::now();
