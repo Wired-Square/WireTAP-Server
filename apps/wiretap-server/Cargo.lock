@@ -84,8 +84,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-auth"
-version = "0.12.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.12.0#0719cbabaca28d04cc0de5f274f34b43c9532a5e"
+version = "0.13.0"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
 dependencies = [
  "appliance-store",
  "appliance-types",
@@ -101,17 +101,13 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "wslib-secret",
 ]
 
 [[package]]
-name = "appliance-build-id"
-version = "0.12.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.12.0#0719cbabaca28d04cc0de5f274f34b43c9532a5e"
-
-[[package]]
 name = "appliance-config"
-version = "0.12.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.12.0#0719cbabaca28d04cc0de5f274f34b43c9532a5e"
+version = "0.13.0"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
 dependencies = [
  "clap",
  "serde",
@@ -122,8 +118,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-core"
-version = "0.12.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.12.0#0719cbabaca28d04cc0de5f274f34b43c9532a5e"
+version = "0.13.0"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -157,13 +153,16 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "windows-sys 0.61.2",
+ "wslib-backoff",
+ "wslib-secret",
+ "wslib-telemetry",
  "x509-cert",
 ]
 
 [[package]]
 name = "appliance-https"
-version = "0.12.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.12.0#0719cbabaca28d04cc0de5f274f34b43c9532a5e"
+version = "0.13.0"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -180,12 +179,13 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "wslib-secret",
 ]
 
 [[package]]
 name = "appliance-server"
-version = "0.12.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.12.0#0719cbabaca28d04cc0de5f274f34b43c9532a5e"
+version = "0.13.0"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
 dependencies = [
  "appliance-config",
  "appliance-core",
@@ -199,8 +199,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-store"
-version = "0.12.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.12.0#0719cbabaca28d04cc0de5f274f34b43c9532a5e"
+version = "0.13.0"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
 dependencies = [
  "appliance-types",
  "chrono",
@@ -212,12 +212,13 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
+ "wslib-secret",
 ]
 
 [[package]]
 name = "appliance-test-support"
-version = "0.12.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.12.0#0719cbabaca28d04cc0de5f274f34b43c9532a5e"
+version = "0.13.0"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -225,12 +226,14 @@ dependencies = [
 
 [[package]]
 name = "appliance-types"
-version = "0.12.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.12.0#0719cbabaca28d04cc0de5f274f34b43c9532a5e"
+version = "0.13.0"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
 dependencies = [
  "chrono",
  "serde",
  "thiserror",
+ "wslib-secret",
+ "wslib-telemetry",
 ]
 
 [[package]]
@@ -3358,7 +3361,6 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 name = "wiretap-server-ui"
 version = "0.1.0"
 dependencies = [
- "appliance-build-id",
  "appliance-config",
  "appliance-https",
  "appliance-server",
@@ -3372,6 +3374,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "wslib-build-id",
+ "wslib-telemetry",
 ]
 
 [[package]]
@@ -3385,6 +3389,41 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "wslib-backoff"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "d3bd022cac173a180ec3dcd1a59b550f81aa7a8e33833997e04aa791eeb34fd3"
+
+[[package]]
+name = "wslib-build-id"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
+
+[[package]]
+name = "wslib-secret"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "1cecb90fec3688b4d4e14cfcd6aca61f6b41500f1244f65e3e697abf1b0da931"
+dependencies = [
+ "serde",
+ "subtle",
+]
+
+[[package]]
+name = "wslib-telemetry"
+version = "0.1.2"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "4fc888bea4d0d891642c6b314ab5a4568dadbd1ab9d32a2559d1fe141650af11"
+dependencies = [
+ "chrono",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "x509-cert"

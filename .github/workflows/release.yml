@@ -314,11 +314,15 @@ jobs:
       - name: Install zig and cargo-zigbuild
         uses: ./.github/actions/zig-toolchain
 
+      # `cargo install` reads no project config, so it is passed the checkout's
+      # for the `wired-square` registry.
       - name: Install appliance-xtask at the server app's chassis
         if: matrix.arch == 'arm64'
+        env:
+          CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
         run: |
           rev="$(grep -om1 'wslib-appliance-rs\.git?[^#"]*#[0-9a-f]*' apps/wiretap-server/Cargo.lock | cut -d'#' -f2)"
-          cargo install --locked --git https://github.com/Wired-Square/wslib-appliance-rs.git --rev "$rev" appliance-xtask
+          cargo install --config .cargo/config.toml --locked --git https://github.com/Wired-Square/wslib-appliance-rs.git --rev "$rev" appliance-xtask
 
       - uses: actions/setup-node@v5
         with:

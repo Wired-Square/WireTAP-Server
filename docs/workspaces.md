@@ -15,14 +15,15 @@ name the chassis and every build of it would need read access. Kept apart, the
 root and its release build without the key, though not without the registry
 below. Each workspace has its own `Cargo.lock` and its own `rust-version`: 1.88
 in all three. They pin different chassis tags: `appliance/` v0.1.4,
-`apps/wiretap-server/` v0.12.0.
+`apps/wiretap-server/` v0.13.0.
 
 ## The private registry
 
-The root takes the `wslib-*` crates from the `wired-square` Cargo registry on
-Forgejo, which `.cargo/config.toml` declares, so a fork cannot build it. Cargo
-reads its read token from `CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`, as
-`Bearer <token>`, or from `~/.cargo/credentials.toml`.
+The root and `apps/wiretap-server/` take the `wslib-*` crates from the
+`wired-square` Cargo registry on Forgejo, which `.cargo/config.toml` declares,
+so a fork cannot build either. Cargo reads its read token from
+`CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`, as `Bearer <token>`, or from
+`~/.cargo/credentials.toml`.
 
 Off the network, Forgejo is out of reach and a read-only mirror stands in:
 [`.cargo/mirror.toml`](../.cargo/mirror.toml) in `$CARGO_HOME/config.toml`

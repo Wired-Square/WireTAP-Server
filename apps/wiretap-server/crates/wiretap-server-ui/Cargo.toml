@@ -10,7 +10,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-appliance-build-id = { workspace = true }
 appliance-config = { workspace = true }
 appliance-https = { workspace = true }
 appliance-server = { workspace = true }
@@ -24,9 +23,11 @@ hyper-util = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 tracing = { workspace = true }
+wslib-build-id = { workspace = true }
+wslib-telemetry = { workspace = true, features = ["journald"] }
 
 [build-dependencies]
-appliance-build-id = { workspace = true }
+wslib-build-id = { workspace = true }
 
 [dev-dependencies]
 appliance-https = { workspace = true, features = ["test-support"] }

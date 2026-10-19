@@ -14,10 +14,14 @@ All notable changes to this project are documented here. Entries go under
   with its token as the BuildKit secret `cargo-mirror-token` (`docker build
   --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN`);
   `scripts/cargo-mirror-token.sh` finds it, and the compose file passes it.
+- **`wiretap-server-ui` is on chassis v0.13.0**, from v0.12.0, so building
+  `apps/wiretap-server/` needs the `wired-square` registry too.
 - **The build id comes from `wslib-build-id`**, which replaces
   `wiretap-build-id`. Its variable is now `WSLIB_BUILD_ID`, in place of
   `WIRETAP_BUILD_ID`, for the image build arguments too, and a value it is given
   now wins over the checkout's own commit.
+  `wiretap-server-ui` takes its build id from `wslib-build-id` too, so its
+  variable is `WSLIB_BUILD_ID`, in place of `APPLIANCE_BUILD_ID`.
 - **Secrets come from `wslib-secret`**, which replaces the server's own type.
 - **The archive's reconnect delay comes from `wslib-backoff`**, on the same
   schedule: 0.5 s doubling to 10 s, restarting once the gateway connects.
@@ -31,6 +35,8 @@ All notable changes to this project are documented here. Entries go under
   crates, and `WIRETAP_LOG_BUFFER` is gone. Stdout is coloured only on a
   terminal, and a `RUST_LOG` that does not parse is now warned about rather
   than silently replaced by the default.
+- **`wiretap-server-ui`'s logging comes from `wslib-telemetry`**, through the
+  chassis, so a `RUST_LOG` that does not parse is warned about too.
 - **The minimum Rust is 1.88**, from 1.85.
 
 ## [0.1.13] — 2026-10-16
