@@ -220,7 +220,7 @@ binary_arch
 # ---------------------------------------------------------------------------
 # **Asked for rather than assembled here.** The `~`, the date leading the sha and
 # the `.dirty` spelling are three ordering rules, and they live in
-# `appliance-build-id` so this script and the binary's own --version cannot drift.
+# `wslib-build-id` so this script and the binary's own --version cannot drift.
 #
 # A package is a snapshot sorting *below* the release it names, so a real release
 # installs over a box running one.

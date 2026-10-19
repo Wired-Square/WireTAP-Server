@@ -7,12 +7,12 @@
 # whose context carries no .git, an unpacked source tarball, a chroot. Run it
 # where git is and carry the value to where git is not:
 #
-#   APPLIANCE_BUILD_ID=$(./scaffold/packaging/build-id.sh)
-#   export APPLIANCE_BUILD_ID
+#   WSLIB_BUILD_ID=$(./scaffold/packaging/build-id.sh)
+#   export WSLIB_BUILD_ID
 #
-#   docker build --build-arg APPLIANCE_BUILD_ID="$(./scaffold/packaging/build-id.sh)" .
+#   docker build --build-arg WSLIB_BUILD_ID="$(./scaffold/packaging/build-id.sh)" .
 #
-# `appliance-build-id` reads that variable *before* the working tree, which is
+# `wslib-build-id` reads that variable *before* the working tree, which is
 # the opposite of the obvious ordering and is deliberate: a container build often
 # does have a .git in its context, and it belongs to whatever the build host
 # happened to check out rather than to what is being built. Somebody who set the

@@ -36,7 +36,7 @@ build_binary() {
 
     # The four assertions this file exists to make. Each is about a binary that
     # compiled and linked and is still wrong, which is why none can be a compiler
-    # error. `appliance-build-id`'s module doc carries the reasoning for the
+    # error. `wslib-build-id`'s module doc carries the reasoning for the
     # third, and appliance.toml the history behind the first two.
 
     # e_machine is two little-endian bytes at offset 18, read directly because
@@ -59,7 +59,7 @@ build_binary() {
     # the other. The release profile strips the binary; this is a `&'static str`
     # in .rodata rather than a symbol, so it survives that.
     if grep -q -a ' (unknown)' "$BIN"; then
-        die "$BIN cannot name the commit it was built from — build from a checkout, or set APPLIANCE_BUILD_ID with scaffold/packaging/build-id.sh"
+        die "$BIN cannot name the commit it was built from — build from a checkout, or set WSLIB_BUILD_ID with scaffold/packaging/build-id.sh"
     fi
 
     # A Cortex-A53 — the Pi 3, the Zero 2 W — can compute a wrong address at a

@@ -40,7 +40,7 @@ jobs:
 
       - &cargo-mirror
         name: Read the wslib crates from the registry mirror
-        run: cat .cargo/mirror.toml >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+        run: cat "$GITHUB_WORKSPACE/.cargo/mirror.toml" >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
 
       - name: Install the toolchain
         run: |
@@ -604,6 +604,7 @@ jobs:
       - uses: actions/checkout@v7
       - *reach
       - *fetch
+      - *cargo-mirror
 
       - name: Install the toolchain
         run: |
@@ -628,13 +629,18 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
+      # Here, not on the job, so the third-party ssh-agent action never sees it.
       - name: cargo clippy
+        env: &mirror-env
+          CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: cargo clippy (aarch64 musl)
+        env: *mirror-env
         run: cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
 
       - name: cargo test
+        env: *mirror-env
         run: cargo test --workspace --locked
 
   server-ui-browser:

@@ -1,3 +1,3 @@
 fn main() {
-    appliance_build_id::emit();
+    wslib_build_id::emit();
 }
