@@ -45,9 +45,9 @@ toml.workspace = true
 # For naming the errno an open failed with, and the host's own name.
 libc = "0.2"
 tracing.workspace = true
-# No `env-filter`: the level comes from the config file, and RUST_LOG would
-# cost a regex engine in a binary that is shipped over the network.
-tracing-subscriber.workspace = true
+# `setup-core`, not `setup`: no `env-filter`, whose regex engine would ship in
+# a binary that goes over the network. No `ansi`: stderr is a journal pipe.
+wslib-telemetry = { workspace = true, features = ["setup-core"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # `serial` alone, never `serial-write`: without it the only open compiled in is
@@ -64,6 +64,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 socketcan = { workspace = true, features = ["tokio"] }
+# The vcan drill reads the log through a subscriber of its own.
+tracing-subscriber = { workspace = true, features = ["fmt", "std"] }
 
 # The serial tap's pty tests run on a Mac too.
 [target.'cfg(target_os = "macos")'.dev-dependencies]

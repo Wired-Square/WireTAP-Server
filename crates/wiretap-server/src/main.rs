@@ -11,7 +11,6 @@ use std::process::{Command, ExitCode};
 use std::time::Duration;
 
 use tracing::{error, info, warn};
-use tracing_subscriber::filter::LevelFilter;
 use wiretap_server::{
     catalogues::Catalogues,
     cli::Cli,
@@ -20,6 +19,7 @@ use wiretap_server::{
     settings::{self, Env, LogLevel, Settings},
     ui,
 };
+use wslib_telemetry::Telemetry;
 
 fn main() -> ExitCode {
     // Executed again through /proc/self/exe, the process would be called `exe`
@@ -83,15 +83,7 @@ fn main() -> ExitCode {
 }
 
 fn init_logging(level: LogLevel) {
-    tracing_subscriber::fmt()
-        .with_max_level(match level {
-            LogLevel::Debug => LevelFilter::DEBUG,
-            LogLevel::Info => LevelFilter::INFO,
-            LogLevel::Warning => LevelFilter::WARN,
-            LogLevel::Error => LevelFilter::ERROR,
-        })
-        .with_writer(std::io::stderr)
-        .init();
+    Telemetry::new(level.directive()).stderr().init();
 }
 
 fn serve(settings: &Settings, control: Option<Control>) -> ExitCode {
