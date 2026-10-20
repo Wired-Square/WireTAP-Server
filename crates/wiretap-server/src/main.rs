@@ -83,7 +83,7 @@ fn main() -> ExitCode {
 }
 
 fn init_logging(level: LogLevel) {
-    Telemetry::new(level.directive()).stderr().init();
+    Telemetry::new(level.as_str()).stderr().init();
 }
 
 fn serve(settings: &Settings, control: Option<Control>) -> ExitCode {

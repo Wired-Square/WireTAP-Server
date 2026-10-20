@@ -54,7 +54,7 @@ wiretap-gateway = { git = "https://github.com/Wired-Square/wslib-wiretap-rs.git"
 wslib-backoff = { version = "0.1", registry = "wired-square" }
 wslib-build-id = { version = "0.1", registry = "wired-square" }
 wslib-secret = { version = "0.1", registry = "wired-square" }
-wslib-telemetry = { version = "0.1.3", registry = "wired-square", default-features = false }
+wslib-telemetry = { version = "0.1.5", registry = "wired-square", default-features = false }
 
 # --- CLI ---
 clap = { version = "4", default-features = false }
