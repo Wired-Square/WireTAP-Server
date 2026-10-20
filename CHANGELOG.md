@@ -37,6 +37,12 @@ All notable changes to this project are documented here. Entries go under
   than silently replaced by the default.
 - **`wiretap-server-ui`'s logging comes from `wslib-telemetry`**, through the
   chassis, so a `RUST_LOG` that does not parse is warned about too.
+- **The capture daemon's logging comes from `wslib-telemetry`**, without its
+  regex engine. Its stderr lines no longer carry colour escape codes, which the
+  journal stored literally. A `RUST_LOG` of target and level directives
+  (`wiretap_server::archive=debug,info`) now replaces `--log-level` and
+  `[logging] level` for that run; one that does not parse is warned about, and
+  the configured level applies.
 - **The minimum Rust is 1.88**, from 1.85.
 
 ## [0.1.13] — 2026-10-16
