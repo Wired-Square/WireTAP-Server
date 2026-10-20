@@ -99,6 +99,13 @@ fn serve(settings: &Settings, control: Option<Control>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Fed until the runtime goes, through the shutdown flush, so only a
+    // runtime that cannot schedule it starves the watchdog.
+    runtime.spawn(async {
+        if let Err(e) = wslib_systemd_notify::feed_watchdog(std::future::pending()).await {
+            error!("cannot ping the systemd watchdog, so it will restart this: {e}");
+        }
+    });
     let stopped = runtime.block_on(wiretap_server::pipeline::run(settings, control));
     // Every task, and the listeners and control socket they hold, goes with
     // the runtime, before anything could exec over them.

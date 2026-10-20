@@ -44,6 +44,11 @@ All notable changes to this project are documented here. Entries go under
   `[logging] level` for that run; one that does not parse is warned about, and
   the configured level applies.
 - **The minimum Rust is 1.88**, from 1.85.
+- **The capture daemon's unit is `Type=notify`, with `WatchdogSec=30s`.**
+  `systemctl start` now returns once the archives, the devices and the
+  listeners are up, and fails when the daemon refuses to start. The daemon
+  pings the watchdog every 15 s and is restarted if it misses 30 s of pings.
+  A device it is still waiting for does not hold the start.
 
 ## [0.1.13] — 2026-10-16
 

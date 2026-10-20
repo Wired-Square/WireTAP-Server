@@ -2740,6 +2740,7 @@ dependencies = [
  "wslib-backoff",
  "wslib-build-id",
  "wslib-secret",
+ "wslib-systemd-notify",
  "wslib-telemetry",
 ]
 
@@ -2857,6 +2858,15 @@ checksum = "1cecb90fec3688b4d4e14cfcd6aca61f6b41500f1244f65e3e697abf1b0da931"
 dependencies = [
  "serde",
  "subtle",
+]
+
+[[package]]
+name = "wslib-systemd-notify"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "c94d9ec07b17ce144052551d688104dd36f4c7fb2545d110fe2fd7db49ca8c2c"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

@@ -8,7 +8,9 @@ Documentation=https://github.com/Wired-Square/WireTAP-Server
 After=network.target
 
 [Service]
-Type=exec
+# Active once the archives, the devices and the listeners are up, not at the
+# exec, so `systemctl start` waits for that and fails on a refused start.
+Type=notify
 # The config file is named explicitly because the daemon has no default path
 # for one — it reads a config only when passed -C, exactly as the Python did. It
 # may be absent: the daemon then runs on its defaults. Everything else stays out
@@ -64,6 +66,10 @@ RestartSec=5s
 # notice it, and the cap bounds the hole a real crash leaves.
 RestartSteps=5
 RestartMaxDelaySec=60s
+# Pinged every 15 s from the runtime, through a slow start, a gateway outage
+# and the shutdown flush, so only a wedged daemon misses two; it is restarted
+# as for a crash.
+WatchdogSec=30s
 
 # Hardening. The daemon reads CAN sockets and serial lines, writes SQLite
 # files, and talks to a gateway over TCP; it has no business doing anything

@@ -2,10 +2,12 @@
 //! and the daemon executes itself again, on the same PID, on the change.
 //!
 //! Ingest-only, with the gateway on a dead port and no config file at all, so
-//! it starts on any host without CAN.
+//! it starts on any host without CAN. Its notify socket stands in for
+//! systemd's.
 
+use std::cell::Cell;
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -15,15 +17,26 @@ use serde_json::Value;
 struct Daemon {
     dir: PathBuf,
     socket: PathBuf,
+    notify: UnixDatagram,
+    pings: Cell<usize>,
 }
 
 impl Daemon {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("wiretap-control-{}", std::process::id()));
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("wiretap-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("control.sock");
-        Self { dir, socket }
+        let notify = UnixDatagram::bind(dir.join("notify.sock")).unwrap();
+        notify
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        Self {
+            dir,
+            socket,
+            notify,
+            pings: Cell::new(0),
+        }
     }
 
     fn start(&self, dead_port: u16) -> Child {
@@ -41,6 +54,9 @@ impl Daemon {
             .args(["--forward-enable", "--forward-port", &dead_port.to_string()])
             .args(["--control-socket", self.socket.to_str().unwrap()])
             .env("STATE_DIRECTORY", &self.dir)
+            .env("NOTIFY_SOCKET", self.dir.join("notify.sock"))
+            .env("WATCHDOG_USEC", "100000")
+            .env_remove("WATCHDOG_PID")
             .env_remove("RUNTIME_DIRECTORY")
             .env_remove("WIRETAP_FORWARD_TOKEN")
             .env_remove("WIRETAP_INGEST_TOKEN")
@@ -53,6 +69,18 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(50));
         }
         child
+    }
+
+    /// The next notification other than a watchdog ping, which are counted.
+    fn notified(&self) -> String {
+        let mut buf = [0; 256];
+        loop {
+            let n = self.notify.recv(&mut buf).expect("a notification in 30 s");
+            match std::str::from_utf8(&buf[..n]).unwrap() {
+                "WATCHDOG=1" => self.pings.set(self.pings.get() + 1),
+                other => return other.to_owned(),
+            }
+        }
     }
 
     /// A `GET`, or `None` while nothing answers, as across the restart.
@@ -120,16 +148,24 @@ fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-#[test]
-fn a_change_over_the_socket_is_applied_by_a_restart() {
-    let dead_port = std::net::TcpListener::bind("127.0.0.1:0")
+fn dead_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
-        .port();
-    let d = Daemon::new();
+        .port()
+}
 
-    let mut daemon = d.start(dead_port);
+fn terminate(daemon: &Child) {
+    // SAFETY: a signal to a child this test started.
+    unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
+}
+
+#[test]
+fn a_change_over_the_socket_is_applied_by_a_restart() {
+    let d = Daemon::new("control");
+
+    let mut daemon = d.start(dead_port());
     assert_eq!(mode(&d.socket), 0o660);
     let (status, body) = d.request("GET", "/v1/status", "");
     assert_eq!(status, 200);
@@ -163,7 +199,23 @@ fn a_change_over_the_socket_is_applied_by_a_restart() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // SAFETY: a signal to a child this test started.
-    unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
+    terminate(&daemon);
     assert_eq!(wait(&mut daemon).code(), Some(0));
+}
+
+#[test]
+fn systemd_hears_ready_at_each_start_and_stopping_only_at_a_stop() {
+    let d = Daemon::new("notify");
+
+    let mut daemon = d.start(dead_port());
+    assert_eq!(d.notified(), "READY=1");
+
+    let (status, body) = d.request("PUT", "/v1/settings", r#"{"forward.database": "site"}"#);
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(d.notified(), "READY=1", "the re-exec is not a stop");
+
+    terminate(&daemon);
+    assert_eq!(d.notified(), "STOPPING=1");
+    assert_eq!(wait(&mut daemon).code(), Some(0));
+    assert!(d.pings.get() > 0, "the watchdog was never fed");
 }
