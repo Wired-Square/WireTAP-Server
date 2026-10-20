@@ -17,6 +17,7 @@ use tokio::sync::watch;
 use tracing::warn;
 use wiretap_model::{blob_sha1, blob_sha1_hex};
 use wiretap_protocol::ingest::{ActiveCatalog, CatalogStatus, CatalogStatusEntry, Device, Refusal};
+use wslib_file_atomic::Options;
 
 use crate::settings::{Forward, LineCatalogue, Settings};
 
@@ -108,6 +109,8 @@ pub struct Catalogues {
     refused: Mutex<BTreeMap<String, ([u8; 20], Refusal)>>,
     /// Ticks when any line's rules or refusal change.
     changes: watch::Sender<()>,
+    /// Two sessions can fetch one blob at once, and their writes share a staged file.
+    storing: Mutex<()>,
 }
 
 impl Catalogues {
@@ -224,6 +227,7 @@ impl Catalogues {
             .blob_path(sha)
             .ok_or_else(|| not_kept("no state directory".into()))?;
         let catalogue = checked(sha, blob, &path)?;
+        let _storing = self.storing.lock().expect("unpoisoned");
         write_atomically(&path, blob).map_err(not_kept)?;
         Ok(catalogue)
     }
@@ -301,13 +305,10 @@ fn checked(sha: &str, blob: &[u8], path: &Path) -> Result<LineCatalogue, Refused
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let fail = |e: std::io::Error| format!("{}: {e}", path.display());
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(fail)?;
-    }
-    let partial = path.with_extension("partial");
-    std::fs::write(&partial, bytes).map_err(fail)?;
-    std::fs::rename(&partial, path).map_err(fail)
+    Options::new()
+        .create_parents(true)
+        .write(path, bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -456,6 +457,22 @@ pub(crate) mod tests {
         };
         assert_eq!(sha, sha_of(CATALOGUE.as_bytes()));
         assert_eq!(catalogue.name, "gateway");
+    }
+
+    #[test]
+    fn the_cache_is_the_daemons_alone_and_leaves_nothing_staged() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("private");
+        assign(&line(&dir, None), CATALOGUE);
+        let sha = sha_of(CATALOGUE.as_bytes());
+        for file in [
+            dir.0.join("catalogs").join(format!("{sha}.toml")),
+            dir.0.join(ASSIGNMENTS),
+        ] {
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{}", file.display());
+            assert!(!wslib_file_atomic::beside(&file, "new").exists());
+        }
     }
 
     #[test]
