@@ -5,14 +5,14 @@
 //! a UI may change. Nothing here can make the box transmit: a device is CAN and
 //! passive, and the schema has nowhere to say otherwise.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use wiretap_model::config::{DeviceSection, FileConfig};
+use wslib_file_atomic::Options;
 use wslib_secret::Secret;
 
 use crate::cli::Cli;
@@ -173,23 +173,12 @@ pub fn load(path: &Path) -> Result<UiConfig, String> {
 const HEADER: &str = "# Written by wiretap-server for its UI. Set a value in the config file\n\
                       # instead to pin it: anything set there wins over this file.\n";
 
-/// Replace `ui.toml` whole: a temporary file beside it, synced, renamed over
-/// it, and the directory synced so the rename outlives a power cut.
 pub fn write(path: &Path, ui: &UiConfig) -> io::Result<()> {
     let text = toml::to_string(ui).map_err(io::Error::other)?;
-    let tmp = path.with_extension("toml.tmp");
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.write_all(HEADER.as_bytes())?;
-    f.write_all(text.as_bytes())?;
-    f.sync_all()?;
-    fs::rename(&tmp, path)?;
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-    File::open(dir.unwrap_or(Path::new(".")))?.sync_all()
+    Options::new().write_with(path, |f| {
+        f.write_all(HEADER.as_bytes())?;
+        f.write_all(text.as_bytes())
+    })
 }
 
 /// `current` with `put`'s keys set, or cleared where they are `null`.
@@ -622,7 +611,7 @@ mod tests {
             ui("[[devices]]\ninterface = \"can1\"\n[forward]\nenable = true\napi_key = \"k\"\n");
         write(&path, &written).unwrap();
         assert_eq!(as_toml(&load(&path).unwrap()), as_toml(&written));
-        assert!(!dir.0.join("ui.toml.tmp").exists());
+        assert!(!dir.0.join("ui.toml.new").exists());
         let mode = fs::metadata(&path).unwrap().permissions();
         assert_eq!(
             std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,

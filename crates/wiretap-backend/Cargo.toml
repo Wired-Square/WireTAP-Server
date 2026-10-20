@@ -18,6 +18,7 @@ wslib-build-id.workspace = true
 # Only the sample types; default-features off keeps the TOML parser out.
 wiretap-model = { path = "../wiretap-model", default-features = false }
 wslib-secret.workspace = true
+wslib-file-atomic.workspace = true
 # The ingest codec, and the DLC table: a CAN row's `dlc` column and the `len`
 # served from it.
 wiretap-protocol.workspace = true

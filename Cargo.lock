@@ -2627,6 +2627,7 @@ dependencies = [
  "wiretap-model",
  "wiretap-protocol",
  "wslib-build-id",
+ "wslib-file-atomic",
  "wslib-secret",
  "wslib-telemetry",
 ]
@@ -2739,6 +2740,7 @@ dependencies = [
  "wiretap-protocol",
  "wslib-backoff",
  "wslib-build-id",
+ "wslib-file-atomic",
  "wslib-secret",
  "wslib-systemd-notify",
  "wslib-telemetry",
@@ -2849,6 +2851,15 @@ name = "wslib-build-id"
 version = "0.1.0"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
 checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
+
+[[package]]
+name = "wslib-file-atomic"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "0660ce5ff3793eddb6b73fdeaaea819dc53e57bcac28227f0f30f94fe038d275"
+dependencies = [
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "wslib-secret"

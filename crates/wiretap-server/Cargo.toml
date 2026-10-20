@@ -18,6 +18,7 @@ wslib-build-id.workspace = true
 wiretap-model = { path = "../wiretap-model" }
 wslib-backoff.workspace = true
 wslib-secret = { workspace = true, features = ["serde"] }
+wslib-file-atomic.workspace = true
 # The GVRET, ingest and test-pattern codecs and the DLC table. No frame type crosses the
 # boundary: the codecs take scalars and this crate adapts, which is what will
 # let the desktop adopt them without touching the serde type its frontend reads.

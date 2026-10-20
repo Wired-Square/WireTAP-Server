@@ -13,6 +13,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tokio::task::JoinHandle;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::NoTls;
+use wslib_file_atomic::PromoteError;
 use wslib_secret::Secret;
 
 use crate::archive::ImportError;
@@ -937,7 +938,8 @@ impl Databases {
                     self.set_pg_password(previous).await;
                     return Err(e);
                 }
-                secrets::promote(file).map_err(|e| format!("{}: {e}", staged.display()))?;
+                wslib_file_atomic::promote(file, secrets::STAGED)
+                    .map_err(|e| format!("{}: {e}", staged.display()))?;
                 tracing::warn!(
                     "promoted {}, left by a rotation that stopped before saving it",
                     staged.display()
@@ -945,12 +947,8 @@ impl Databases {
                 Ok(())
             }
             Err(e) => Err(e.describe("postgres")),
-            Ok(_) => match std::fs::remove_file(&staged) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    Err(format!("{}: {e}", staged.display()))
-                }
-                _ => Ok(()),
-            },
+            Ok(_) => wslib_file_atomic::discard(file, secrets::STAGED)
+                .map_err(|e| format!("{}: {e}", staged.display())),
         }
     }
 
@@ -967,10 +965,12 @@ impl Databases {
             .await
             .map_err(|e| schema::db_error_detail(&e))?;
         let password = Secret::new(secrets::random_hex());
-        if let Some(file) = file {
-            secrets::stage(file, password.expose())
-                .map_err(|e| format!("{}: {e}", secrets::staged(file).display()))?;
-        }
+        let staged = file
+            .map(|file| {
+                secrets::stage(file, password.expose())
+                    .map_err(|e| format!("{}: {e}", secrets::staged(file).display()))
+            })
+            .transpose()?;
         let verifier = postgres_protocol::password::scram_sha_256(password.expose().as_bytes());
         let mut current = self.credentials.0.write().await;
         if let Err(e) = client
@@ -984,13 +984,19 @@ impl Databases {
         }
         *current = password.clone();
         drop(current);
-        if let Some(file) = file {
-            secrets::promote(file).map_err(|e| {
-                format!(
-                    "the password was changed but not saved ({e}); it is in {}, \
+        if let Some((file, staged)) = file.zip(staged) {
+            staged.promote().map_err(|e| match e {
+                PromoteError::Unmoved { staged, error } => format!(
+                    "the password was changed but not saved ({error}); it is in {}, \
                      which the next start promotes",
-                    secrets::staged(file).display()
-                )
+                    staged.path().display()
+                ),
+                PromoteError::Unsynced(error) => format!(
+                    "the password was changed and saved in {}, but its directory was not \
+                     synced ({error})",
+                    file.display()
+                ),
+                e => format!("the password was changed but not saved ({e})"),
             })?;
         }
         Ok(password)
@@ -2277,7 +2283,7 @@ pub(crate) mod tests {
         let (rotator, old) = as_new_role("p10_promote", files.clone()).await;
         std::fs::write(&file, old.expose()).unwrap();
         let new = rotator.rotate_pg_password(None).await.unwrap();
-        secrets::stage(&file, new.expose()).unwrap();
+        let _interrupted = secrets::stage(&file, new.expose()).unwrap();
 
         let mut config = rotator.config.as_ref().clone();
         config.pg_password = old;
@@ -2298,7 +2304,7 @@ pub(crate) mod tests {
         };
         let (dbs, old) = as_new_role("p10_discard", files).await;
         std::fs::write(&file, old.expose()).unwrap();
-        secrets::stage(&file, "never-applied").unwrap();
+        let _interrupted = secrets::stage(&file, "never-applied").unwrap();
 
         dbs.reach_postgres().await.unwrap();
         assert_eq!(Secret::from_file(&file).unwrap().expose(), old.expose());

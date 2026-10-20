@@ -1,10 +1,8 @@
 //! The database password and the admin key on disk, and
 //! `wiretap-backend rotate`, which asks the running gateway to rotate one.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,6 +11,7 @@ use http_body_util::{BodyExt, Empty};
 use hyper_util::rt::TokioIo;
 use rand::RngCore;
 use serde::Deserialize;
+use wslib_file_atomic::{Options, Staged};
 
 use crate::config::Config;
 
@@ -30,39 +29,22 @@ pub fn random_hex() -> String {
     hex::encode(raw)
 }
 
+pub const STAGED: &str = "next";
+
 pub fn staged(file: &Path) -> PathBuf {
-    let mut name = file.as_os_str().to_owned();
-    name.push(".next");
-    name.into()
+    wslib_file_atomic::beside(file, STAGED)
 }
 
-/// Always a new file, as `mode` applies only on creation: a leftover `.next`
-/// could otherwise keep a looser one.
-pub fn stage(file: &Path, value: &str) -> io::Result<()> {
-    let path = staged(file);
-    fs::remove_file(&path).ok();
-    let mut staged = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)?;
-    staged
-        .write_all(value.as_bytes())
-        .and_then(|()| staged.sync_all())
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&path);
-        })
-}
-
-pub fn promote(file: &Path) -> io::Result<()> {
-    fs::rename(staged(file), file)?;
-    let directory = file.parent().filter(|p| !p.as_os_str().is_empty());
-    File::open(directory.unwrap_or(Path::new(".")))?.sync_all()
+pub fn stage(file: &Path, value: &str) -> io::Result<Staged> {
+    Options::new()
+        .staging_suffix(STAGED)
+        .stage(file, value.as_bytes())
 }
 
 pub fn persist(file: &Path, value: &str) -> Result<(), String> {
-    stage(file, value)
-        .and_then(|()| promote(file))
+    Options::new()
+        .staging_suffix(STAGED)
+        .write(file, value.as_bytes())
         .map_err(|e| format!("{}: {e}", file.display()))
 }
 
@@ -164,6 +146,8 @@ pub async fn rotate_command(config: &Config, which: &str) -> Result<(), String> 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use wslib_secret::Secret;
 
     use super::*;
@@ -182,7 +166,7 @@ mod tests {
         let file = scratch("leftover");
         fs::write(staged(&file), "stale").unwrap();
         fs::set_permissions(staged(&file), fs::Permissions::from_mode(0o644)).unwrap();
-        stage(&file, "new").unwrap();
+        let _staged = stage(&file, "new").unwrap();
         let mode = fs::metadata(staged(&file)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(Secret::from_file(staged(&file)).unwrap().expose(), "new");
@@ -193,9 +177,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let file = scratch("stage");
         fs::write(&file, "old").unwrap();
-        stage(&file, "new").unwrap();
+        let _staged = stage(&file, "new").unwrap();
         assert_eq!(Secret::from_file(&file).unwrap().expose(), "old");
-        promote(&file).unwrap();
+        wslib_file_atomic::promote(&file, STAGED).unwrap();
         assert_eq!(Secret::from_file(&file).unwrap().expose(), "new");
         assert!(!staged(&file).exists());
         assert_eq!(

@@ -51,6 +51,10 @@ All notable changes to this project are documented here. Entries go under
   listeners are up, and fails when the daemon refuses to start. The daemon
   pings the watchdog every 15 s and is restarted if it misses 30 s of pings.
   A device it is still waiting for does not hold the start.
+- **The capture daemon's catalogue cache is written durably and owner-only.**
+  `<state dir>/catalogs/<sha>.toml` and `assignments.json` are synced, with
+  their directory, before they replace what was there, and are `0600`, where
+  they were `0644`.
 
 ## [0.1.13] — 2026-10-16
 
