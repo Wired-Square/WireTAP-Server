@@ -48,6 +48,8 @@ tracing.workspace = true
 # `setup-core`, not `setup`: no `env-filter`, whose regex engine would ship in
 # a binary that goes over the network. No `ansi`: stderr is a journal pipe.
 wslib-telemetry = { workspace = true, features = ["setup-core"] }
+# `tokio` for `feed_watchdog`.
+wslib-systemd-notify = { workspace = true, features = ["tokio"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # `serial` alone, never `serial-write`: without it the only open compiled in is
