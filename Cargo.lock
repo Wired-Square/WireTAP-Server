@@ -519,7 +519,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2854,9 +2854,9 @@ checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
 
 [[package]]
 name = "wslib-file-atomic"
-version = "0.1.1"
+version = "0.1.2"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "0660ce5ff3793eddb6b73fdeaaea819dc53e57bcac28227f0f30f94fe038d275"
+checksum = "bb3afb2c53ad723e75e6ae3cd6bd4b266befbc40fb3f14708c0dd910afee587c"
 dependencies = [
  "windows-sys 0.61.2",
 ]
