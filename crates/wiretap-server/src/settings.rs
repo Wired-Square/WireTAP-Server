@@ -702,16 +702,6 @@ impl LogLevel {
             Self::Error => "ERROR",
         }
     }
-
-    /// The `tracing` spelling, which has no `WARNING`.
-    pub fn directive(self) -> &'static str {
-        match self {
-            Self::Debug => "debug",
-            Self::Info => "info",
-            Self::Warning => "warn",
-            Self::Error => "error",
-        }
-    }
 }
 
 impl std::str::FromStr for LogLevel {
@@ -1899,19 +1889,6 @@ mod tests {
                 .log_level,
             LogLevel::Warning
         );
-    }
-
-    #[test]
-    fn each_log_level_is_a_tracing_level() {
-        use tracing::level_filters::LevelFilter;
-        for (level, filter) in [
-            (LogLevel::Debug, LevelFilter::DEBUG),
-            (LogLevel::Info, LevelFilter::INFO),
-            (LogLevel::Warning, LevelFilter::WARN),
-            (LogLevel::Error, LevelFilter::ERROR),
-        ] {
-            assert_eq!(level.directive().parse().ok(), Some(filter));
-        }
     }
 
     /// A config as the retired Python server wrote it must still resolve, and
