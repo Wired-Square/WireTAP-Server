@@ -84,8 +84,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-auth"
-version = "0.13.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
+version = "0.13.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
 dependencies = [
  "appliance-store",
  "appliance-types",
@@ -106,8 +106,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-config"
-version = "0.13.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
+version = "0.13.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
 dependencies = [
  "clap",
  "serde",
@@ -118,8 +118,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-core"
-version = "0.13.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
+version = "0.13.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -161,8 +161,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-https"
-version = "0.13.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
+version = "0.13.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -172,20 +172,18 @@ dependencies = [
  "axum",
  "axum-extra",
  "axum-server",
- "hyper",
- "hyper-util",
  "serde_json",
  "tokio",
  "tokio-util",
- "tower",
  "tracing",
+ "wslib-http-server",
  "wslib-secret",
 ]
 
 [[package]]
 name = "appliance-server"
-version = "0.13.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
+version = "0.13.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
 dependencies = [
  "appliance-config",
  "appliance-core",
@@ -199,8 +197,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-store"
-version = "0.13.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
+version = "0.13.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
 dependencies = [
  "appliance-types",
  "chrono",
@@ -217,8 +215,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-test-support"
-version = "0.13.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
+version = "0.13.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -226,8 +224,8 @@ dependencies = [
 
 [[package]]
 name = "appliance-types"
-version = "0.13.0"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.0#3457f590136b48b41f9704329c814e286ea9bf77"
+version = "0.13.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
 dependencies = [
  "chrono",
  "serde",
@@ -3401,6 +3399,22 @@ name = "wslib-build-id"
 version = "0.1.0"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
 checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
+
+[[package]]
+name = "wslib-http-server"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "0e41916b9db59a9b0b6ae28ae0a55764ea4350424d745b40a32b062c8a9f6e9a"
+dependencies = [
+ "axum",
+ "axum-server",
+ "hyper-util",
+ "rustls",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
 
 [[package]]
 name = "wslib-secret"
