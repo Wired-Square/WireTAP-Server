@@ -14,8 +14,10 @@ All notable changes to this project are documented here. Entries go under
   with its token as the BuildKit secret `cargo-mirror-token` (`docker build
   --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN`);
   `scripts/cargo-mirror-token.sh` finds it, and the compose file passes it.
-- **`wiretap-server-ui` is on chassis v0.13.0**, from v0.12.0, so building
-  `apps/wiretap-server/` needs the `wired-square` registry too.
+- **`wiretap-server-ui` is on chassis v0.13.1**, from v0.12.0, so building
+  `apps/wiretap-server/` needs the `wired-square` registry too. Its TLS and
+  redirect listeners are `wslib-http-server`'s, and their log lines read under
+  the target `wslib_http_server`, where they were `appliance_https`.
 - **The build id comes from `wslib-build-id`**, which replaces
   `wiretap-build-id`. Its variable is now `WSLIB_BUILD_ID`, in place of
   `WIRETAP_BUILD_ID`, for the image build arguments too, and a value it is given

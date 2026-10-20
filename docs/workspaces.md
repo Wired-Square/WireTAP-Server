@@ -15,7 +15,7 @@ name the chassis and every build of it would need read access. Kept apart, the
 root and its release build without the key, though not without the registry
 below. Each workspace has its own `Cargo.lock` and its own `rust-version`: 1.88
 in all three. They pin different chassis tags: `appliance/` v0.1.4,
-`apps/wiretap-server/` v0.13.0.
+`apps/wiretap-server/` v0.13.1.
 
 ## The private registry
 
