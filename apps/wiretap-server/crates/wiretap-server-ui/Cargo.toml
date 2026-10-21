@@ -32,3 +32,4 @@ wslib-build-id = { workspace = true }
 [dev-dependencies]
 appliance-https = { workspace = true, features = ["test-support"] }
 appliance-server = { workspace = true, features = ["test-support"] }
+wslib-auth-totp = { workspace = true }

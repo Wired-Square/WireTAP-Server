@@ -245,7 +245,7 @@ async fn served_self_an_account_meets_the_same_ladder() {
 
 #[tokio::test]
 async fn served_self_an_account_with_totp_reaches_capture_after_its_code() {
-    use appliance_https::testing::{Harness, body_json, totp_code};
+    use appliance_https::testing::{Harness, body_json};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     let browser_time = || {
@@ -261,7 +261,8 @@ async fn served_self_an_account_with_totp_reaches_capture_after_its_code() {
         .as_str()
         .unwrap()
         .to_string();
-    let code = totp_code(&secret, SystemTime::now());
+    let key = wslib_auth_totp::Key::from_base32(&secret).expect("a base32 secret");
+    let code = key.code_at(SystemTime::now());
     let confirm = app.post("/api/session/totp/confirm").cookie(&operator);
     let confirm = confirm.json(json!({ "code": code, "browser_time": browser_time() }));
     assert_eq!(confirm.send().await.status(), StatusCode::OK);
@@ -271,7 +272,7 @@ async fn served_self_an_account_with_totp_reaches_capture_after_its_code() {
     assert_eq!(waiting.status(), StatusCode::ACCEPTED);
     assert!(Harness::session_from(&waiting).is_none());
     let pending = body_json(waiting).await["pending"].clone();
-    let code = totp_code(&secret, SystemTime::now() + Duration::from_secs(30));
+    let code = key.code_at(SystemTime::now() + Duration::from_secs(30));
     let step = json!({ "pending": pending, "code": code, "browser_time": browser_time() });
     let signed_in = app.post("/api/session/code").json(step).send().await;
     assert_eq!(signed_in.status(), StatusCode::OK);
