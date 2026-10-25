@@ -7,6 +7,12 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **`wiretap-server` runs as a service through `wslib-service`**, which takes
+  over its runtime, its signals and what it tells systemd. A stop now has 25 s
+  to flush, and a daemon still flushing after that exits non-zero.
+  `STOPPING=1` now arrives with `EXTEND_TIMEOUT_USEC` of 30 s. A panic is
+  logged with where it happened. Applying the UI's settings still re-executes
+  on the same PID and tells systemd nothing.
 - **Building the root workspace needs the private `wired-square` Cargo
   registry**, which the `wslib-*` crates come from, and its read token
   (`CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`, or `~/.cargo/credentials.toml`). A

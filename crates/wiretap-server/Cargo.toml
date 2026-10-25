@@ -30,7 +30,7 @@ wiretap-catalog.workspace = true
 # No `color` (stdout is a journal pipe) and no `suggestions` (a typo at an
 # interactive shell is one --help away): together they cost 33 KB and 7 crates.
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 # The control socket's HTTP/1, and nothing above it: no router, no TLS.
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
@@ -49,8 +49,7 @@ tracing.workspace = true
 # `setup-core`, not `setup`: no `env-filter`, whose regex engine would ship in
 # a binary that goes over the network. No `ansi`: stderr is a journal pipe.
 wslib-telemetry = { workspace = true, features = ["setup-core"] }
-# `tokio` for `feed_watchdog`.
-wslib-systemd-notify = { workspace = true, features = ["tokio"] }
+wslib-service.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # `serial` alone, never `serial-write`: without it the only open compiled in is
@@ -59,6 +58,7 @@ wiretap-io = { workspace = true, features = ["can-socketcan", "serial"] }
 
 [dev-dependencies]
 wiretap-checksum.workspace = true
+wslib-service = { workspace = true, features = ["testing"] }
 # The outage drill and the vcan loopback are integration tests, so they link
 # against the crate rather than into it and need their own runtime. `net` and
 # `io-util` are the vcan drill's: it drives the GVRET listener over a socket.
