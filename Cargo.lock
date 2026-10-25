@@ -519,7 +519,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2891,9 +2891,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-service"
-version = "0.1.0"
+version = "0.1.1"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "da97797bdca48a0ec4649becd5c57b08a5210bf9df6dbdb5425463bba9d55714"
+checksum = "f1f68e1b4d849cc580afc296ba92a9ec73bbc29177f50d0e032f78a755974b69"
 dependencies = [
  "libc",
  "thiserror",
@@ -2903,19 +2903,7 @@ dependencies = [
  "windows-service",
  "windows-sys 0.61.2",
  "wslib-file-atomic",
- "wslib-shutdown",
  "wslib-systemd-notify",
-]
-
-[[package]]
-name = "wslib-shutdown"
-version = "0.1.0"
-source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "4b39950903072261bc2d4409943fde65f5481631de4fc66a7a1d85735d2ddb89"
-dependencies = [
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
