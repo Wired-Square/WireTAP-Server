@@ -24,13 +24,14 @@ use tokio::sync::Notify;
 #[cfg(target_os = "linux")]
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
+use tracing::info;
 #[cfg(target_os = "linux")]
-use tracing::error;
-use tracing::{info, warn};
+use tracing::{error, warn};
 #[cfg(target_os = "linux")]
 use wiretap_io::can::{self, CanError, CanEvent, CanFrame, CanTask, CanWriter};
 #[cfg(target_os = "linux")]
 use wiretap_model::{Direction, Sample, SourceId};
+use wslib_service::Stop;
 
 #[cfg(target_os = "linux")]
 use crate::archive::Archive;
@@ -183,9 +184,13 @@ pub fn check(settings: &Settings) -> Result<(), RunError> {
     Ok(())
 }
 
-/// Start whatever this configuration asks for, and run until a signal or the
-/// control socket stops it.
-pub async fn run(settings: &Settings, control: Option<Control>) -> Result<Stopped, RunError> {
+/// Start whatever this configuration asks for, and run until `stop` completes
+/// or the control socket stops it.
+pub async fn run(
+    settings: &Settings,
+    control: Option<Control>,
+    stop: Stop,
+) -> Result<Stopped, RunError> {
     check(settings)?;
     let live = Arc::new(Live::new(settings));
     let applied = Arc::new(Notify::new());
@@ -231,22 +236,18 @@ pub async fn run(settings: &Settings, control: Option<Control>) -> Result<Stoppe
         tokio::spawn(server.run());
     }
 
-    // A device still being waited for counts as started: it may never come,
-    // and holding the unit in "activating" would get it killed at
-    // TimeoutStartSec instead.
-    tell_systemd("READY=1", wslib_systemd_notify::ready());
+    // Polling `stop` is READY=1. A device still being waited for counts as
+    // started: it may never come, and holding the unit in "activating" would
+    // get it killed at TimeoutStartSec instead.
+    let self_stop = stop.token();
     let stopped = tokio::select! {
-        () = shutdown() => Stopped::Signal,
-        () = applied.notified() => Stopped::ToApply,
+        () = stop => Stopped::Signal,
+        () = applied.notified() => {
+            self_stop.cancel();
+            Stopped::ToApply
+        }
     };
     info!("Shutting down");
-    // Not on a re-exec to apply: systemd would see the unit as stopping, and
-    // kill the new process at TimeoutStopSec.
-    if stopped == Stopped::Signal {
-        tell_systemd("STOPPING=1", wslib_systemd_notify::stopping());
-    }
-
-    // `TimeoutStopSec` in the unit is what gives the flush room.
     archives.shutdown(readers).await;
     Ok(stopped)
 }
@@ -620,31 +621,6 @@ async fn transmit_loop(opened: Vec<Opened>, bus_offset: u8, mut queue: mpsc::Rec
             Ok(Ok(())) => {}
             Ok(Err(e)) => warn!("transmit on bus {} failed: {e}", t.bus.0),
             Err(refused) => warn!("transmit on bus {} refused: {refused}", t.bus.0),
-        }
-    }
-}
-
-/// A notification systemd misses is not worth stopping a capture for.
-fn tell_systemd(what: &str, sent: io::Result<()>) {
-    if let Err(e) = sent {
-        warn!("cannot tell systemd {what}: {e}");
-    }
-}
-
-/// Wait for the signals systemd and a terminal send.
-async fn shutdown() {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    match signal(SignalKind::terminate()) {
-        Ok(mut term) => {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = term.recv() => {}
-            }
-        }
-        Err(e) => {
-            warn!("cannot listen for SIGTERM, only Ctrl-C will stop this: {e}");
-            let _ = tokio::signal::ctrl_c().await;
         }
     }
 }

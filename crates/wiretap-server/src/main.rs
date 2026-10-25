@@ -21,6 +21,9 @@ use wiretap_server::{
 };
 use wslib_telemetry::Telemetry;
 
+/// Inside the unit's TimeoutStopSec of 30 s, for the archives' flush.
+const STOP_GRACE: Duration = Duration::from_secs(25);
+
 fn main() -> ExitCode {
     // Executed again through /proc/self/exe, the process would be called `exe`
     // by ps, pgrep and pkill.
@@ -79,44 +82,24 @@ fn main() -> ExitCode {
         settings: listing,
         warnings: resolved.warnings.iter().map(ToString::to_string).collect(),
     });
-    serve(&resolved.settings, control)
+    serve(resolved.settings, control)
 }
 
 fn init_logging(level: LogLevel) {
     Telemetry::new(level.as_str()).stderr().init();
 }
 
-fn serve(settings: &Settings, control: Option<Control>) -> ExitCode {
-    // Built here rather than with `#[tokio::main]` so that everything above —
-    // parsing, the config merge, `--check-config` — runs without one.
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            error!("cannot start the async runtime: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // Fed until the runtime goes, through the shutdown flush, so only a
-    // runtime that cannot schedule it starves the watchdog.
-    runtime.spawn(async {
-        if let Err(e) = wslib_systemd_notify::feed_watchdog(std::future::pending()).await {
-            error!("cannot ping the systemd watchdog, so it will restart this: {e}");
-        }
-    });
-    let stopped = runtime.block_on(wiretap_server::pipeline::run(settings, control));
-    // Every task, and the listeners and control socket they hold, goes with
-    // the runtime, before anything could exec over them.
-    runtime.shutdown_timeout(Duration::from_secs(1));
-    match stopped {
+fn serve(settings: Settings, control: Option<Control>) -> ExitCode {
+    let ran =
+        wslib_service::Daemon::new("wiretap-server")
+            .grace(STOP_GRACE)
+            .run(move |stop| async move {
+                wiretap_server::pipeline::run(&settings, control, stop).await
+            });
+    match ran {
         Ok(Stopped::Signal) => ExitCode::SUCCESS,
         Ok(Stopped::ToApply) => reexec(),
-        Err(e) => {
-            error!("{e}");
-            ExitCode::FAILURE
-        }
+        Err(failure) => failure.into(),
     }
 }
 

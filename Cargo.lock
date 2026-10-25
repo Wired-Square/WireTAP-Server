@@ -519,7 +519,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2440,6 +2440,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2487,6 +2493,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags 2.13.0",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2742,7 +2759,7 @@ dependencies = [
  "wslib-build-id",
  "wslib-file-atomic",
  "wslib-secret",
- "wslib-systemd-notify",
+ "wslib-service",
  "wslib-telemetry",
 ]
 
@@ -2854,10 +2871,11 @@ checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
 
 [[package]]
 name = "wslib-file-atomic"
-version = "0.1.2"
+version = "0.1.5"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "bb3afb2c53ad723e75e6ae3cd6bd4b266befbc40fb3f14708c0dd910afee587c"
+checksum = "abfc0ce5f3519700cb11d65c569852dc0c8fc1d42770630c98b2ce935916a7a0"
 dependencies = [
+ "libc",
  "windows-sys 0.61.2",
 ]
 
@@ -2872,10 +2890,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "wslib-systemd-notify"
-version = "0.1.0"
+name = "wslib-service"
+version = "0.1.1"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "c94d9ec07b17ce144052551d688104dd36f4c7fb2545d110fe2fd7db49ca8c2c"
+checksum = "f1f68e1b4d849cc580afc296ba92a9ec73bbc29177f50d0e032f78a755974b69"
+dependencies = [
+ "libc",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "windows-service",
+ "windows-sys 0.61.2",
+ "wslib-file-atomic",
+ "wslib-systemd-notify",
+]
+
+[[package]]
+name = "wslib-systemd-notify"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "6b44cc485616f9935e54bc93e23778c2847c50c88e652fc8676caf9790324970"
 dependencies = [
  "tokio",
 ]

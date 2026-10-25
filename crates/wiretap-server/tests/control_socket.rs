@@ -17,7 +17,9 @@ use serde_json::Value;
 struct Daemon {
     dir: PathBuf,
     socket: PathBuf,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     notify: UnixDatagram,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pings: Cell<usize>,
 }
 
@@ -72,6 +74,7 @@ impl Daemon {
     }
 
     /// The next notification other than a watchdog ping, which are counted.
+    #[cfg(target_os = "linux")]
     fn notified(&self) -> String {
         let mut buf = [0; 256];
         loop {
@@ -203,6 +206,7 @@ fn a_change_over_the_socket_is_applied_by_a_restart() {
     assert_eq!(wait(&mut daemon).code(), Some(0));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn systemd_hears_ready_at_each_start_and_stopping_only_at_a_stop() {
     let d = Daemon::new("notify");
@@ -215,7 +219,7 @@ fn systemd_hears_ready_at_each_start_and_stopping_only_at_a_stop() {
     assert_eq!(d.notified(), "READY=1", "the re-exec is not a stop");
 
     terminate(&daemon);
-    assert_eq!(d.notified(), "STOPPING=1");
+    assert_eq!(d.notified(), "STOPPING=1\nEXTEND_TIMEOUT_USEC=30000000");
     assert_eq!(wait(&mut daemon).code(), Some(0));
     assert!(d.pings.get() > 0, "the watchdog was never fed");
 }
