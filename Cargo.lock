@@ -519,7 +519,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2891,9 +2891,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-service"
-version = "0.1.1"
+version = "0.1.2"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "f1f68e1b4d849cc580afc296ba92a9ec73bbc29177f50d0e032f78a755974b69"
+checksum = "f9ee3b3c2745a14b484e60ae4e7f540b171129c780ce037d0bf155c0de54279e"
 dependencies = [
  "libc",
  "thiserror",
