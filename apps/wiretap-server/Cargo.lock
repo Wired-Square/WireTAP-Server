@@ -84,42 +84,44 @@ dependencies = [
 
 [[package]]
 name = "appliance-auth"
-version = "0.13.1"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
+version = "0.17.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.17.1#ae1d9acc2d9cf201899fadf32e20a1e78e7e6aaa"
 dependencies = [
  "appliance-store",
  "appliance-types",
  "argon2",
  "base64 0.23.1",
  "chrono",
- "getrandom 0.3.4",
- "jsonwebtoken",
  "ring",
  "serde",
- "serde_json",
  "subtle",
  "thiserror",
  "tokio",
  "tracing",
+ "wslib-auth",
+ "wslib-auth-passkey",
+ "wslib-auth-password",
+ "wslib-auth-totp",
  "wslib-secret",
 ]
 
 [[package]]
 name = "appliance-config"
-version = "0.13.1"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
+version = "0.17.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.17.1#ae1d9acc2d9cf201899fadf32e20a1e78e7e6aaa"
 dependencies = [
  "clap",
  "serde",
  "thiserror",
  "toml",
  "tracing",
+ "wslib-http-scaffold",
 ]
 
 [[package]]
 name = "appliance-core"
-version = "0.13.1"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
+version = "0.17.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.17.1#ae1d9acc2d9cf201899fadf32e20a1e78e7e6aaa"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -127,25 +129,19 @@ dependencies = [
  "appliance-test-support",
  "appliance-types",
  "axum",
- "axum-extra",
  "axum-server",
  "chrono",
  "flate2",
  "futures-util",
- "http-body",
  "hyper-util",
  "libc",
- "percent-encoding",
- "rcgen",
  "ring",
  "rustls",
- "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http",
@@ -153,16 +149,25 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "windows-sys 0.61.2",
+ "wslib-auth",
+ "wslib-auth-passkey",
  "wslib-backoff",
+ "wslib-crypto",
+ "wslib-crypto-x509",
+ "wslib-file-atomic",
+ "wslib-homeassistant",
+ "wslib-http-error",
+ "wslib-http-scaffold",
  "wslib-secret",
+ "wslib-service",
  "wslib-telemetry",
- "x509-cert",
+ "wslib-tls",
 ]
 
 [[package]]
 name = "appliance-https"
-version = "0.13.1"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
+version = "0.17.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.17.1#ae1d9acc2d9cf201899fadf32e20a1e78e7e6aaa"
 dependencies = [
  "appliance-auth",
  "appliance-config",
@@ -170,20 +175,21 @@ dependencies = [
  "appliance-store",
  "appliance-types",
  "axum",
- "axum-extra",
  "axum-server",
+ "chrono",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+ "wslib-auth",
  "wslib-http-server",
  "wslib-secret",
 ]
 
 [[package]]
 name = "appliance-server"
-version = "0.13.1"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
+version = "0.17.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.17.1#ae1d9acc2d9cf201899fadf32e20a1e78e7e6aaa"
 dependencies = [
  "appliance-config",
  "appliance-core",
@@ -193,12 +199,13 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "wslib-homeassistant",
 ]
 
 [[package]]
 name = "appliance-store"
-version = "0.13.1"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
+version = "0.17.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.17.1#ae1d9acc2d9cf201899fadf32e20a1e78e7e6aaa"
 dependencies = [
  "appliance-types",
  "chrono",
@@ -209,27 +216,29 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "windows-sys 0.61.2",
+ "wslib-file-atomic",
  "wslib-secret",
 ]
 
 [[package]]
 name = "appliance-test-support"
-version = "0.13.1"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
+version = "0.17.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.17.1#ae1d9acc2d9cf201899fadf32e20a1e78e7e6aaa"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "appliance-types"
-version = "0.13.1"
-source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.13.1#ba9423ea998c2dc3d5ff3357ee5546e4756adfde"
+version = "0.17.1"
+source = "git+https://github.com/Wired-Square/wslib-appliance-rs.git?tag=v0.17.1#ae1d9acc2d9cf201899fadf32e20a1e78e7e6aaa"
 dependencies = [
  "chrono",
  "serde",
  "thiserror",
+ "wslib-auth-passkey",
+ "wslib-auth-totp",
+ "wslib-http-error",
  "wslib-secret",
  "wslib-telemetry",
 ]
@@ -378,26 +387,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "axum-extra"
-version = "0.12.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be44683b41ccb9ab2d23a5230015c9c3c55be97a25e4428366de8873103f7970"
-dependencies = [
- "axum-core",
- "bytes",
- "cookie",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]
@@ -624,17 +613,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
-name = "cookie"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
-dependencies = [
- "percent-encoding",
- "time",
- "version_check",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -787,8 +765,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
- "der_derive",
- "flagset",
  "pem-rfc7468",
  "zeroize",
 ]
@@ -805,17 +781,6 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "rusticata-macros",
-]
-
-[[package]]
-name = "der_derive"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8034092389675178f570469e6c3b0465d3d30b4505c294a6550db47f3c17ad18"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -923,8 +888,6 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
- "hkdf",
- "pem-rfc7468",
  "pkcs8",
  "rand_core",
  "sec1",
@@ -990,12 +953,6 @@ name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
-
-[[package]]
-name = "flagset"
-version = "0.4.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
 name = "flate2"
@@ -1520,28 +1477,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jsonwebtoken"
-version = "10.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
-dependencies = [
- "base64 0.22.1",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "hmac",
- "js-sys",
- "p256",
- "p384",
- "rand",
- "rsa",
- "serde",
- "serde_json",
- "sha2",
- "signature",
- "zeroize",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1799,7 +1734,6 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "primeorder",
- "sha2",
 ]
 
 [[package]]
@@ -2015,11 +1949,8 @@ version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
 dependencies = [
- "pem",
- "ring",
  "rustls-pki-types",
  "time",
- "x509-parser",
  "yasna",
 ]
 
@@ -2898,6 +2829,7 @@ dependencies = [
  "tokio-util",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -2942,6 +2874,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+ "valuable",
+]
+
+[[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
 ]
 
 [[package]]
@@ -2957,6 +2901,7 @@ dependencies = [
  "thread_local",
  "tracing",
  "tracing-core",
+ "tracing-log",
 ]
 
 [[package]]
@@ -3044,6 +2989,12 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vcpkg"
@@ -3143,6 +3094,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3190,6 +3147,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3390,14 +3358,55 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
-name = "wslib-auth-totp"
+name = "wslib-auth"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "1e4205655f9f72f24a4be05c9113c96259cbe52714e6dcbbe688e1966e69f4c9"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "getrandom 0.3.4",
+ "http",
+ "sha2",
+ "sqlx",
+ "subtle",
+]
+
+[[package]]
+name = "wslib-auth-passkey"
 version = "0.1.0"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "dfe86276341da911629ea9d777913cb8a0755b8e8a0626bf738332e711e1ac45"
+checksum = "7cf6226c1a32e8b24217af7780feff93a70fe7daeb02cdb99a380f205a2111c9"
+dependencies = [
+ "base64 0.23.1",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "p256",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "wslib-auth-password"
+version = "0.1.2"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "a36b331848e2af15bfaa00e8f994ef30ccb0e86bc476cc748b7c6da7ae20cfb8"
+dependencies = [
+ "argon2",
+]
+
+[[package]]
+name = "wslib-auth-totp"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "af7fab67cfbfa07f6b8cfaeeed329762c2c39e3c1f4dd3215abec9431a764c48"
 dependencies = [
  "getrandom 0.3.4",
  "hmac",
+ "serde",
  "sha1",
+ "sha2",
  "subtle",
  "wslib-secret",
 ]
@@ -3413,6 +3422,91 @@ name = "wslib-build-id"
 version = "0.1.0"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
 checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
+
+[[package]]
+name = "wslib-crypto"
+version = "0.1.2"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "b5efe7111cc4f3e0469134326581482124ae6c2fe5c34a7276a7d42471afe50e"
+dependencies = [
+ "p256",
+ "p384",
+ "pkcs8",
+ "rand_core",
+ "rcgen",
+ "rsa",
+ "rustls",
+ "rustls-pki-types",
+ "sha2",
+]
+
+[[package]]
+name = "wslib-crypto-x509"
+version = "0.1.3"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "752fe8512faef0cbb074a8beacc54d36318fce83810b2183fa355c816281aad1"
+dependencies = [
+ "const-oid",
+ "pem",
+ "rcgen",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "wslib-crypto",
+ "x509-parser",
+]
+
+[[package]]
+name = "wslib-file-atomic"
+version = "0.1.6"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "bfdaaaae12f955ae895fba93ce4487674186b0255b7c73681d75dbdf711fc92c"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "wslib-homeassistant"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "2d44e6e1e88a79dfd068abbfdecbf86f97915b8ee15c223166b3e54b0ab77796"
+dependencies = [
+ "axum",
+ "wslib-http-error",
+ "wslib-http-scaffold",
+]
+
+[[package]]
+name = "wslib-http-error"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "e6be6e8331c79c275c71bf7b68286312f5faf73e509c9923a04250ef8698abdd"
+dependencies = [
+ "axum",
+ "http",
+ "serde",
+ "serde_json",
+ "tracing",
+ "wslib-telemetry",
+]
+
+[[package]]
+name = "wslib-http-scaffold"
+version = "0.1.3"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "35c2620199e50e3ecdebdfab734f287a7d0ec74a35e76606a5e326e873d9241b"
+dependencies = [
+ "axum",
+ "flate2",
+ "http-body",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-http",
+ "wslib-http-error",
+]
 
 [[package]]
 name = "wslib-http-server"
@@ -3441,27 +3535,66 @@ dependencies = [
 ]
 
 [[package]]
-name = "wslib-telemetry"
-version = "0.1.2"
+name = "wslib-service"
+version = "0.1.3"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "4fc888bea4d0d891642c6b314ab5a4568dadbd1ab9d32a2559d1fe141650af11"
+checksum = "8ec5ba14e33ddd6c8cd72a88fd13767aca9b718853153325f5ee21967b2ed83b"
+dependencies = [
+ "libc",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "windows-service",
+ "windows-sys 0.61.2",
+ "wslib-file-atomic",
+ "wslib-systemd-notify",
+]
+
+[[package]]
+name = "wslib-systemd-notify"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "6b44cc485616f9935e54bc93e23778c2847c50c88e652fc8676caf9790324970"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
+name = "wslib-telemetry"
+version = "0.1.9"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "a24c24236e064a435eafa34909ecec1e1fc8069bc787bd8e8396b02e89c92678"
 dependencies = [
  "chrono",
  "serde",
  "tokio",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "x509-cert"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
+name = "wslib-tls"
+version = "0.2.3"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "6267371b8b9d7fb0d9e3563da2ad3c01a8b559f70d8cd069a26b8c697a3854d0"
 dependencies = [
- "const-oid",
- "der",
- "spki",
+ "http",
+ "libc",
+ "rcgen",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "windows-sys 0.61.2",
+ "wslib-crypto",
+ "wslib-crypto-x509",
+ "wslib-file-atomic",
+ "wslib-secret",
 ]
 
 [[package]]
@@ -3476,7 +3609,6 @@ dependencies = [
  "lazy_static",
  "nom",
  "oid-registry",
- "ring",
  "rusticata-macros",
  "thiserror",
  "time",
@@ -3561,20 +3693,6 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
-dependencies = [
- "zeroize_derive",
-]
-
-[[package]]
-name = "zeroize_derive"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "zerotrie"

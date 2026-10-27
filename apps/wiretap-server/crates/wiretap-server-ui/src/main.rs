@@ -53,23 +53,20 @@ struct Args {
     daemon_socket: PathBuf,
 }
 
-/// `ExitCode` rather than `Result`, so a startup failure reaches the journal
-/// through the chassis's `Display` and not as `Debug`.
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    let args = Args::parse();
     let logs = appliance_server::logs(&["wiretap_server_ui"]);
     logs.feed(Telemetry::new("info").journald()).init();
-    match run(logs).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            tracing::error!("{e}");
-            ExitCode::FAILURE
-        }
-    }
+    appliance_server::daemon(NAME)
+        .run(|stop| run(args, logs, stop))
+        .map_or_else(ExitCode::from, |()| ExitCode::SUCCESS)
 }
 
-async fn run(logs: Logs) -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+async fn run(
+    args: Args,
+    logs: Logs,
+    stop: impl Future<Output = ()>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap = Resolver::new(NAME, ENV_PREFIX)
         .serving(&args.serving)
         .resolve(&args.appliance)?;
@@ -105,7 +102,7 @@ async fn run(logs: Logs) -> Result<(), Box<dyn std::error::Error>> {
                 .logo(LOGO, "image/svg+xml")
                 .ui(bootstrap.ui.clone())
                 .api(routes::routes(daemon))
-                .serve(&bootstrap, socket)
+                .serve(&bootstrap, socket, stop)
                 .await;
             (sweeping, served)
         }
@@ -125,7 +122,7 @@ async fn run(logs: Logs) -> Result<(), Box<dyn std::error::Error>> {
                 .ui(bootstrap.ui.clone())
                 .api(routes::routes(daemon))
                 .users_routes()
-                .serve(&bootstrap)
+                .serve(&bootstrap, stop)
                 .await;
             (sweeping, served)
         }

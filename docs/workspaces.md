@@ -15,7 +15,7 @@ name the chassis and every build of it would need read access. Kept apart, the
 root and its release build without the key, though not without the registry
 below. Each workspace has its own `Cargo.lock` and its own `rust-version`: 1.88
 in all three. They pin different chassis tags: `appliance/` v0.1.4,
-`apps/wiretap-server/` v0.13.1.
+`apps/wiretap-server/` v0.17.1.
 
 ## The private registry
 
@@ -32,6 +32,10 @@ replaces the Forgejo source with it, and its token is
 either way. The gateway image always reads the mirror, with that token as the
 BuildKit secret `cargo-mirror-token`;
 [`scripts/cargo-mirror-token.sh`](../scripts/cargo-mirror-token.sh) finds it.
+
+The server app's browser half takes `@wired-square/kit` from the mirror's npm
+half, which `apps/wiretap-server/frontend/.npmrc` declares; the same token goes
+in your own `~/.npmrc` as `//mirror.wiredsquare.com/npm/:_authToken=<token>`.
 
 The root's `.cargo/config.toml` still applies under `appliance/` and
 `apps/wiretap-server/`, since cargo reads config from parent directories, so a

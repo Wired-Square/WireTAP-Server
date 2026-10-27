@@ -17,6 +17,8 @@ services:
     cap_drop: [ALL]
     cap_add: [NET_RAW, NET_BIND_SERVICE]
     init: true
+    # The UI's 22 s drain, then the daemon's 25 s flush; the default 10 s cuts both.
+    stop_grace_period: 50s
     environment:
       # The first person to reach the UI makes its admin. Remove this once that
       # is you.

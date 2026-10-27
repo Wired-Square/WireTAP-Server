@@ -4,15 +4,15 @@
  */
 import { For, Index, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
 
+import { Capability, Refusal, allows, api, useRefresh } from "@wired-square/appliance-ui";
+import type { Me } from "@wired-square/appliance-ui";
 import {
   Badge,
   Button,
-  Capability,
   Field,
   Form,
   Notice,
   NothingYet,
-  Refusal,
   Section,
   Select,
   Table,
@@ -22,13 +22,10 @@ import {
   Tr,
   Warnings,
   ago,
-  allows,
-  api,
   createAction,
   duration,
-  useRefresh,
-} from "@wired-square/appliance-ui";
-import type { Me, Tone } from "@wired-square/appliance-ui";
+} from "@wired-square/kit";
+import type { Tone } from "@wired-square/kit";
 
 import { GROUPS, LEVELS, changes, devicesOf, draftOf, setting } from "./change";
 import type { DeviceDraft, Draft, Kind, Field as SettingField } from "./change";
