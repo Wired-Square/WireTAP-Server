@@ -1,21 +1,16 @@
-# The three cargo workspaces
+# The two cargo workspaces
 
-The root workspace is `wiretap-server` and `wiretap-backend`. `appliance/` is a
-second one, holding `wiretap-appliance` and the card image's scaffold, and
-`apps/wiretap-server/` a third, holding `wiretap-server-ui`, the capture
-daemon's web UI. Neither is a member of the root.
+The root workspace is `wiretap-server` and `wiretap-backend`.
+`apps/wiretap-server/` is a second one, holding `wiretap-server-ui`, the capture
+daemon's web UI. It is not a member of the root.
 
-## Why three
+## Why two
 
-`wiretap-appliance` and `wiretap-server-ui` are built on the Wired Square
-appliance chassis,
-[`wslib-appliance-rs`](https://github.com/Wired-Square/wslib-appliance-rs), which
-is a private repository. Were either a member, the root's lockfile would
-name the chassis and every build of it would need read access. Kept apart, the
-root and its release build without the key, though not without the registry
-below. Each workspace has its own `Cargo.lock` and its own `rust-version`: 1.88
-in all three. They pin different chassis tags: `appliance/` v0.1.4,
-`apps/wiretap-server/` v0.17.1.
+`wiretap-server-ui` is built on the Wired Square appliance chassis, the
+`wslib-appliance-*` crates. Were it a member, the root's lockfile would carry
+the chassis's graph, and the root's packages and the gateway image would build
+it for nothing. Each workspace has its own `Cargo.lock` and its own
+`rust-version`: 1.88 in both.
 
 ## The private registry
 
@@ -33,12 +28,12 @@ either way. The gateway image always reads the mirror, with that token as the
 BuildKit secret `cargo-mirror-token`;
 [`scripts/cargo-mirror-token.sh`](../scripts/cargo-mirror-token.sh) finds it.
 
-The server app's browser half takes `@wired-square/kit` from the mirror's npm
-half, which `apps/wiretap-server/frontend/.npmrc` declares; the same token goes
+The server app's browser half takes the `@wired-square/*` packages from the
+mirror's npm half, which `apps/wiretap-server/frontend/.npmrc` declares; the same token goes
 in your own `~/.npmrc` as `//mirror.wiredsquare.com/npm/:_authToken=<token>`.
 
-The root's `.cargo/config.toml` still applies under `appliance/` and
-`apps/wiretap-server/`, since cargo reads config from parent directories, so a
+The root's `.cargo/config.toml` still applies under `apps/wiretap-server/`,
+since cargo reads config from parent directories, so a
 cargo command there gets the root's musl `CC`.
 
 ## Building and gating each
@@ -48,32 +43,23 @@ The root's four gates are in the [README](../README.md#build): `fmt`, `clippy`,
 `gates` job, beside the vcan capture drill, the package lifecycle and the
 gateway image.
 
-`appliance/` has three jobs of its own in [CI](../.github/workflows/ci.yml),
-each fetching the chassis with a deploy key, so on a fork they fail and nothing
-else does:
+`apps/wiretap-server/` has three jobs of its own in
+[CI](../.github/workflows/ci.yml):
 
-| Job | What it runs, in `appliance/` |
+| Job | What it runs, in `apps/wiretap-server/` |
 | --- | --- |
-| Appliance gates | the same four gates, with the aarch64 `clippy` over the whole workspace |
-| Appliance browser half | `npm ci`, then `npm run ci` (typecheck and build) in `frontend/` |
-| Appliance packaging | `appliance-xtask packaging diff` (the scaffold is what the chassis renders), then `scaffold/image/tests/run-verify-tests.sh` |
+| Server UI gates | `wslib-appliance-xtask gates`, then the same four gates, with the aarch64 `clippy` over the whole workspace |
+| Server UI browser half | `npm ci`, then `npm run ci` (typecheck, unit tests and build) in `frontend/` |
+| Server app image | `make-image.sh amd64`, keeping nothing |
 
-`apps/wiretap-server/` has two more, the same as the first two: Server UI
-gates, and Server UI browser half (`npm run ci` there also runs its unit
-tests). A third, Server app image, builds its amd64 image with
-`apps/wiretap-server/make-image.sh` and keeps nothing.
-
-Locally, `CARGO_NET_GIT_FETCH_WITH_CLI=true` has cargo fetch the private
-chassis with your own git and its credentials.
-
-## Cross-building the appliance on a Mac
+## Cross-building the UI's package on a Mac
 
 `clippy` stops before linking, so the root's config is enough for it. The
-package, `appliance/scaffold/packaging/make-deb.sh --target image`, links a real
-`aarch64-unknown-linux-musl` binary, and on a Mac that needs all of this:
+package, `apps/wiretap-server/scaffold/packaging/make-deb.sh --target deb`,
+links a real `aarch64-unknown-linux-musl` binary, and on a Mac that needs all
+of this:
 
 ```sh
-export CARGO_NET_GIT_FETCH_WITH_CLI=true
 export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
 export CC_aarch64_unknown_linux_musl=~/.cross/cc
 export AR_aarch64_unknown_linux_musl=~/.cross/ar
@@ -82,8 +68,8 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=--fix-cort
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
 ```
 
-- `~/.cross/cc` and `~/.cross/ar` are the zig shims the chassis's `BUILDING.md`
-  makes.
+- `~/.cross/cc` and `~/.cross/ar` are the zig shims `wslib-appliance-xtask`'s
+  README makes.
 - **The linker is rustc's own `rust-lld`.** Left unset, cargo links with the
   host `cc`, and Apple's `ld` rejects the GNU flags. With `zig cc` as the linker
   the link fails on a duplicate `_start`, and zig refuses the erratum flag.
@@ -92,25 +78,4 @@ unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
   refuses the binary.
 - GNU coreutils go first on `PATH` because `make-deb.sh` uses `install -D`,
   `du --exclude` and `md5sum`. It also wants Homebrew's `dpkg` and
-  `appliance-xtask`.
-
-**Moving the frontend to a new chassis tag** needs the tag named on the command
-line, in `appliance/frontend/`:
-
-```sh
-npm install "@wired-square/appliance-ui@github:Wired-Square/wslib-appliance-rs#vX.Y.Z"
-```
-
-A plain `npm install` after editing `package.json` leaves `package-lock.json`
-on the old commit.
-
-## Building the image
-
-[appliance/README.md](../appliance/README.md#building-the-image) has the steps.
-The order is `packaging/make-deb.sh --arch arm64` at the root, then
-`appliance/scripts/stage-wiretap-server.sh`, then
-`appliance/scaffold/packaging/make-deb.sh --target image`, then
-`appliance/scaffold/image/build-remote.sh`. The build box and a root SSH key
-come from `appliance/scaffold/image/config.local`, which is git-ignored. Without
-a `TAILSCALE_AUTH_KEY` there, a card has Tailscale but does not join the
-tailnet until it is enrolled from the Network screen.
+  `wslib-appliance-xtask`.

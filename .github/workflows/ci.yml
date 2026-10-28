@@ -26,6 +26,7 @@ env:
   # A fresh checkout cannot reuse incremental output, and it is roughly 40% of
   # the target directory — so it is cache weight and slower codegen for nothing.
   CARGO_INCREMENTAL: 0
+  WSLIB_APPLIANCE_XTASK: 0.1.3
 
 jobs:
   gates:
@@ -480,130 +481,18 @@ jobs:
             --output type=cacheonly \
             .
 
-  # The Raspberry Pi appliance: a workspace of its own on the private chassis,
-  # fetched with the organisation's read-only deploy key, so these three jobs
-  # fail on a fork and nothing above needs the key. The chassis's gates.yml is
-  # not called because GitHub lets only private repositories use a private
-  # repository's reusable workflows, so its gates are written out here.
-  appliance:
-    name: Appliance gates
-    runs-on: ubuntu-latest
-    env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-    defaults:
-      run:
-        working-directory: appliance
-    steps:
-      - uses: actions/checkout@v7
-
-      - &reach
-        name: Reach the chassis
-        uses: webfactory/ssh-agent@v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.WSLIB_APPLIANCE_DEPLOYMENT_KEY }}
-
-      # cargo then shells out to git, whose ssh the agent answers.
-      - &fetch
-        name: Fetch the chassis over SSH
-        run: git config --global url."ssh://git@github.com/Wired-Square/wslib-appliance-rs".insteadOf "https://github.com/Wired-Square/wslib-appliance-rs"
-
-      - name: Install the toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
-          rustup target add aarch64-unknown-linux-musl
-          echo "RUSTC_VERSION=$(rustc -V | tr ' ' '-')" >> "$GITHUB_ENV"
-
-      # The root's .cargo/config.toml points the musl CC at packaging/zigcc.
-      - name: Install zig, the musl C cross-compiler
-        uses: ./.github/actions/zig-toolchain
-
-      - uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            appliance/target
-          key: ${{ runner.os }}-cargo-appliance-${{ env.RUSTC_VERSION }}-${{ hashFiles('appliance/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-appliance-${{ env.RUSTC_VERSION }}-
-
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: cargo clippy (aarch64 musl)
-        run: cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
-
-      - name: cargo test
-        run: cargo test --workspace --locked
-
-  appliance-browser:
-    name: Appliance browser half
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: appliance/frontend
-    steps:
-      - uses: actions/checkout@v7
-
-      # The lockfile resolves the chassis's package over git+ssh.
-      - *reach
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: appliance/frontend/package-lock.json
-
-      - name: Install exactly the lockfile
-        run: npm ci
-
-      - name: Typecheck and build
-        run: npm run ci
-
-  appliance-packaging:
-    name: Appliance packaging
-    runs-on: ubuntu-latest
-    env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-    defaults:
-      run:
-        working-directory: appliance
-    steps:
-      - uses: actions/checkout@v7
-      - *reach
-      - *fetch
-
-      # The rev is the lockfile's, so the pin lives in one place fewer.
-      - name: Install appliance-xtask at the pinned chassis
-        run: |
-          rev="$(grep -om1 'wslib-appliance-rs\.git?[^#"]*#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)"
-          cargo install --locked --git https://github.com/Wired-Square/wslib-appliance-rs.git --rev "$rev" appliance-xtask
-
-      # A hand-edit to a chassis-owned file is a bug report about a knob.
-      - name: Scaffold is what the chassis renders
-        run: appliance-xtask packaging diff
-
-      - name: Image verify checks
-        run: scaffold/image/tests/run-verify-tests.sh
-
-  # The capture daemon's web UI, a third workspace on the private chassis: the
-  # appliance jobs' gates and browser half, in apps/wiretap-server.
+  # The capture daemon's web UI, a workspace of its own on the wslib-appliance
+  # crates, gated by wslib-appliance-xtask at WSLIB_APPLIANCE_XTASK.
   server-ui:
     name: Server UI gates
     runs-on: ubuntu-latest
     env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
     defaults:
       run:
         working-directory: apps/wiretap-server
     steps:
       - uses: actions/checkout@v7
-      - *reach
-      - *fetch
       - *cargo-mirror
 
       - name: Install the toolchain
@@ -626,21 +515,31 @@ jobs:
           key: ${{ runner.os }}-cargo-server-ui-${{ env.RUSTC_VERSION }}-${{ hashFiles('apps/wiretap-server/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-server-ui-${{ env.RUSTC_VERSION }}-
 
+      - uses: actions/cache@v6
+        id: xtask
+        with:
+          path: ~/.cargo/bin/wslib-appliance-xtask
+          key: ${{ runner.os }}-wslib-appliance-xtask-${{ env.WSLIB_APPLIANCE_XTASK }}
+
+      # `cargo install` reads no project config, so it is passed the checkout's
+      # for the `wired-square` registry.
+      - name: Install wslib-appliance-xtask
+        if: steps.xtask.outputs.cache-hit != 'true'
+        run: cargo install --config ../../.cargo/config.toml wslib-appliance-xtask --locked --version "=$WSLIB_APPLIANCE_XTASK" --registry wired-square
+
+      - name: wslib-appliance-xtask gates
+        run: wslib-appliance-xtask gates
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      # Here, not on the job, so the third-party ssh-agent action never sees it.
       - name: cargo clippy
-        env: &mirror-env
-          CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: cargo clippy (aarch64 musl)
-        env: *mirror-env
         run: cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
 
       - name: cargo test
-        env: *mirror-env
         run: cargo test --workspace --locked
 
   server-ui-browser:
@@ -651,7 +550,6 @@ jobs:
         working-directory: apps/wiretap-server/frontend
     steps:
       - uses: actions/checkout@v7
-      - *reach
 
       - uses: actions/setup-node@v5
         with:
@@ -678,17 +576,13 @@ jobs:
         run: npm run ci
 
   # The capture daemon's app image, built and thrown away as the gateway's is.
-  # It carries the UI, so it needs the chassis too. amd64 only: arm64 also
-  # needs appliance-xtask, for the Cortex-A53 erratum check.
+  # amd64 only: arm64 also needs wslib-appliance-xtask, for the Cortex-A53
+  # erratum check.
   server-image:
     name: Server app image
     runs-on: ubuntu-latest
-    env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - uses: actions/checkout@v7
-      - *reach
-      - *fetch
       - *cargo-mirror
 
       - name: Install the toolchain
@@ -714,7 +608,7 @@ jobs:
 
       - *npm-forget
 
-      # Here, not on the job, so the third-party ssh-agent action never sees it.
+      # Here, not on the job, so no npm script ever sees it.
       - name: Build it, keep nothing
         env:
           CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token

@@ -20,14 +20,16 @@ All notable changes to this project are documented here. Entries go under
   with its token as the BuildKit secret `cargo-mirror-token` (`docker build
   --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN`);
   `scripts/cargo-mirror-token.sh` finds it, and the compose file passes it.
-- **`wiretap-server-ui` is on chassis v0.17.1**, from v0.12.0, so building
-  `apps/wiretap-server/` needs the `wired-square` registry too, and its browser
-  half the registry's npm mirror, for `@wired-square/kit`. Its TLS and
-  redirect listeners are `wslib-http-server`'s, and their log lines read under
-  the target `wslib_http_server`, where they were `appliance_https`. Upgrading
-  signs everybody out once, and a password over 1024 bytes is refused. A stop
-  has 22 s to drain, and the compose file gives the container 50 s for the UI
-  and the daemon in turn.
+- **`wiretap-server-ui` is on the `wslib-appliance-*` crates** 0.1.1, from
+  chassis v0.12.0, so building `apps/wiretap-server/` needs the `wired-square`
+  registry too, and its browser half the registry's npm mirror, for
+  `@wired-square/kit` and `@wired-square/appliance-ui`. Its packaging is
+  rendered by `wslib-appliance-xtask` 0.1.3. Its TLS and redirect listeners
+  are `wslib-http-server`'s, and their log lines read under the target
+  `wslib_http_server`, where they were `appliance_https`; the chassis's own
+  read under `wslib_appliance_*`. Upgrading signs everybody out once, and a
+  password over 1024 bytes is refused. A stop has 22 s to drain, and the
+  compose file gives the container 50 s for the UI and the daemon in turn.
 - **The build id comes from `wslib-build-id`**, which replaces
   `wiretap-build-id`. Its variable is now `WSLIB_BUILD_ID`, in place of
   `WIRETAP_BUILD_ID`, for the image build arguments too, and a value it is given
@@ -65,6 +67,12 @@ All notable changes to this project are documented here. Entries go under
   `<state dir>/catalogs/<sha>.toml` and `assignments.json` are synced, with
   their directory, before they replace what was there, and are `0600`, where
   they were `0644`.
+
+### Removed
+
+- **The Raspberry Pi card image and `wiretap-appliance`**, the `appliance/`
+  workspace, with its CI jobs. A Pi runs `wiretap-server` from the `.deb`, or
+  as the ApplianceOS app.
 
 ## [0.1.13] — 2026-10-16
 

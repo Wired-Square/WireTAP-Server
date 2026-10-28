@@ -1,6 +1,6 @@
 #!/bin/sh
-# Chassis-owned. `appliance-xtask packaging render` rewrites this file
-# unconditionally, every time.
+# Owned by wslib-appliance-xtask. `wslib-appliance-xtask packaging render`
+# rewrites this file unconditionally, every time.
 #
 # **There is no postrm hook directory, and that is not an oversight.** Debian
 # Policy 6.5 has postrm run *after* the package's files have been removed — so

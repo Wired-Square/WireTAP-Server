@@ -15,7 +15,7 @@
 # builds it — so that no two builds of one version look alike.
 #
 # Both architectures are static musl builds, so one package installs on any
-# distribution with systemd - the Pi appliance on arm64, a VM or an LXC
+# distribution with systemd - a Raspberry Pi on arm64, a VM or an LXC
 # container on amd64.
 #
 # Why not dpkg-buildpackage: nothing here is compiled by the packaging. The

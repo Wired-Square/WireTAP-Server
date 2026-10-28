@@ -1,16 +1,16 @@
 #!/bin/sh
-# Builds wiretap-server-ui's .deb, from the files `appliance-xtask packaging render` wrote
-# beside this one.
+# Builds wiretap-server-ui's .deb, from the files `wslib-appliance-xtask packaging
+# render` wrote beside this one.
 #
 #     CARGO_BUILD_TARGET=x86_64-unknown-linux-musl scaffold/packaging/make-deb.sh --target deb
 #
-# Chassis-owned, and rewritten unconditionally by every render. **There is no
-# hook for the build itself, and that is deliberate**: this runs on a build host
-# and has no deployment-time behaviour to extend. What a product ships beyond the
-# binary is named in appliance.toml — `hooks_dir` and `[package.files]` — or
-# placed where this script looks for it: the unit's `.service.d/*.conf`
-# directory and the `debian/copyright` file. Anything else is a knob missing from
-# appliance.toml.
+# Owned by wslib-appliance-xtask, and rewritten unconditionally by every render.
+# **There is no hook for the build itself, and that is deliberate**: this runs on
+# a build host and has no deployment-time behaviour to extend. What a product
+# ships beyond the binary is named in appliance.toml — `hooks_dir` and
+# `[package.files]` — or placed where this script looks for it: the unit's
+# `.service.d/*.conf` directory and the `debian/copyright` file. Anything else is
+# a knob missing from appliance.toml.
 set -eu
 
 NAME='wiretap-server-ui'
@@ -61,7 +61,7 @@ TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 # The build host is a Debian-ish one — `dpkg-deb` says so, and `install -D`,
 # `du --exclude` and `date -R` below are GNU rather than POSIX.
-for tool in cargo dpkg-deb appliance-xtask; do
+for tool in cargo dpkg-deb wslib-appliance-xtask; do
     command -v "$tool" >/dev/null || die "$tool is not on PATH"
 done
 
@@ -75,25 +75,25 @@ done
 # this package does not contain is discovering it slowly, so everything that can
 # be answered from the rendered files is answered here.
 
-[ -f "$CONTROL_IN" ] || die "$CONTROL_IN is not there — run \`appliance-xtask packaging render\`"
-[ -f "$UNIT" ] || die "$UNIT is not there — run \`appliance-xtask packaging render\`"
-[ -f "$CONFIG" ] || die "$CONFIG is not there — run \`appliance-xtask packaging render\`"
-[ -f "$PACKAGE_CONFIG" ] || die "$PACKAGE_CONFIG is not there — run \`appliance-xtask packaging render\`"
+[ -f "$CONTROL_IN" ] || die "$CONTROL_IN is not there — run \`wslib-appliance-xtask packaging render\`"
+[ -f "$UNIT" ] || die "$UNIT is not there — run \`wslib-appliance-xtask packaging render\`"
+[ -f "$CONFIG" ] || die "$CONFIG is not there — run \`wslib-appliance-xtask packaging render\`"
+[ -f "$PACKAGE_CONFIG" ] || die "$PACKAGE_CONFIG is not there — run \`wslib-appliance-xtask packaging render\`"
 
 # The unit and this script are rendered from one `binary` field, so a
 # disagreement means one of them was edited — which is the question
-# `appliance-xtask packaging diff` answers. `-x -F` rather than an anchored
-# pattern, because a binary name legitimately contains `.` and `-`.
+# `wslib-appliance-xtask packaging diff` answers. `-x -F` rather than an
+# anchored pattern, because a binary name legitimately contains `.` and `-`.
 grep -q -x -F "ExecStart=/usr/bin/$BINARY" "$UNIT" ||
     die "$UNIT does not start /usr/bin/$BINARY — the unit and appliance.toml disagree"
 
 # The three holes this script exists to fill. Checked rather than assumed: if
-# the chassis stopped emitting one, the substitution below would still succeed
-# and produce a control file with no version in it, which is a gate that has
-# quietly stopped matching anything.
+# wslib-appliance-xtask stopped emitting one, the substitution below would still
+# succeed and produce a control file with no version in it, which is a gate
+# that has quietly stopped matching anything.
 for token in '@VERSION@' '@ARCH@' '@INSTALLED_SIZE@'; do
     grep -q -F "$token" "$CONTROL_IN" ||
-        die "$CONTROL_IN has no $token — it came from a chassis this script does not match"
+        die "$CONTROL_IN has no $token — it came from a wslib-appliance-xtask this script does not match"
 done
 
 # The maintainer, which is also the changelog's trailer. The example
@@ -230,7 +230,7 @@ binary_arch
 # from, which includes a build id supplied through the environment. Before the
 # build, so a refusal costs nothing.
 BASE_VERSION=$(cargo pkgid -p "$PACKAGE" | sed -e 's|.*[#@]||')
-VERSION=$(appliance-xtask build-id --deb-version "$BASE_VERSION")
+VERSION=$(wslib-appliance-xtask build-id --deb-version "$BASE_VERSION")
 
 # ---------------------------------------------------------------------------
 # The build, and the four assertions on the binary
@@ -259,7 +259,7 @@ install -D -m 0755 "$BIN" "$STAGE/usr/bin/$BINARY"
 # one dpkg has to reconcile against the symlink.
 install -D -m 0644 "$UNIT" "$STAGE/usr/lib/systemd/system/$NAME.service"
 
-# **The browser bundle, into the directory `appliance-config` defaults to.**
+# **The browser bundle, into the directory `wslib-appliance-config` defaults to.**
 # Nothing on the box connects those two — the unit passes no arguments and no
 # maintainer script writes a config.toml — so this path and that default are the
 # whole mechanism, and a test holds them against each other rather than against
@@ -382,8 +382,8 @@ sed -e "s|@VERSION@|$VERSION|g" \
     -e "s|@INSTALLED_SIZE@|$INSTALLED_SIZE|g" \
     "$CONTROL_IN" > "$STAGE/DEBIAN/control"
 
-# Nothing may be left unfilled, which is the rule appliance-xtask holds its own
-# placeholders to, applied to the layer below it. dpkg-deb is not a backstop
+# Nothing may be left unfilled, which is the rule wslib-appliance-xtask holds its
+# own placeholders to, applied to the layer below it. dpkg-deb is not a backstop
 # here: it refuses an unfilled `@VERSION@`, only *warns* about `@ARCH@` and
 # builds anyway, and takes `@INSTALLED_SIZE@` as an ordinary field value in
 # silence.

@@ -1,9 +1,9 @@
 # Adding your own steps to wiretap-server-ui's install
 
-**This file is chassis-owned and is rewritten by every `packaging render`.** So
-is every maintainer script beside it. Do not edit those — put your product's own
-steps in the hook directories described below, which nothing in the chassis ever
-writes.
+**This file is owned by wslib-appliance-xtask and is rewritten by every
+`packaging render`.** So is every maintainer script beside it. Do not edit those
+— put your product's own steps in the hook directories described below, which
+wslib-appliance-xtask never writes.
 
 ## The two directories
 
@@ -141,7 +141,7 @@ one place where nothing else has the file open. Hooks are for what lives outside
 the database: a directory to create, a file from an older deployment to convert,
 a service to poke.
 
-## What the chassis already does, so you do not
+## What the maintainer scripts already do, so you do not
 
 - Creates `wiretap-server-ui` and the `wiretap-server-ui` group.
 - Creates `/etc/wiretap-server-ui` and sets it to `root:wiretap-server-ui` mode `0751`. systemd

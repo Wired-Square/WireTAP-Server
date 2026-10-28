@@ -21,11 +21,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="$ROOT/target/ci-local"
 JOB_TIMEOUT=30m
-JOBS="gates capture package-amd64 package-arm64 image appliance appliance-browser
-	appliance-packaging server-ui server-ui-browser server-image"
+JOBS="gates capture package-amd64 package-arm64 image server-ui server-ui-browser
+	server-image"
 
 export CARGO_TERM_COLOR=always
-export CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 job_name() {
 	case $1 in
@@ -34,9 +33,6 @@ job_name() {
 	package-amd64) echo "Package lifecycle (amd64)" ;;
 	package-arm64) echo "Package lifecycle (arm64)" ;;
 	image) echo "Gateway image" ;;
-	appliance) echo "Appliance gates" ;;
-	appliance-browser) echo "Appliance browser half" ;;
-	appliance-packaging) echo "Appliance packaging" ;;
 	server-ui) echo "Server UI gates" ;;
 	server-ui-browser) echo "Server UI browser half" ;;
 	server-image) echo "Server app image" ;;
@@ -52,19 +48,6 @@ skip_reason() {
 			echo "Docker here cannot run linux/${1#package-} containers; runs on the tag"
 		;;
 	esac
-}
-
-workspace_gates() {
-	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets --locked -- -D warnings
-	cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
-	cargo test --workspace --locked
-}
-
-browser_half() {
-	cd "$1"
-	npm ci
-	npm run ci
 }
 
 package_lifecycle() {
@@ -112,23 +95,24 @@ job_image() {
 		.
 }
 
-job_appliance() { cd appliance; workspace_gates; }
-job_appliance_browser() { browser_half appliance/frontend; }
-
-# Into target/, so the pinned appliance-xtask never replaces the one on PATH.
-job_appliance_packaging() {
-	cd appliance
-	local rev
-	rev="$(grep -om1 'wslib-appliance-rs\.git?[^#"]*#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)"
-	cargo install --locked --root "$SCRATCH/xtask" \
-		--git https://github.com/Wired-Square/wslib-appliance-rs.git --rev "$rev" appliance-xtask
+# Into target/, so the pinned wslib-appliance-xtask never replaces the one on PATH.
+job_server_ui() {
+	cargo install --config .cargo/config.toml --locked --root "$SCRATCH/xtask" \
+		--version =0.1.3 --registry wired-square wslib-appliance-xtask
 	PATH="$SCRATCH/xtask/bin:$PATH"
-	appliance-xtask packaging diff
-	scaffold/image/tests/run-verify-tests.sh
+	cd apps/wiretap-server
+	wslib-appliance-xtask gates
+	cargo fmt --all -- --check
+	cargo clippy --workspace --all-targets --locked -- -D warnings
+	cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
+	cargo test --workspace --locked
 }
 
-job_server_ui() { cd apps/wiretap-server; workspace_gates; }
-job_server_ui_browser() { browser_half apps/wiretap-server/frontend; }
+job_server_ui_browser() {
+	cd apps/wiretap-server/frontend
+	npm ci
+	npm run ci
+}
 
 job_server_image() {
 	(cd apps/wiretap-server/frontend && npm ci)

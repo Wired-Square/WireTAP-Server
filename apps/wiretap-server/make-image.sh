@@ -19,7 +19,7 @@ stage() {
 stage_arch() {
 	cargo zigbuild --release --locked -p "$PACKAGE" --target "$1"
 	cp "target/$1/release/$PACKAGE" "$CONTEXT/"
-	# The UI is linked as its package is, through the chassis's build-binary.sh,
+	# The UI is linked as its package is, through the rendered build-binary.sh,
 	# which also refuses a binary with no build id or an unpatched Cortex-A53 site.
 	(
 		cd "$HERE"
@@ -30,6 +30,7 @@ stage_arch() {
 		export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-$lld}"
 		export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=--fix-cortex-a53-843419"
 		BINARY=wiretap-server-ui
+		PACKAGE=$BINARY
 		TARGET_DIR=target
 		. scaffold/packaging/build-binary.sh
 		binary_arch

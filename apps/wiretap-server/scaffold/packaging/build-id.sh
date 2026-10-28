@@ -1,7 +1,7 @@
 #!/bin/sh
 # Prints the identity of the build happening in this checkout, for wiretap-server-ui.
 #
-# Chassis-owned, and rewritten unconditionally by every render.
+# Owned by wslib-appliance-xtask, and rewritten unconditionally by every render.
 #
 # **This exists for the build that cannot read git for itself** — a container
 # whose context carries no .git, an unpacked source tarball, a chroot. Run it
@@ -30,9 +30,9 @@
 # cannot assemble a sorting Debian version from it. Package from a checkout.
 set -eu
 
-command -v appliance-xtask >/dev/null || {
-    echo "build-id: appliance-xtask is not on PATH" >&2
+command -v wslib-appliance-xtask >/dev/null || {
+    echo "build-id: wslib-appliance-xtask is not on PATH" >&2
     exit 1
 }
 
-exec appliance-xtask build-id
+exec wslib-appliance-xtask build-id

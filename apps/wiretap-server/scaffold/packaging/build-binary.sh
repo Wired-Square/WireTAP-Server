@@ -1,22 +1,23 @@
 #!/bin/sh
 # Cross-builds wiretap-server-ui's binary and refuses one no artefact should carry, for
 # make-deb.sh and make-image.sh. They source it, having set BINARY, TARGET_DIR,
-# CARGO_BUILD_TARGET and `die`; it defines two functions and runs nothing.
+# CARGO_BUILD_TARGET, `die` and, when it is not BINARY, PACKAGE; it defines two
+# functions and runs nothing.
 #
-# Chassis-owned, and rewritten unconditionally by every render.
+# Owned by wslib-appliance-xtask, and rewritten unconditionally by every render.
 
 MIN_BINARY_BYTES='9000000'
 
-# The chassis maps the targets it has actually built for, each to its
-# architecture — Debian's name and Docker's, which agree — and to the ELF
+# wslib-appliance-xtask maps the targets it has actually built for, each to
+# its architecture — Debian's name and Docker's, which agree — and to the ELF
 # e_machine that proves the target took. Every one is musl: a package or image
 # has to run on a box whose glibc nobody chose. Adding one is a change to
-# appliance-xtask rather than an edit here, which every render would undo.
+# wslib-appliance-xtask rather than an edit here, which every render would undo.
 binary_arch() {
     case "$CARGO_BUILD_TARGET" in
     aarch64-*-musl) ARCH=arm64 MACHINE=183 ;;
     x86_64-*-musl) ARCH=amd64 MACHINE=62 ;;
-    *) die "no architecture is mapped for CARGO_BUILD_TARGET=$CARGO_BUILD_TARGET — the chassis maps aarch64-*-musl and x86_64-*-musl only" ;;
+    *) die "no architecture is mapped for CARGO_BUILD_TARGET=$CARGO_BUILD_TARGET — wslib-appliance-xtask maps aarch64-*-musl and x86_64-*-musl only" ;;
     esac
 }
 
@@ -29,9 +30,10 @@ build_binary() {
     # `AR_<triple>`, which only a dependency's build script reads, cargo takes the
     # linker from `CARGO_TARGET_<TRIPLE>_LINKER`; without it the host's linker is
     # used, and fails naming nothing. An aarch64 linker must apply
-    # `--fix-cortex-a53-843419`, which the check below holds it to: the chassis's
-    # BUILDING.md recipe uses `rust-lld` because `zig cc` refuses the flag.
-    cargo build --release --locked --target "$CARGO_BUILD_TARGET" --target-dir "$TARGET_DIR" --bin "$BINARY"
+    # `--fix-cortex-a53-843419`, which the check below holds it to: use
+    # `rust-lld`, since `zig cc` refuses the flag (wslib-appliance-xtask's
+    # README, "Cross-building").
+    cargo build --release --locked --target "$CARGO_BUILD_TARGET" --target-dir "$TARGET_DIR" -p "${PACKAGE:-$BINARY}" --bin "$BINARY"
     BIN="$TARGET_DIR/$CARGO_BUILD_TARGET/release/$BINARY"
 
     # The four assertions this file exists to make. Each is about a binary that
@@ -67,11 +69,11 @@ build_binary() {
     # with the layout, so a build with none proves nothing about the next.
     if [ "$ARCH" = arm64 ]; then
         RC=0
-        appliance-xtask erratum-843419 "$BIN" || RC=$?
+        wslib-appliance-xtask erratum-843419 "$BIN" || RC=$?
         case "$RC" in
         0) ;;
         1) die "$BIN failed the Cortex-A53 erratum 843419 check" ;;
-        *) die "could not run the Cortex-A53 erratum 843419 check (its error is above) — an older appliance-xtask cannot run it at all; install this chassis's tag's" ;;
+        *) die "could not run the Cortex-A53 erratum 843419 check (its error is above) — cargo install wslib-appliance-xtask --registry wired-square" ;;
         esac
     fi
 }

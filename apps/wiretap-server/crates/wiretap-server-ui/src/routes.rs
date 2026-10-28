@@ -6,7 +6,6 @@
 //! daemon is not answering. A refusal from the daemon keeps its status and
 //! body, so the screen shows the daemon's own sentence and `where`.
 
-use appliance_server::{Admin, ApplianceState, Mount, Viewer, audit};
 use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -14,6 +13,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use hyper::Method;
 use serde_json::{Map, Value, json};
+use wslib_appliance_server::{Admin, ApplianceState, Mount, Viewer, audit};
 
 use crate::daemon::{Daemon, Down};
 

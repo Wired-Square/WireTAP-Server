@@ -4,7 +4,7 @@
  */
 import { For, Index, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
 
-import { Capability, Refusal, allows, api, useRefresh } from "@wired-square/appliance-ui";
+import { Capability, allows, api, useRefresh } from "@wired-square/appliance-ui";
 import type { Me } from "@wired-square/appliance-ui";
 import {
   Badge,
@@ -13,6 +13,7 @@ import {
   Form,
   Notice,
   NothingYet,
+  Refusal,
   Section,
   Select,
   Table,

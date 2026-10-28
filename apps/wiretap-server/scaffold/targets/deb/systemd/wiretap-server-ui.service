@@ -1,11 +1,12 @@
 # The wiretap-server-ui appliance.
 #
-# **Chassis-owned. `appliance-xtask packaging render` rewrites this file
-# unconditionally, every time.** An edit here is lost at the next render, and the
-# loss shows up as a box behaving differently from the one beside it.
+# **Owned by wslib-appliance-xtask. `wslib-appliance-xtask packaging render`
+# rewrites this file unconditionally, every time.** An edit here is lost at the
+# next render, and the loss shows up as a box behaving differently from the one
+# beside it.
 #
-# Change a drop-in instead — `wiretap-server-ui.service.d/*.conf`, which nothing in the
-# chassis writes. There is a worked example in that directory.
+# Change a drop-in instead — `wiretap-server-ui.service.d/*.conf`, which
+# wslib-appliance-xtask never writes. There is a worked example in that directory.
 #
 # A directive that wants to differ *per product* rather than per deployment is a
 # knob missing from `appliance.toml`, not a hand-edit here.
@@ -59,7 +60,7 @@ RestartSec=5s
 # than as a limit.
 LimitNOFILE=16384
 
-# **The paths are declared here and in no other place.** `appliance-config`
+# **The paths are declared here and in no other place.** `wslib-appliance-config`
 # defaults from systemd's own `CONFIGURATION_DIRECTORY`, `STATE_DIRECTORY` and
 # `RUNTIME_DIRECTORY`, which is what lets `ExecStart` stay a bare binary with no
 # arguments. A path repeated on a command line is one dpkg rewrites on every
@@ -103,7 +104,7 @@ Environment=WIRETAP_SERVER_UI_PACKAGE_CONFIG=/usr/share/wiretap-server-ui/config
 ConfigurationDirectoryMode=0751
 # `0700`, because the database inside is `0600` so that the same group cannot
 # read the TOTP keys or the password hashes directly. The mode on
-# the directory is the outer half of that; `appliance-store` sets the inner half
+# the directory is the outer half of that; `wslib-appliance-store` sets the inner half
 # on every open.
 StateDirectoryMode=0700
 # `0750`, and this one is a grant rather than a restriction. The control socket

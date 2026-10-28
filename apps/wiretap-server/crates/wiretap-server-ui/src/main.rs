@@ -3,8 +3,8 @@
 //!
 //! One binary, two backends, picked at start as the chassis picks: with
 //! `WIRETAP_SERVER_UI_APP_SOCKET` and `_CONSOLE_UID` set it serves behind an
-//! ApplianceOS console (`appliance-server`), and without them its own HTTPS
-//! and accounts (`appliance-https`).
+//! ApplianceOS console (`wslib-appliance-server`), and without them its own
+//! HTTPS and accounts (`wslib-appliance-https`).
 
 mod daemon;
 mod routes;
@@ -16,12 +16,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use appliance_config::{ApplianceArgs, Resolver, ServingArgs};
-use appliance_server::{AppSocket, Logs};
-use appliance_store::Store;
-use appliance_types::Branding;
-use appliance_types::branding::ThemeTokens;
 use clap::Parser;
+use wslib_appliance_config::{ApplianceArgs, Resolver, ServingArgs};
+use wslib_appliance_server::{AppSocket, Logs};
+use wslib_appliance_store::Store;
+use wslib_appliance_types::Branding;
+use wslib_appliance_types::branding::ThemeTokens;
 use wslib_telemetry::Telemetry;
 
 use crate::daemon::Daemon;
@@ -55,9 +55,10 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let logs = appliance_server::logs(&["wiretap_server_ui"]);
+    install_crypto_provider();
+    let logs = wslib_appliance_server::logs(&["wiretap_server_ui"]);
     logs.feed(Telemetry::new("info").journald()).init();
-    appliance_server::daemon(NAME)
+    wslib_appliance_server::daemon(NAME)
         .run(|stop| run(args, logs, stop))
         .map_or_else(ExitCode::from, |()| ExitCode::SUCCESS)
 }
@@ -80,7 +81,7 @@ async fn run(
     );
     let store = Store::open(&bootstrap.db, None).await?;
     let sweep = |stop| {
-        appliance_server::spawn_sweeper(
+        wslib_appliance_server::spawn_sweeper(
             store.clone(),
             (),
             Duration::from_secs(60 * 60),
@@ -92,7 +93,8 @@ async fn run(
 
     let (sweeping, served) = match &bootstrap.proxied {
         Some(console) => {
-            let server = appliance_server::Server::new(store.clone(), branding(), VERSION, logs);
+            let server =
+                wslib_appliance_server::Server::new(store.clone(), branding(), VERSION, logs);
             let sweeping = sweep(server.shutdown());
             let mut socket = AppSocket::new(console.app_socket.clone(), console.console_uid);
             if let Some(hooks) = &console.hooks_socket {
@@ -115,7 +117,8 @@ async fn run(
                 };
                 tracing::warn!(socket = %bootstrap.socket.display(), "no accounts yet: {how}");
             }
-            let server = appliance_https::Server::new(store.clone(), branding(), VERSION, logs);
+            let server =
+                wslib_appliance_https::Server::new(store.clone(), branding(), VERSION, logs);
             let sweeping = sweep(server.shutdown());
             let served = server
                 .logo(LOGO, "image/svg+xml")
@@ -130,6 +133,10 @@ async fn run(
 
     sweeping.await?;
     Ok(served?)
+}
+
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 fn branding() -> Branding {
