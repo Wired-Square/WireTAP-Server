@@ -21,8 +21,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="$ROOT/target/ci-local"
 JOB_TIMEOUT=30m
-JOBS="gates capture package-amd64 package-arm64 image appliance appliance-browser
-	appliance-packaging server-ui server-ui-browser server-image"
+JOBS="gates capture package-amd64 package-arm64 image server-ui server-ui-browser
+	server-image"
 
 export CARGO_TERM_COLOR=always
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
@@ -34,9 +34,6 @@ job_name() {
 	package-amd64) echo "Package lifecycle (amd64)" ;;
 	package-arm64) echo "Package lifecycle (arm64)" ;;
 	image) echo "Gateway image" ;;
-	appliance) echo "Appliance gates" ;;
-	appliance-browser) echo "Appliance browser half" ;;
-	appliance-packaging) echo "Appliance packaging" ;;
 	server-ui) echo "Server UI gates" ;;
 	server-ui-browser) echo "Server UI browser half" ;;
 	server-image) echo "Server app image" ;;
@@ -110,21 +107,6 @@ job_image() {
 		--secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN \
 		--output type=cacheonly \
 		.
-}
-
-job_appliance() { cd appliance; workspace_gates; }
-job_appliance_browser() { browser_half appliance/frontend; }
-
-# Into target/, so the pinned appliance-xtask never replaces the one on PATH.
-job_appliance_packaging() {
-	cd appliance
-	local rev
-	rev="$(grep -om1 'wslib-appliance-rs\.git?[^#"]*#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)"
-	cargo install --locked --root "$SCRATCH/xtask" \
-		--git https://github.com/Wired-Square/wslib-appliance-rs.git --rev "$rev" appliance-xtask
-	PATH="$SCRATCH/xtask/bin:$PATH"
-	appliance-xtask packaging diff
-	scaffold/image/tests/run-verify-tests.sh
 }
 
 job_server_ui() { cd apps/wiretap-server; workspace_gates; }

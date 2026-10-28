@@ -225,7 +225,7 @@ cargo test --locked
 ```
 
 The static `aarch64-unknown-linux-musl` build needs the cross environment in
-[docs/workspaces.md](../../docs/workspaces.md#cross-building-the-appliance-on-a-mac):
+[docs/workspaces.md](../../docs/workspaces.md#cross-building-the-uis-package-on-a-mac):
 
 ```sh
 cargo build --release --locked --target aarch64-unknown-linux-musl

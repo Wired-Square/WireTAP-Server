@@ -66,6 +66,12 @@ All notable changes to this project are documented here. Entries go under
   their directory, before they replace what was there, and are `0600`, where
   they were `0644`.
 
+### Removed
+
+- **The Raspberry Pi card image and `wiretap-appliance`**, the `appliance/`
+  workspace, with its CI jobs. A Pi runs `wiretap-server` from the `.deb`, or
+  as the ApplianceOS app.
+
 ## [0.1.13] — 2026-10-16
 
 Export and import a capture database, rotate the gateway's secrets, and keep
