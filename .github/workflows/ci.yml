@@ -659,8 +659,20 @@ jobs:
           cache: npm
           cache-dependency-path: apps/wiretap-server/frontend/package-lock.json
 
+      # The kit comes from the registry's npm mirror, on the crates' token,
+      # which is gone again before any npm script runs.
+      - &npm-mirror
+        name: Read the kit from the registry's mirror
+        env:
+          MIRROR_TOKEN: *mirror-token
+        run: printf '//mirror.wiredsquare.com/npm/:_authToken=%s\n' "${MIRROR_TOKEN#Bearer }" > "$HOME/.npmrc"
+
       - name: Install exactly the lockfile
         run: npm ci
+
+      - &npm-forget
+        name: Forget the mirror's token
+        run: rm "$HOME/.npmrc"
 
       - name: Typecheck, test and build
         run: npm run ci
@@ -694,9 +706,13 @@ jobs:
           cache: npm
           cache-dependency-path: apps/wiretap-server/frontend/package-lock.json
 
+      - *npm-mirror
+
       - name: Install the browser half's lockfile
         working-directory: apps/wiretap-server/frontend
         run: npm ci
+
+      - *npm-forget
 
       # Here, not on the job, so the third-party ssh-agent action never sees it.
       - name: Build it, keep nothing

@@ -21,7 +21,7 @@ http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "time"] }
 tracing = { workspace = true }
 wslib-build-id = { workspace = true }
 wslib-telemetry = { workspace = true, features = ["journald"] }

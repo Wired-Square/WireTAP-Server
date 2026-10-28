@@ -31,9 +31,11 @@ After=time-sync.target
 # dying immediately afterwards.
 #
 # **Not `notify`, and the difference is worth knowing before you order anything
-# against this unit.** Nothing in the chassis calls `sd_notify`, so "started"
-# here means the process is running, not that the TLS listener answers. A
-# consumer's own unit that must wait for the port has to wait for the port.
+# against this unit.** "Started" here means the process is running, not that the
+# TLS listener answers: systemd ignores READY=1 under `exec`. A consumer's own
+# unit that must wait for the port has to wait for the port. A drop-in setting
+# `WatchdogSec=` hands the daemon a notify socket even so, and it then feeds the
+# watchdog and sends STOPPING=1 and its timeout's extension at a stop.
 Type=exec
 ExecStart=/usr/bin/wiretap-server-ui
 User=wiretap-server-ui
@@ -100,7 +102,7 @@ Environment=WIRETAP_SERVER_UI_PACKAGE_CONFIG=/usr/share/wiretap-server-ui/config
 # and at `0751` the directory does not shield a key left readable, so `0640`.
 ConfigurationDirectoryMode=0751
 # `0700`, because the database inside is `0600` so that the same group cannot
-# read the session signing secret or the password hashes directly. The mode on
+# read the TOTP keys or the password hashes directly. The mode on
 # the directory is the outer half of that; `appliance-store` sets the inner half
 # on every open.
 StateDirectoryMode=0700

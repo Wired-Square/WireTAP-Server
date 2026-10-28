@@ -11,12 +11,11 @@ import {
   AuditLog,
   Chrome,
   Logs,
-  TabPanel,
-  Tabs,
   allows,
   useSession,
 } from "@wired-square/appliance-ui";
 import type { Role } from "@wired-square/appliance-ui";
+import { TabPanel, Tabs } from "@wired-square/kit";
 
 import { Capture } from "./Capture";
 
