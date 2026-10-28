@@ -24,7 +24,7 @@ All notable changes to this project are documented here. Entries go under
   chassis v0.12.0, so building `apps/wiretap-server/` needs the `wired-square`
   registry too, and its browser half the registry's npm mirror, for
   `@wired-square/kit` and `@wired-square/appliance-ui`. Its packaging is
-  rendered by `wslib-appliance-xtask` 0.1.3. Its TLS and redirect listeners
+  rendered by `wslib-appliance-xtask` 0.2.0. Its TLS and redirect listeners
   are `wslib-http-server`'s, and their log lines read under the target
   `wslib_http_server`, where they were `appliance_https`; the chassis's own
   read under `wslib_appliance_*`. Upgrading signs everybody out once, and a

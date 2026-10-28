@@ -18,7 +18,7 @@ BINARY='wiretap-server-ui'
 
 # The cargo package the `--bin` target lives in. The two are the same name in
 # most products, and `cargo pkgid` fails loudly when they are not.
-PACKAGE="${PACKAGE:-$BINARY}"
+BINARY_PACKAGE="${BINARY_PACKAGE:-$BINARY}"
 
 die() {
     echo "make-deb: $1" >&2
@@ -229,7 +229,7 @@ binary_arch
 # refusal — it exits non-zero when the build has no commit to make a version
 # from, which includes a build id supplied through the environment. Before the
 # build, so a refusal costs nothing.
-BASE_VERSION=$(cargo pkgid -p "$PACKAGE" | sed -e 's|.*[#@]||')
+BASE_VERSION=$(cargo pkgid -p "$BINARY_PACKAGE" | sed -e 's|.*[#@]||')
 VERSION=$(wslib-appliance-xtask build-id --deb-version "$BASE_VERSION")
 
 # ---------------------------------------------------------------------------

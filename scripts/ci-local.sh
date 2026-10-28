@@ -98,7 +98,7 @@ job_image() {
 # Into target/, so the pinned wslib-appliance-xtask never replaces the one on PATH.
 job_server_ui() {
 	cargo install --config .cargo/config.toml --locked --root "$SCRATCH/xtask" \
-		--version =0.1.3 --registry wired-square wslib-appliance-xtask
+		--version =0.2.0 --registry wired-square wslib-appliance-xtask
 	PATH="$SCRATCH/xtask/bin:$PATH"
 	cd apps/wiretap-server
 	wslib-appliance-xtask gates
