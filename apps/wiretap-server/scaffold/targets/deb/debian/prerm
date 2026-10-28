@@ -1,6 +1,6 @@
 #!/bin/sh
-# Chassis-owned. `appliance-xtask packaging render` rewrites this file
-# unconditionally, every time. Put product-specific steps in
+# Owned by wslib-appliance-xtask. `wslib-appliance-xtask packaging render`
+# rewrites this file unconditionally, every time. Put product-specific steps in
 # /usr/share/wiretap-server-ui/prerm.d/ instead — see hooks.README beside this file.
 set -e
 

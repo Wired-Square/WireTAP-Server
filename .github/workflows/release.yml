@@ -272,16 +272,14 @@ jobs:
 
   # The ApplianceOS apps, one native runner per architecture as the gateway
   # image has, because both Dockerfiles run steps on the target platform. The
-  # UI in the server app needs the private chassis, and on arm64 its
-  # appliance-xtask for the Cortex-A53 erratum check.
+  # UI in the server app needs, on arm64, wslib-appliance-xtask for the
+  # Cortex-A53 erratum check.
   app-images:
     name: App images (${{ matrix.arch }})
     needs: draft
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-    env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -294,15 +292,6 @@ jobs:
             target: aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v7
-
-      - name: Reach the chassis
-        uses: webfactory/ssh-agent@v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.WSLIB_APPLIANCE_DEPLOYMENT_KEY }}
-
-      - name: Fetch the chassis over SSH
-        run: git config --global url."ssh://git@github.com/Wired-Square/wslib-appliance-rs".insteadOf "https://github.com/Wired-Square/wslib-appliance-rs"
-
       - *cargo-mirror
 
       - name: Install the toolchain
@@ -316,13 +305,11 @@ jobs:
 
       # `cargo install` reads no project config, so it is passed the checkout's
       # for the `wired-square` registry.
-      - name: Install appliance-xtask at the server app's chassis
+      - name: Install wslib-appliance-xtask
         if: matrix.arch == 'arm64'
         env:
           CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
-        run: |
-          rev="$(grep -om1 'wslib-appliance-rs\.git?[^#"]*#[0-9a-f]*' apps/wiretap-server/Cargo.lock | cut -d'#' -f2)"
-          cargo install --config .cargo/config.toml --locked --git https://github.com/Wired-Square/wslib-appliance-rs.git --rev "$rev" appliance-xtask
+        run: cargo install --config .cargo/config.toml wslib-appliance-xtask --locked --version =0.1.3 --registry wired-square
 
       - uses: actions/setup-node@v5
         with:
@@ -344,7 +331,7 @@ jobs:
       - name: Forget the mirror's token
         run: rm "$HOME/.npmrc"
 
-      # Here, not on the job, so the third-party ssh-agent action never sees it.
+      # Here, not on the job, so no npm script ever sees it.
       - name: Build both apps
         env:
           CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token

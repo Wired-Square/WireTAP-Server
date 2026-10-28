@@ -1,6 +1,6 @@
 #!/bin/sh
-# Chassis-owned. `appliance-xtask packaging render` rewrites this file
-# unconditionally, every time. Put product-specific steps in
+# Owned by wslib-appliance-xtask. `wslib-appliance-xtask packaging render`
+# rewrites this file unconditionally, every time. Put product-specific steps in
 # /usr/share/wiretap-server-ui/postinst.d/ instead — see hooks.README beside this file.
 set -e
 
@@ -11,7 +11,7 @@ CONFIG_DIR='/etc/wiretap-server-ui'
 HOOK_DIR='/usr/share/wiretap-server-ui/postinst.d'
 REMOVED_WHILE_RUNNING='/var/lib/wiretap-server-ui.removed-while-running'
 
-# Every value above is single-quoted, and `appliance-xtask` holds the path
+# Every value above is single-quoted, and `wslib-appliance-xtask` holds the path
 # components to a character set with no shell metacharacters in it. Both halves
 # are needed: this file is run as root, and an unquoted `CONFIG_DIR=/etc/my
 # appliance` is a script that runs the command `appliance`.
@@ -102,9 +102,9 @@ configure)
     # ---------------------------------------------------------------------
     # Hooks
     # ---------------------------------------------------------------------
-    # A product's own steps go in $HOOK_DIR as numbered executables. Nothing in
-    # the chassis writes that directory, so nothing there is lost when this file
-    # is regenerated.
+    # A product's own steps go in $HOOK_DIR as numbered executables. Nothing
+    # wslib-appliance-xtask renders writes that directory, so nothing there is
+    # lost when this file is regenerated.
     #
     # **--exit-on-error, and a failing hook fails the install.** run-parts
     # otherwise runs every script and reports afterwards, which for a migration

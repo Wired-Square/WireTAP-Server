@@ -6,10 +6,10 @@ It reaches the daemon only through the daemon's control socket (the root
 README's § Settings from a UI), so the daemon stays headless and installs
 without it.
 
-This is a cargo workspace of its own on the Wired Square appliance chassis
-([`wslib-appliance-rs`](https://github.com/Wired-Square/wslib-appliance-rs),
-pinned at `v0.17.1`), which is a private repository, as `appliance/` is. The
-root workspace and its release build without it.
+This is a cargo workspace of its own on the Wired Square appliance chassis,
+the `wslib-appliance-*` crates from the private `wired-square` registry, and
+in the browser `@wired-square/appliance-ui` from its npm mirror. The root
+workspace and its release build without it.
 
 | Path | What |
 | --- | --- |
@@ -20,8 +20,8 @@ root workspace and its release build without it.
 
 One binary, chosen at start the chassis's way:
 
-- **Standalone** (`appliance-https`): its own HTTPS, accounts and sign-in, with
-  a certificate it signs for itself on first start. The redirect is off.
+- **Standalone** (`wslib-appliance-https`): its own HTTPS, accounts and
+  sign-in, with a certificate it signs for itself on first start. The redirect is off.
   `WIRETAP_SERVER_UI_ONBOARDING=browser` lets the first person to reach it make
   the first account; without it, the UI's own control socket makes it. Each
   account may add TOTP, with recovery codes, and passkeys on the Users screen;
@@ -31,7 +31,7 @@ One binary, chosen at start the chassis's way:
   or a code or a passkey while their TOTP is on. A password reset, by an
   administrator or over the control socket, clears the account's second
   factors.
-- **Behind an ApplianceOS console** (`appliance-server`): set
+- **Behind an ApplianceOS console** (`wslib-appliance-server`): set
   `WIRETAP_SERVER_UI_APP_SOCKET` and `WIRETAP_SERVER_UI_CONSOLE_UID`, and it
   serves on that Unix socket under `WIRETAP_SERVER_UI_BASE_PATH` (for an app,
   `/apps/<name>/`) to whoever the console's `Appliance-Identity` header names.
@@ -52,10 +52,10 @@ on. A daemon that is not running is shown as such, not as an error.
 ## The package
 
 `wiretap-server-ui`, a `.deb` that depends on `wiretap-server` and leaves that
-package as it is. The chassis renders it from [appliance.toml](appliance.toml)
-into `scaffold/` (`appliance-xtask packaging render`; `packaging diff` says
-whether anything there was edited). Two files there are this repository's own:
-`debian/copyright`, and the unit's drop-in
+package as it is. `wslib-appliance-xtask` renders it from
+[appliance.toml](appliance.toml) into `scaffold/` (`packaging render`;
+`packaging diff` says whether anything there was edited). Two files there are
+this repository's own: `debian/copyright`, and the unit's drop-in
 `systemd/wiretap-server-ui.service.d/10-daemon-socket.conf`.
 
 ```sh
@@ -122,13 +122,13 @@ WIRETAP_SERVER_UI_ONBOARDING=browser cargo run -- \
 
 Open `https://127.0.0.1:8443` and make the first account.
 
-**Behind a console**, with `appliance-xtask dev-console` standing in for one:
+**Behind a console**, with `wslib-appliance-xtask dev-console` standing in for one:
 
 ```sh
 WIRETAP_SERVER_UI_APP_SOCKET=/tmp/wt/app.sock WIRETAP_SERVER_UI_CONSOLE_UID=$(id -u) \
   WIRETAP_SERVER_UI_BASE_PATH=/apps/wiretap-server/ \
   cargo run -- --db /tmp/wt/ui.db --ui frontend/dist --daemon-socket /tmp/wt/control.sock
-appliance-xtask dev-console --app-socket /tmp/wt/app.sock --listen 127.0.0.1:18080
+wslib-appliance-xtask dev-console --app-socket /tmp/wt/app.sock --listen 127.0.0.1:18080
 ```
 
 Open `http://127.0.0.1:18080/apps/wiretap-server/`, signed in as the console's
@@ -174,10 +174,10 @@ Each architecture becomes a `docker load` tarball,
 `target/apps/wiretap-server-<version>-<arch>.tar`, tagged
 `ghcr.io/wired-square/wiretap-server:<version>`, the daemon's version. The
 daemon is built with `cargo zigbuild`, as its package is, and the UI through
-the chassis's `scaffold/packaging/build-binary.sh`, linked with `rust-lld`. The
+the rendered `scaffold/packaging/build-binary.sh`, linked with `rust-lld`. The
 script needs `frontend/node_modules`, the `*-unknown-linux-musl` targets,
 `cargo-zigbuild`, `zig`, `docker buildx` and `jq`, and for arm64
-`appliance-xtask`, which checks the Cortex-A53 erratum. Its label is
+`wslib-appliance-xtask`, which checks the Cortex-A53 erratum. Its label is
 `manifest.json` with the version stamped in.
 
 To ship it to an ApplianceOS box, pack it into the apps' signed source
@@ -213,10 +213,10 @@ Without `/run/appliance` the UI serves its own HTTPS on 8443, and the image's
 
 ## Gates
 
-From this directory, with `CARGO_NET_GIT_FETCH_WITH_CLI=true` for the private
-chassis:
+From this directory, with `wslib-appliance-xtask` at the version CI pins:
 
 ```sh
+wslib-appliance-xtask gates
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo clippy --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings

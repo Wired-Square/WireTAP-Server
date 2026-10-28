@@ -2,16 +2,18 @@
 
 use std::sync::{Arc, Mutex};
 
-use appliance_server::testing::{Harness, TempDir, body_json, console};
-use appliance_types::Role;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
+use tempfile::TempDir;
 use tokio::net::UnixListener;
+use wslib_appliance_server::testing::{Harness, body_json, console};
+use wslib_appliance_types::Role;
 
 use crate::daemon::Daemon;
+use crate::install_crypto_provider;
 use crate::routes::routes;
 
 /// What the fake daemon answers. An accepted change is taken up only after
@@ -34,20 +36,20 @@ struct Fake {
 
 impl Fake {
     async fn start() -> Self {
-        let dir = TempDir::new("wtui");
+        let dir = TempDir::with_prefix("wtui").unwrap();
         let script = Shared::default();
         script.lock().unwrap().settings = json!({ "settings": [], "warnings": [] });
         let router = Router::new()
             .route("/v1/status", get(fake_status))
             .route("/v1/settings", get(fake_settings).put(fake_put))
             .with_state(Arc::clone(&script));
-        let listener = UnixListener::bind(dir.join("control.sock")).unwrap();
+        let listener = UnixListener::bind(dir.path().join("control.sock")).unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         Self { dir, script }
     }
 
     fn daemon(&self) -> Daemon {
-        Daemon::new(self.dir.join("control.sock"))
+        Daemon::new(self.dir.path().join("control.sock"))
     }
 
     fn refuse(&self, status: StatusCode, body: Value) {
@@ -90,6 +92,7 @@ async fn fake_put(
 }
 
 async fn behind_a_console(daemon: Daemon) -> Harness {
+    install_crypto_provider();
     Harness::builder().api(routes(daemon)).build().await
 }
 
@@ -183,12 +186,12 @@ async fn the_daemons_refusals_reach_the_screen_as_they_were() {
 
 #[tokio::test]
 async fn a_daemon_that_is_not_running_is_a_state_not_an_error() {
-    let dir = TempDir::new("wtui-down");
-    let stale = dir.join("stale.sock");
+    let dir = TempDir::with_prefix("wtui-down").unwrap();
+    let stale = dir.path().join("stale.sock");
     drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
 
     for (socket, said) in [
-        (dir.join("absent.sock"), "there is no control socket"),
+        (dir.path().join("absent.sock"), "there is no control socket"),
         (stale, "nothing is listening"),
     ] {
         let app = behind_a_console(Daemon::new(socket)).await;
@@ -214,9 +217,10 @@ async fn a_daemon_that_is_not_running_is_a_state_not_an_error() {
 
 #[tokio::test]
 async fn served_self_an_account_meets_the_same_ladder() {
-    use appliance_https::testing::Harness;
+    use wslib_appliance_https::testing::Harness;
 
     let fake = Fake::start().await;
+    install_crypto_provider();
     let app = Harness::builder()
         .users_routes()
         .api(routes(fake.daemon()))
@@ -245,14 +249,15 @@ async fn served_self_an_account_meets_the_same_ladder() {
 
 #[tokio::test]
 async fn served_self_an_account_with_totp_reaches_capture_after_its_code() {
-    use appliance_https::testing::{Harness, body_json};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use wslib_appliance_https::testing::{Harness, body_json};
 
     let browser_time = || {
         let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         since.as_millis() as u64
     };
     let fake = Fake::start().await;
+    install_crypto_provider();
     let app = Harness::builder().api(routes(fake.daemon())).build().await;
     let operator = app.signed_in("operator", Role::Operator).await;
     let enrol = app.post("/api/session/totp").cookie(&operator);

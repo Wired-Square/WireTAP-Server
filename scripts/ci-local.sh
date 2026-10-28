@@ -25,7 +25,6 @@ JOBS="gates capture package-amd64 package-arm64 image server-ui server-ui-browse
 	server-image"
 
 export CARGO_TERM_COLOR=always
-export CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 job_name() {
 	case $1 in
@@ -49,19 +48,6 @@ skip_reason() {
 			echo "Docker here cannot run linux/${1#package-} containers; runs on the tag"
 		;;
 	esac
-}
-
-workspace_gates() {
-	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets --locked -- -D warnings
-	cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
-	cargo test --workspace --locked
-}
-
-browser_half() {
-	cd "$1"
-	npm ci
-	npm run ci
 }
 
 package_lifecycle() {
@@ -109,8 +95,24 @@ job_image() {
 		.
 }
 
-job_server_ui() { cd apps/wiretap-server; workspace_gates; }
-job_server_ui_browser() { browser_half apps/wiretap-server/frontend; }
+# Into target/, so the pinned wslib-appliance-xtask never replaces the one on PATH.
+job_server_ui() {
+	cargo install --config .cargo/config.toml --locked --root "$SCRATCH/xtask" \
+		--version =0.1.3 --registry wired-square wslib-appliance-xtask
+	PATH="$SCRATCH/xtask/bin:$PATH"
+	cd apps/wiretap-server
+	wslib-appliance-xtask gates
+	cargo fmt --all -- --check
+	cargo clippy --workspace --all-targets --locked -- -D warnings
+	cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
+	cargo test --workspace --locked
+}
+
+job_server_ui_browser() {
+	cd apps/wiretap-server/frontend
+	npm ci
+	npm run ci
+}
 
 job_server_image() {
 	(cd apps/wiretap-server/frontend && npm ci)

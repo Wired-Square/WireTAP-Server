@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
+import solid from "vite-plugin-solid";
 import { applianceProxy, applianceVite } from "@wired-square/appliance-ui/vite";
 
 const api = process.env.WIRETAP_SERVER_UI_API ?? "https://localhost:8443";
@@ -17,6 +18,7 @@ const minted = () => {
 
 export default defineConfig(({ command }) =>
   applianceVite({
+    plugins: [solid()],
     server: {
       proxy: applianceProxy(api),
       ...(command === "serve" && api.startsWith("https:") && { https: minted() }),

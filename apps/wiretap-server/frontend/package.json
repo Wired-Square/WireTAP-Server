@@ -12,12 +12,14 @@
     "ci": "npm run check && npm test && npm run build"
   },
   "dependencies": {
-    "@wired-square/appliance-ui": "github:Wired-Square/wslib-appliance-rs#v0.17.1",
-    "@wired-square/kit": "^0.2.0",
+    "@wired-square/appliance-types": "^0.1.0",
+    "@wired-square/appliance-ui": "^0.1.0",
+    "@wired-square/kit": "^0.3.1",
     "solid-js": "^1.9.17"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "vite": "^8.2.1"
+    "vite": "^8.2.1",
+    "vite-plugin-solid": "^2.11.14"
   }
 }

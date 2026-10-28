@@ -1,8 +1,9 @@
-// The import order is the branding seam: the kit's tokens, the chassis's, then ours.
+// The import order is the branding seam: the kit's tokens, then ours.
 import "@wired-square/kit/theme.css";
-import "@wired-square/appliance-ui/theme.css";
 import "./theme.css";
 import "@wired-square/kit/kit.css";
+import "@wired-square/appliance-ui/shell.css";
+import "@wired-square/appliance-ui/appliance.css";
 
 import { render } from "solid-js/web";
 import { FirstAccount, Shell, SignIn, useSession } from "@wired-square/appliance-ui";

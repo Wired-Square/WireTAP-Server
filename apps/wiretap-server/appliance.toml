@@ -1,6 +1,6 @@
 # wiretap-server-ui's system identity, rendered into `scaffold/` by
-# `appliance-xtask packaging render`. The reasoning behind each field is in the
-# chassis's `scaffold/appliance.toml.example`; this file is the values.
+# `wslib-appliance-xtask packaging render`. The reasoning behind each field is
+# in that crate's `appliance.toml.example`; this file is the values.
 #
 # `name` and `env_prefix` must match `NAME` and `ENV_PREFIX` in
 # `crates/wiretap-server-ui/src/main.rs`; nothing checks that they do.
