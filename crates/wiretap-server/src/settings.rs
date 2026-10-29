@@ -16,11 +16,13 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use wiretap_catalog::{rtu_rules, LineSettings, ModbusRtuOptions, Parity};
 use wiretap_model::config::{DeviceSection, FileConfig};
 use wiretap_model::{parse_ifaces, Direction, SourceId};
-use wiretap_protocol::ingest::{self as proto, valid_daemon_id, valid_database_name};
+use wslib_modbus::ModbusRtuOptions;
 use wslib_secret::Secret;
+use wslib_serial::{LineSettings, Parity};
+use wslib_wiretap_catalogue::rtu_rules;
+use wslib_wiretap_protocol::ingest::{self as proto, valid_daemon_id, valid_database_name};
 
 use crate::catalogues::Catalogues;
 use crate::cli::Cli;
@@ -206,7 +208,7 @@ impl LineCatalogue {
         let r = rtu_rules(text).map_err(|e| format!("catalog {path}: {e}"))?;
         if r.name.is_empty() {
             return Err(format!(
-                "catalog {path}: meta.name: Catalog name must not be empty"
+                "catalog {path}: meta.name: Catalogue name must not be empty"
             ));
         }
         Ok(Self {
@@ -2266,7 +2268,7 @@ mod tests {
         let no_len =
             format!("{DECLARES_0X60}lengths = [{{ when = {{ offset = 4, value = 3 }} }}]\n");
         assert!(
-            wiretap_catalog::Catalog::parse(&no_len).is_ok(),
+            wslib_wiretap_catalogue::Catalogue::parse(&no_len).is_ok(),
             "the parser drops the rule"
         );
         let dropped = catalogue_file("no-len", &no_len);
@@ -2287,7 +2289,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(
             err.unwrap_err(),
-            format!("catalog {path}: meta.name: Catalog name must not be empty")
+            format!("catalog {path}: meta.name: Catalogue name must not be empty")
         );
     }
 
@@ -2298,7 +2300,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(
             err.unwrap_err(),
-            format!("catalog {path}: meta.name: Catalog name must be a string")
+            format!("catalog {path}: meta.name: Catalogue name must be a string")
         );
     }
 

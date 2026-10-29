@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use rusqlite::{params_from_iter, Connection};
 use wiretap_model::{CanSample, Direction, ModbusSample, Protocol, Sample, SerialSample, SourceId};
-use wiretap_protocol::can::CanFlags;
-use wiretap_protocol::ingest::{modbus_id, modbus_unit_func};
+use wslib_can::CanFlags;
+use wslib_wiretap_protocol::ingest::{modbus_id, modbus_unit_func};
 
 /// Why a cache operation failed.
 ///
@@ -428,7 +428,7 @@ impl FrameCache for SqliteCache {
             // millions of them on a long drain; neither `FromStr` allocates.
             let tag = r.get_ref(8)?;
             let sample = match tag.as_str().ok().and_then(|s| s.parse().ok()) {
-                Some(Protocol::Modbus) => {
+                Some(Protocol::ModbusRtu) => {
                     let (unit, func) = modbus_unit_func(r.get(4)?);
                     Sample::Modbus(ModbusSample {
                         ts_us,
@@ -552,7 +552,7 @@ impl FrameCache for SqliteCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
+    use wslib_wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
 
     /// A directory that goes away when the test does. Held by every test as
     /// `_dir`, so it outlives the cache inside it.

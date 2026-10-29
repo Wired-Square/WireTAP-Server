@@ -139,12 +139,12 @@ CAN_UP="${ROOT}/packaging/can-up"
 CAN_RULES="${ROOT}/packaging/90-wiretap-can.rules"
 CAN_CONF="${ROOT}/packaging/examples/can0.conf"
 CATALOGUE="${ROOT}/packaging/examples/sungrow-rs485.catalog.toml"
-# The ingest spec from the wiretap-protocol checkout Cargo.lock pins, so the
+# The ingest spec from the wslib-wiretap-protocol Cargo.lock pins, so the
 # package documents the protocol its binary speaks.
 protocol_manifest="$(cd "${ROOT}" && cargo metadata --format-version 1 --locked \
 	| python3 -c 'import json, sys; print(next(p["manifest_path"]
-		for p in json.load(sys.stdin)["packages"] if p["name"] == "wiretap-protocol"))')" \
-	|| die "could not find wiretap-protocol in cargo metadata"
+		for p in json.load(sys.stdin)["packages"] if p["name"] == "wslib-wiretap-protocol"))')" \
+	|| die "could not find wslib-wiretap-protocol in cargo metadata"
 PROTOCOL="$(dirname "${protocol_manifest}")/docs/ingest.md"
 
 for f in "${UNIT}" "${CONFIG}" "${CAN_UNIT}" "${CAN_UP}" "${CAN_RULES}" "${CAN_CONF}" \

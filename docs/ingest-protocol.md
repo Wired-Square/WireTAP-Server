@@ -1,8 +1,8 @@
 # WireTAP Binary Ingest Protocol
 
-The spec is `crates/wiretap-protocol/docs/ingest.md` in
-[wslib-wiretap-rs](https://github.com/Wired-Square/wslib-wiretap-rs), at the tag the
-workspace `Cargo.toml` pins; the .deb installs it as
+The spec is `crates/wslib-wiretap-protocol/docs/ingest.md` in
+[wslib-rs](https://github.com/Wired-Square/wslib-rs), at the version `Cargo.lock`
+pins; the .deb installs it as
 `/usr/share/doc/wiretap-server/ingest-protocol.md`. Its reference client and
 conformance suite is [tools/test_ingest_client.py](../tools/test_ingest_client.py).
 
@@ -34,7 +34,7 @@ until the gateway is upgraded.
 The gateway records the devices of a named v3 `HELLO` in
 `wiretap_meta.daemon_devices` and answers with each one's catalogue
 assignment, keyed by daemon id and interface and sent on the bus this `HELLO`
-named it on. It serves a `CATALOG_GET` from `wiretap_meta.catalog_blobs`
+named it on. It serves a `CATALOGUE_GET` from `wiretap_meta.catalog_blobs`
 exactly as the catalogue was assigned, CRLF and all: `status = 1` (unknown)
 for a SHA-1 it has no blob for, and `status = 2` (unavailable) when the
 database cannot be read. When the meta database fails at a `HELLO`, the
@@ -52,25 +52,25 @@ in `/etc`. It keeps the blob in `<state dir>/catalogs/<sha>.toml` and the
 assignments in `<state dir>/assignments.json`, beside the disk cache. A
 catalogue that cannot be fetched, checked or parsed is logged and the line
 keeps what it frames with. The daemon's own listener has no assignments: it
-answers a v3 `HELLO` with none and every `CATALOG_GET` with `status = 1`.
+answers a v3 `HELLO` with none and every `CATALOGUE_GET` with `status = 1`.
 
 After those pulls, and before the first batch, a v3 sink sends one
-`CATALOG_STATUS`: every bus its `HELLO` named, each with the catalogue it
+`CATALOGUE_STATUS`: every bus its `HELLO` named, each with the catalogue it
 frames with now (`assigned` or `local`, by the Git blob SHA-1 of the bytes,
 or `none` for a CAN device, a raw-only line or a line with no catalogue), and
 the assigned blob it last refused for that line, if any, with why: hash
 mismatch, did not parse, or fetch failed. Taking an assigned catalogue, or the
 assignment being cleared, ends the refusal. Whenever any line's catalogue or
 refusal changes, by any session's pull, every v3 sink sends a fresh
-`CATALOG_STATUS` ahead of its next batch or `PING`. Each is the whole state,
+`CATALOGUE_STATUS` ahead of its next batch or `PING`. Each is the whole state,
 never a change, and none is answered. A v2 session sends none. The daemon's
 listener takes one from a pusher and ignores it.
 
-The gateway stores each `CATALOG_STATUS` in `wiretap_meta.daemon_active`, one
+The gateway stores each `CATALOGUE_STATUS` in `wiretap_meta.daemon_active`, one
 row per interface the session's `HELLO` named on a reported bus, and drops the
 rows of that `HELLO`'s interfaces the report leaves out. A row's `since` moves
 only when its catalogue does, not when a refusal comes or goes. A
-`CATALOG_STATUS` from an anonymous session is ignored, and a meta database
+`CATALOGUE_STATUS` from an anonymous session is ignored, and a meta database
 failure is logged without ending the session. `GET /v1/admin/daemons` serves
 it as each device's `active`.
 

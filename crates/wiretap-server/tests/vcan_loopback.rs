@@ -6,7 +6,7 @@
 //! Docker Desktop's kernel either — `ip link add dev vcan0 type vcan` answers
 //! `Not supported` — so until this ran, opening a socket, reading a frame,
 //! putting one on the bus and asking the kernel for a bitrate had never
-//! executed anywhere. The socket itself is `wiretap-io`'s, with drills of its
+//! executed anywhere. The socket itself is `wslib-can-socketcan`'s, with drills of its
 //! own; these are about what the server does with it.
 //!
 //! Ignored by default, because it needs an interface only root can create:
@@ -27,7 +27,7 @@
 //! taken.
 //!
 //! The other end of the bus is a plain `socketcan` socket rather than a second
-//! `wiretap-io` task, so what a test asserts about a frame is never encoded and
+//! `wslib-can` task, so what a test asserts about a frame is never encoded and
 //! decoded by the same code under test.
 
 #![cfg(target_os = "linux")]
@@ -43,18 +43,18 @@ use socketcan::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use wiretap_io::can::{CanEvent, CanRead, CanTask};
 use wiretap_model::{Direction, Sample, SourceId};
-use wiretap_protocol::testpattern::{
-    encode, sweep_payload, Command, Flags, Message, ID_CONTROL, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
-};
 use wiretap_server::cache::{FrameCache, SqliteCache};
 use wiretap_server::pipeline;
 use wiretap_server::settings::{
     Batching, Device, DeviceKind, Forward, LogLevel, Settings, TestPattern,
 };
 use wiretap_server::source::{socketcan as server_can, system_time_to_us, Bitrates};
+use wslib_can::{CanEvent, CanRead, CanTask};
 use wslib_secret::Secret;
+use wslib_wiretap_protocol::testpattern::{
+    encode, sweep_payload, Command, Flags, Message, ID_CONTROL, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
+};
 
 /// Long enough to absorb a loaded CI runner, short enough that a wedged read
 /// fails the test instead of hanging the job.

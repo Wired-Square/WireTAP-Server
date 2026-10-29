@@ -12,7 +12,7 @@
 //! do that if a refusal is visible.
 //!
 //! The session itself, shared with the gateway, is
-//! `wiretap_protocol::ingest::ServerSession`; this file is the socket, the
+//! `wslib_wiretap_protocol::ingest::ServerSession`; this file is the socket, the
 //! token and the archive around it.
 
 use std::net::SocketAddr;
@@ -24,10 +24,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 use wiretap_model::Sample;
-use wiretap_protocol::ingest::{
+use wslib_secret::Secret;
+use wslib_wiretap_protocol::ingest::{
     self as proto, Action, CloseReason, IncomingBatch, ServerConfig, ServerSession, ShortBatch,
 };
-use wslib_secret::Secret;
 
 use crate::archive::Archive;
 use crate::settings::Ingest;
@@ -191,8 +191,10 @@ impl Session {
                     Action::Nack { seq, status } => {
                         machine.ack(seq, status, self.archive.occupancy_pct())
                     }
-                    Action::CatalogGet(_) => machine.answer_catalog(Err(proto::CATALOG_UNKNOWN)),
-                    Action::CatalogStatus(_) => continue,
+                    Action::CatalogueGet(_) => {
+                        machine.answer_catalogue(Err(proto::CATALOGUE_UNKNOWN))
+                    }
+                    Action::CatalogueStatus(_) => continue,
                     Action::Close(CloseReason::Framing) => {
                         warn!("Ingest client {} sent bogus length, dropping", self.peer);
                         return;
@@ -753,17 +755,19 @@ mod tests {
         c.write_all(&hello(b"", false)).await.unwrap();
         reply(&mut c).await;
 
-        let get = proto::CatalogGet {
+        let get = proto::CatalogueGet {
             blob_sha: [0x11; 20],
             offset: 0,
         };
-        c.write_all(&proto::encode_catalog_get(&get)).await.unwrap();
+        c.write_all(&proto::encode_catalogue_get(&get))
+            .await
+            .unwrap();
         let frame = reply(&mut c).await;
-        assert_eq!(frame.mtype, proto::MSG_CATALOG);
-        let catalog = proto::parse_catalog(&frame.body).unwrap();
+        assert_eq!(frame.mtype, proto::MSG_CATALOGUE);
+        let catalog = proto::parse_catalogue(&frame.body).unwrap();
         assert_eq!(
             (catalog.status, catalog.blob_sha, catalog.data.len()),
-            (proto::CATALOG_UNKNOWN, get.blob_sha, 0)
+            (proto::CATALOGUE_UNKNOWN, get.blob_sha, 0)
         );
     }
 

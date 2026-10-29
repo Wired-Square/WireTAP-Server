@@ -6,7 +6,7 @@
 //! the assignment in `<state dir>/assignments.json`, so a restart with the
 //! gateway down frames as before. A line's taps follow its [`Rules`] on a
 //! watch channel, and each session reports its devices' catalogues to the
-//! gateway in a `CATALOG_STATUS` whenever one changes.
+//! gateway in a `CATALOGUE_STATUS` whenever one changes.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -16,8 +16,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tracing::warn;
 use wiretap_model::{blob_sha1, blob_sha1_hex};
-use wiretap_protocol::ingest::{ActiveCatalog, CatalogStatus, CatalogStatusEntry, Device, Refusal};
 use wslib_file_atomic::Options;
+use wslib_wiretap_protocol::ingest::{
+    ActiveCatalogue, CatalogueStatus, CatalogueStatusEntry, Device, Refusal,
+};
 
 use crate::settings::{Forward, LineCatalogue, Settings};
 
@@ -51,11 +53,11 @@ impl Rules {
         }
     }
 
-    fn active(&self) -> ActiveCatalog {
+    fn active(&self) -> ActiveCatalogue {
         match self {
-            Self::Gateway { catalogue, .. } => ActiveCatalog::Assigned(catalogue.sha),
-            Self::Etc(c) => ActiveCatalog::Local(c.sha),
-            Self::None => ActiveCatalog::None,
+            Self::Gateway { catalogue, .. } => ActiveCatalogue::Assigned(catalogue.sha),
+            Self::Etc(c) => ActiveCatalogue::Local(c.sha),
+            Self::None => ActiveCatalogue::None,
         }
     }
 }
@@ -178,18 +180,18 @@ impl Catalogues {
         self.changes.subscribe()
     }
 
-    /// Every bus in `devices`, as a `CATALOG_STATUS` reports it: a CAN device
+    /// Every bus in `devices`, as a `CATALOGUE_STATUS` reports it: a CAN device
     /// or a raw-only line frames with none.
-    pub fn status(&self, devices: &[Device]) -> CatalogStatus {
+    pub fn status(&self, devices: &[Device]) -> CatalogueStatus {
         let refused = self.refused.lock().expect("unpoisoned");
-        let entries = devices.iter().map(|d| CatalogStatusEntry {
+        let entries = devices.iter().map(|d| CatalogueStatusEntry {
             bus: d.bus,
             active: self
                 .effective(&d.name)
-                .map_or(ActiveCatalog::None, |r| r.active()),
+                .map_or(ActiveCatalogue::None, |r| r.active()),
             refused: refused.get(&d.name).copied(),
         });
-        CatalogStatus {
+        CatalogueStatus {
             entries: entries.collect(),
         }
     }
@@ -419,7 +421,7 @@ pub(crate) mod tests {
                 .map(|e| (e.bus, e.active, e.refused))
                 .collect::<Vec<_>>()
         };
-        let local = ActiveCatalog::Local(blob_sha1(b"[meta]\nname = \"etc\"\n"));
+        let local = ActiveCatalogue::Local(blob_sha1(b"[meta]\nname = \"etc\"\n"));
         let refused = (blob_sha1(b"broken"), Refusal::DidNotParse);
         let (sha, refusal) = refused;
         catalogues.apply(vec![(
@@ -429,8 +431,8 @@ pub(crate) mod tests {
         assert_eq!(
             entries(&catalogues),
             [
-                (0, ActiveCatalog::None, None),
-                (1, ActiveCatalog::None, Some(refused)),
+                (0, ActiveCatalogue::None, None),
+                (1, ActiveCatalogue::None, Some(refused)),
                 (2, local, None),
             ]
         );
@@ -438,7 +440,7 @@ pub(crate) mod tests {
         let changes = catalogues.subscribe_changes();
         assign(&catalogues, CATALOGUE);
         assert!(changes.has_changed().unwrap());
-        let assigned = ActiveCatalog::Assigned(blob_sha1(CATALOGUE.as_bytes()));
+        let assigned = ActiveCatalogue::Assigned(blob_sha1(CATALOGUE.as_bytes()));
         assert_eq!(
             entries(&catalogues)[1],
             (1, assigned, None),

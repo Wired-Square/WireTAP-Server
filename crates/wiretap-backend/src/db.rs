@@ -107,7 +107,7 @@ impl DbSchemaState {
     }
 }
 
-pub use wiretap_protocol::ingest::valid_database_name;
+pub use wslib_wiretap_protocol::ingest::valid_database_name;
 
 /// Why a capture database cannot be served: never, or not yet.
 #[derive(Debug)]
@@ -1661,7 +1661,7 @@ pub(crate) mod tests {
 
     /// `n` CAN frames of `id`, a millisecond apart from `from_us`.
     pub(crate) fn frames(id: u32, from_us: i64, n: i64) -> Vec<FrameRow> {
-        use wiretap_protocol::ingest::RecordKind;
+        use wslib_wiretap_protocol::ingest::RecordKind;
         (0..n)
             .map(|i| FrameRow::new(from_us + i * 1000, RecordKind::Can, id, 0, 0, vec![1, 2]))
             .collect()
@@ -2008,7 +2008,7 @@ pub(crate) mod tests {
 
     /// [`per_protocol`] as it should read once 0005 has run.
     async fn per_protocol_relabelled(name: &str) -> Vec<(String, i64, i64)> {
-        use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
+        use wslib_wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
         let relabelled: Vec<_> = per_protocol(name)
             .await
             .into_iter()

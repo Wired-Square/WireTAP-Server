@@ -21,13 +21,13 @@ use axum::{Extension, Json, Router};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use wiretap_gateway::{
-    AssignCatalog, AssignedCatalog, AssignmentConflict, CatalogRejected, DaemonList, StoredCatalog,
-    UnassignParams,
-};
-use wiretap_protocol::import::{parse_header, parse_record, BODY_HEADER};
-use wiretap_protocol::ingest::RecordKind;
 use wslib_telemetry::{LogLevel, LogRecord, LogSnapshot};
+use wslib_wiretap_gateway::{
+    AssignCatalogue, AssignedCatalogue, AssignmentConflict, CatalogueRejected, DaemonList,
+    StoredCatalogue, UnassignParams,
+};
+use wslib_wiretap_protocol::import::{parse_header, parse_record, BODY_HEADER};
+use wslib_wiretap_protocol::ingest::RecordKind;
 
 use crate::archive::{self, ImportError};
 use crate::catalogs::AssignError;
@@ -996,7 +996,7 @@ struct ImportQuery {
 
 const IMPORT_CHUNK_ROWS: usize = 8192;
 
-/// Streaming capture import: the body is a `wiretap_protocol::import` header
+/// Streaming capture import: the body is a `wslib_wiretap_protocol::import` header
 /// then records, COPYed in chunks as it streams.
 async fn import_capture(
     State(state): State<St>,
@@ -1483,7 +1483,7 @@ impl IntoResponse for AssignError {
                     .map(|f| format!("{}: {}", f.field, f.message))
                     .collect::<Vec<_>>()
                     .join("; ");
-                let body = CatalogRejected { error, findings };
+                let body = CatalogueRejected { error, findings };
                 (StatusCode::BAD_REQUEST, Json(body)).into_response()
             }
             AssignError::Conflict(current) => {
@@ -1507,13 +1507,13 @@ async fn daemons(
 async fn assignments_put(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
-    Json(body): Json<AssignCatalog>,
+    Json(body): Json<AssignCatalogue>,
 ) -> Response {
     if let Err(e) = check_admin(&key) {
         return e.into_response();
     }
     match state.catalogs.assign(&body, &key.name).await {
-        Ok(assignment) => Json(AssignedCatalog {
+        Ok(assignment) => Json(AssignedCatalogue {
             daemon_id: body.daemon_id,
             interface: body.interface,
             assignment,
@@ -1542,7 +1542,7 @@ async fn catalog_get(
     State(state): State<St>,
     Extension(key): Extension<KeyInfo>,
     Path(sha): Path<String>,
-) -> Result<Json<StoredCatalog>, ApiError> {
+) -> Result<Json<StoredCatalogue>, ApiError> {
     check_admin(&key)?;
     let blob_sha = hex::decode(&sha)
         .ok()
@@ -1598,9 +1598,9 @@ mod tests {
     use bytes::Bytes;
     use std::collections::HashMap;
     use std::time::Instant;
-    use wiretap_protocol::can::CanFrame;
-    use wiretap_protocol::import;
-    use wiretap_protocol::ingest::RecordFields;
+    use wslib_can::CanFrame;
+    use wslib_wiretap_protocol::import;
+    use wslib_wiretap_protocol::ingest::RecordFields;
 
     fn states(pairs: &[(&str, db::DbSchemaState)]) -> HashMap<String, db::DbSchemaState> {
         pairs
@@ -2486,7 +2486,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, 400);
-        let rejected: CatalogRejected = serde_json::from_value(rejected).unwrap();
+        let rejected: CatalogueRejected = serde_json::from_value(rejected).unwrap();
         let fields: Vec<&str> = rejected.findings.iter().map(|f| f.field.as_str()).collect();
         assert_eq!(fields, ["meta.name", "meta.version"]);
         assert!(

@@ -1,60 +1,53 @@
 //! A serial line's bytes as the reads returned them, unframed.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
-use wiretap_catalog::LineSettings;
 use wiretap_model::{SerialSample, SourceId};
-use wiretap_protocol::ingest::{RecordKind, ID_SEQ_MASK};
+use wslib_serial::LineSettings;
+use wslib_wiretap_protocol::ingest::{self, RawChunk};
 
 use super::system_time_to_us;
 
 /// One serial line's raw capture, and the bus number its chunks carry.
 pub struct RawTap {
+    tap: ingest::RawTap,
     bus: SourceId,
-    line: LineSettings,
-    seq: u32,
 }
 
 impl RawTap {
     pub fn new(bus: SourceId, line: LineSettings) -> Self {
-        Self { bus, line, seq: 0 }
+        Self {
+            tap: ingest::RawTap::new(line.baud, line.bits_per_char()),
+            bus,
+        }
     }
 
     /// One read's bytes in chunks a record can carry, each stamped when its
-    /// last byte arrived: the read's clock less the wire time of the bytes
-    /// after it, as [`super::modbus::RtuTap`] stamps a message.
+    /// last byte arrived.
     pub fn push(&mut self, bytes: &[u8], read_at: SystemTime) -> Vec<SerialSample> {
-        let seq = self.seq;
-        self.seq = self.seq.wrapping_add(1) & ID_SEQ_MASK;
-        let mut after = bytes.len();
-        bytes
-            .chunks(RecordKind::RawSerial.max_payload())
-            .map(|chunk| {
-                after -= chunk.len();
-                let at = read_at
-                    .checked_sub(self.line.wire_time(after as u64))
-                    .unwrap_or(UNIX_EPOCH);
-                SerialSample {
-                    ts_us: system_time_to_us(at),
-                    bus: self.bus,
-                    seq,
-                    data: chunk.to_vec(),
-                }
+        self.tap
+            .push(bytes, read_at)
+            .into_iter()
+            .map(|RawChunk { at, seq, data }| SerialSample {
+                ts_us: system_time_to_us(at),
+                bus: self.bus,
+                seq,
+                data,
             })
             .collect()
     }
 
     /// The line was opened again: its reads count from zero.
     pub fn reset(&mut self) {
-        self.seq = 0;
+        self.tap.reset();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
-    use wiretap_catalog::Parity;
+    use wslib_serial::Parity;
 
     use super::*;
 
@@ -92,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sequence_counts_reads_from_the_open_and_wraps_at_2_31() {
+    fn the_sequence_counts_reads_from_the_open() {
         let mut tap = RawTap::new(SourceId(0), LINE_9600_8N1);
         let seqs = |tap: &mut RawTap, len: usize| -> Vec<u32> {
             tap.push(&vec![0; len], at(T0))
@@ -106,10 +99,6 @@ mod tests {
 
         tap.reset();
         assert_eq!(seqs(&mut tap, 1), [0], "counted again from a reopen");
-
-        tap.seq = (1 << 31) - 1;
-        assert_eq!(seqs(&mut tap, 1), [(1 << 31) - 1]);
-        assert_eq!(seqs(&mut tap, 1), [0]);
     }
 
     #[test]

@@ -16,8 +16,8 @@ use futures_util::{SinkExt, TryStreamExt};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::{Client, CopyInSink, GenericClient};
 use wiretap_model::Protocol;
-use wiretap_protocol::can::CanFlags;
-use wiretap_protocol::ingest::{RecordFields, RecordKind, ID_ARB_MASK};
+use wslib_can::CanFlags;
+use wslib_wiretap_protocol::ingest::{RecordFields, RecordKind, ID_ARB_MASK};
 
 /// One row of `capture_frame`, whichever protocol it came off. A column the
 /// row's protocol has no answer for is NULL, and
@@ -74,7 +74,7 @@ impl FrameRow {
                 transmitted,
             } => Self {
                 ts_us,
-                protocol: Protocol::Modbus,
+                protocol: Protocol::ModbusRtu,
                 id: id_flags & ID_ARB_MASK,
                 flags: tx(transmitted),
                 dlc: data.len() as u16,
@@ -448,7 +448,7 @@ fn copy_text(batch: &[FrameRow]) -> Result<String, CopyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiretap_protocol::ingest::{
+    use wslib_wiretap_protocol::ingest::{
         modbus_id, raw_serial_id, FLAG_CRC_VALID, ID_FD, ID_TX, MODBUS_RTU_PROTOCOL,
     };
 
@@ -465,7 +465,7 @@ mod tests {
             2,
             raw.clone(),
         );
-        assert_eq!((m.protocol, m.id, m.dlc), (Protocol::Modbus, 0x0120, 11));
+        assert_eq!((m.protocol, m.id, m.dlc), (Protocol::ModbusRtu, 0x0120, 11));
         assert_eq!(
             (m.unit, m.func, m.crc_valid),
             (Some(1), Some(0x20), Some(true))
@@ -598,7 +598,9 @@ mod tests {
     /// length code it requests with no data, whatever the record carried.
     #[test]
     fn a_can_row_stores_its_flags_and_a_remote_frame_its_requested_code() {
-        use wiretap_protocol::ingest::{CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_RTR, ID_EXTENDED};
+        use wslib_wiretap_protocol::ingest::{
+            CAN_FLAG_BRS, CAN_FLAG_ESI, CAN_FLAG_RTR, ID_EXTENDED,
+        };
         let remote = FrameRow::new(
             1,
             RecordKind::Can,

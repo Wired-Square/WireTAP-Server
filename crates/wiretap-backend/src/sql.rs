@@ -76,7 +76,7 @@ impl Args {
 }
 
 use wiretap_model::Protocol;
-use wiretap_protocol::can::CanFlags;
+use wslib_can::CanFlags;
 
 /// Which protocol a query is about when the caller does not say.
 ///
@@ -94,21 +94,11 @@ pub const DEFAULT_PROTOCOL: Protocol = Protocol::Can;
 /// The anchor, not a fragment: every query in this file filters by protocol, so
 /// this is always the first predicate and callers append with `AND` — the same
 /// shape [`time_clause`] already assumes.
-fn protocol_clause(args: &mut Args, protocol: Option<wiretap_gateway::Protocol>) -> String {
+fn protocol_clause(args: &mut Args, protocol: Option<Protocol>) -> String {
     format!(
         "WHERE protocol = ${}::text",
-        args.add(archive_protocol(protocol).as_str())
+        args.add(protocol.unwrap_or(DEFAULT_PROTOCOL).as_str())
     )
-}
-
-/// The protocol a request names, or [`DEFAULT_PROTOCOL`] when it names none.
-fn archive_protocol(protocol: Option<wiretap_gateway::Protocol>) -> Protocol {
-    match protocol {
-        None => DEFAULT_PROTOCOL,
-        Some(wiretap_gateway::Protocol::Can) => Protocol::Can,
-        Some(wiretap_gateway::Protocol::Modbus) => Protocol::Modbus,
-        Some(wiretap_gateway::Protocol::Serial) => Protocol::Serial,
-    }
 }
 
 trait WhereClause {
@@ -707,8 +697,8 @@ async fn rollup_available(client: &Client) -> bool {
 /// `max_dlc`: the table is monotonic, so the largest code is the largest payload.
 fn payload_len(protocol: Protocol, dlc: u16) -> u16 {
     match protocol {
-        Protocol::Can => wiretap_protocol::dlc_to_len(dlc as u8, true) as u16,
-        Protocol::Modbus | Protocol::Serial => dlc,
+        Protocol::Can => wslib_can::dlc_to_len(dlc as u8, true) as u16,
+        Protocol::ModbusRtu | Protocol::Serial => dlc,
     }
 }
 
@@ -716,7 +706,7 @@ pub async fn inventory(
     client: &Client,
     start_time: Option<String>,
     end_time: Option<String>,
-    protocol: Option<wiretap_gateway::Protocol>,
+    protocol: Option<Protocol>,
 ) -> Result<Vec<InventoryEntry>, QueryError> {
     let map = |row: &tokio_postgres::Row| {
         let max_dlc = row.get::<_, i32>("max_dlc") as u16;
@@ -727,7 +717,7 @@ pub async fn inventory(
             first_us: row.get::<_, f64>("first_us") as i64,
             last_us: row.get::<_, f64>("last_us") as i64,
             max_dlc,
-            max_len: Some(payload_len(archive_protocol(protocol), max_dlc)),
+            max_len: Some(payload_len(protocol.unwrap_or(DEFAULT_PROTOCOL), max_dlc)),
         }
     };
 
@@ -771,7 +761,7 @@ pub async fn inventory(
 
 pub async fn time_bounds(
     client: &Client,
-    protocol: Option<wiretap_gateway::Protocol>,
+    protocol: Option<Protocol>,
 ) -> Result<TimeBounds, QueryError> {
     let (min_expr, max_expr, table) = if rollup_available(client).await {
         (
@@ -845,7 +835,7 @@ pub async fn frames_batch(
     end_time: Option<String>,
     after: Option<&str>,
     limit: u32,
-    protocol: Option<wiretap_gateway::Protocol>,
+    protocol: Option<Protocol>,
 ) -> Result<FrameBatch, QueryError> {
     let cursor = after.map(decode_cursor).transpose()?;
     let mut args = Args::default();
@@ -998,25 +988,24 @@ mod tests {
         assert_eq!(payload_len(Protocol::Can, 8), 8);
         assert_eq!(payload_len(Protocol::Can, 9), 12);
         assert_eq!(payload_len(Protocol::Can, 15), 64);
-        assert_eq!(payload_len(Protocol::Modbus, 11), 11);
-        assert_eq!(payload_len(Protocol::Modbus, 256), 256);
+        assert_eq!(payload_len(Protocol::ModbusRtu, 11), 11);
+        assert_eq!(payload_len(Protocol::ModbusRtu, 256), 256);
     }
 
     /// The API names Modbus RTU `modbus`, as the desktop sends it; the archive
     /// stores `modbus_rtu`, as the desktop's own capture store does.
     #[test]
-    fn a_requested_protocol_filters_on_its_stored_tag_and_none_on_can() {
-        use wiretap_gateway::Protocol as Requested;
-        use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
+    fn a_requested_protocol_filters_on_its_stored_tag() {
+        use wslib_wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
         for (requested, api, stored) in [
-            (Requested::Can, "can", "can"),
-            (Requested::Modbus, "modbus", MODBUS_RTU_PROTOCOL),
-            (Requested::Serial, "serial", "serial"),
+            (Protocol::Can, "can", "can"),
+            (Protocol::ModbusRtu, "modbus", MODBUS_RTU_PROTOCOL),
+            (Protocol::Serial, "serial", "serial"),
         ] {
             assert_eq!(serde_json::to_value(requested).unwrap(), api);
-            assert_eq!(archive_protocol(Some(requested)).as_str(), stored);
+            assert_eq!(requested.as_str(), stored);
+            assert_eq!(requested.to_string(), stored);
         }
-        assert_eq!(archive_protocol(None), Protocol::Can);
     }
 
     #[test]

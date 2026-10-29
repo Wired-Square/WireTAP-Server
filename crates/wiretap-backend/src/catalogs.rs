@@ -7,12 +7,14 @@
 
 use chrono::{DateTime, Utc};
 use tokio_postgres::Row;
-use wiretap_gateway::{
-    AssignCatalog, CatalogFinding, Daemon, DaemonDevice, DaemonList, Provenance, RefusedCatalog,
-    StoredCatalog, UnassignParams,
-};
 use wiretap_model::{blob_sha1, blob_sha1_hex};
-use wiretap_protocol::ingest::{self, valid_daemon_id, Assignment, CatalogStatus, Device, Refusal};
+use wslib_wiretap_gateway::{
+    AssignCatalogue, CatalogueFinding, Daemon, DaemonDevice, DaemonList, Provenance,
+    RefusedCatalogue, StoredCatalogue, UnassignParams,
+};
+use wslib_wiretap_protocol::ingest::{
+    self, valid_daemon_id, Assignment, CatalogueStatus, Device, Refusal,
+};
 
 use crate::db::Databases;
 use crate::ingest::Sessions;
@@ -63,7 +65,7 @@ CREATE TABLE IF NOT EXISTS wiretap_meta.daemon_active (
 #[derive(Debug, PartialEq)]
 pub enum AssignError {
     /// The request itself: no retry will take it.
-    Rejected(Vec<CatalogFinding>),
+    Rejected(Vec<CatalogueFinding>),
     /// `expected` is not what is assigned now, which is this SHA.
     Conflict(Option<String>),
     Database(String),
@@ -142,7 +144,7 @@ impl Catalogs {
         &self,
         daemon_id: &str,
         devices: &[Device],
-        status: &CatalogStatus,
+        status: &CatalogueStatus,
     ) -> Result<(), String> {
         let rows = active_rows(devices, status);
         let interfaces: Vec<&str> = rows.iter().map(|r| r.interface).collect();
@@ -212,10 +214,10 @@ impl Catalogs {
     /// live sessions that carry the interface so they reconnect to it.
     pub async fn assign(
         &self,
-        request: &AssignCatalog,
+        request: &AssignCatalogue,
         assigned_by: &str,
-    ) -> Result<wiretap_gateway::Assignment, AssignError> {
-        let AssignCatalog {
+    ) -> Result<wslib_wiretap_gateway::Assignment, AssignError> {
+        let AssignCatalogue {
             daemon_id,
             interface,
             content,
@@ -270,7 +272,7 @@ impl Catalogs {
         if changed {
             self.sessions.reassign(daemon_id, interface).await;
         }
-        Ok(wiretap_gateway::Assignment {
+        Ok(wslib_wiretap_gateway::Assignment {
             blob_sha: blob_sha1_hex(&sha),
             name: Some(name),
             assigned_at_us: row.get::<_, DateTime<Utc>>(0).timestamp_micros(),
@@ -356,7 +358,7 @@ impl Catalogs {
         Ok(DaemonList { daemons })
     }
 
-    pub async fn stored(&self, sha: &[u8; 20]) -> Result<Option<StoredCatalog>, String> {
+    pub async fn stored(&self, sha: &[u8; 20]) -> Result<Option<StoredCatalogue>, String> {
         let row = self
             .client()
             .await?
@@ -367,7 +369,7 @@ impl Catalogs {
             )
             .await
             .map_err(|e| format!("reading catalogue {} failed: {e}", blob_sha1_hex(sha)))?;
-        Ok(row.map(|r| StoredCatalog {
+        Ok(row.map(|r| StoredCatalogue {
             blob_sha: blob_sha1_hex(sha),
             content: r.get(0),
             provenance: provenance_of(r.get(1)),
@@ -384,7 +386,7 @@ fn daemon_device(row: &Row) -> DaemonDevice {
     };
     let text = |i: usize| row.get::<_, Option<String>>(i);
     let sha = |i: usize| row.get::<_, Option<Vec<u8>>>(i).map(hex::encode);
-    let assignment = sha(5).map(|blob_sha| wiretap_gateway::Assignment {
+    let assignment = sha(5).map(|blob_sha| wslib_wiretap_gateway::Assignment {
         blob_sha,
         name: text(8).as_deref().and_then(catalogue_name),
         assigned_at_us: micros(6).unwrap_or_default(),
@@ -393,8 +395,8 @@ fn daemon_device(row: &Row) -> DaemonDevice {
     });
     let refused = sha(14)
         .zip(text(15))
-        .map(|(blob_sha, reason)| RefusedCatalog { blob_sha, reason });
-    let active = text(10).map(|source| wiretap_gateway::ActiveCatalog {
+        .map(|(blob_sha, reason)| RefusedCatalogue { blob_sha, reason });
+    let active = text(10).map(|source| wslib_wiretap_gateway::ActiveCatalogue {
         source,
         blob_sha: sha(11),
         name: text(13).as_deref().and_then(catalogue_name),
@@ -414,7 +416,9 @@ fn daemon_device(row: &Row) -> DaemonDevice {
 }
 
 fn catalogue_name(content: &str) -> Option<String> {
-    wiretap_catalog::rtu_rules(content).ok().map(|r| r.name)
+    wslib_wiretap_catalogue::rtu_rules(content)
+        .ok()
+        .map(|r| r.name)
 }
 
 /// The default for stored JSON whose fields do not fit `Provenance`.
@@ -501,16 +505,16 @@ struct ActiveRow<'a> {
 
 /// A row for each reported bus the `HELLO` named, under the interface it
 /// named on that bus.
-fn active_rows<'a>(devices: &'a [Device], status: &CatalogStatus) -> Vec<ActiveRow<'a>> {
+fn active_rows<'a>(devices: &'a [Device], status: &CatalogueStatus) -> Vec<ActiveRow<'a>> {
     status
         .entries
         .iter()
         .filter_map(|e| {
             let device = devices.iter().find(|d| d.bus == e.bus)?;
             let (source, blob_sha) = match e.active {
-                ingest::ActiveCatalog::None => ("none", None),
-                ingest::ActiveCatalog::Local(sha) => ("local", Some(sha)),
-                ingest::ActiveCatalog::Assigned(sha) => ("assigned", Some(sha)),
+                ingest::ActiveCatalogue::None => ("none", None),
+                ingest::ActiveCatalogue::Local(sha) => ("local", Some(sha)),
+                ingest::ActiveCatalogue::Assigned(sha) => ("assigned", Some(sha)),
             };
             let refused = e.refused.map(|(sha, why)| {
                 let why = match why {
@@ -532,7 +536,7 @@ fn active_rows<'a>(devices: &'a [Device], status: &CatalogStatus) -> Vec<ActiveR
 }
 
 fn rejected(field: &str, message: String) -> AssignError {
-    AssignError::Rejected(vec![CatalogFinding {
+    AssignError::Rejected(vec![CatalogueFinding {
         field: field.into(),
         message,
     }])
@@ -564,15 +568,15 @@ fn checked_blob(content: &str, provenance: &Provenance) -> Result<([u8; 20], Str
             return Err(rejected("provenance.blob_sha", why));
         }
     }
-    let findings = wiretap_catalog::validate::validate(content);
+    let findings = wslib_wiretap_catalogue::validate::validate(content);
     if !findings.is_empty() {
-        let findings = findings.into_iter().map(|f| CatalogFinding {
+        let findings = findings.into_iter().map(|f| CatalogueFinding {
             field: f.field,
             message: f.message,
         });
         return Err(AssignError::Rejected(findings.collect()));
     }
-    let rules = wiretap_catalog::rtu_rules(content).map_err(|e| {
+    let rules = wslib_wiretap_catalogue::rtu_rules(content).map_err(|e| {
         rejected(
             "catalogue",
             format!("the capture daemon would refuse it: {e}"),
@@ -581,7 +585,7 @@ fn checked_blob(content: &str, provenance: &Provenance) -> Result<([u8; 20], Str
     if rules.name.is_empty() {
         return Err(rejected(
             "meta.name",
-            "Catalog name must not be empty".into(),
+            "Catalogue name must not be empty".into(),
         ));
     }
     Ok((sha, rules.name))
@@ -621,21 +625,21 @@ mod tests {
     #[test]
     fn a_catalogue_status_is_stored_under_the_interfaces_its_hello_named() {
         let (assigned, refused, local) = (blob_sha1(b"a"), blob_sha1(b"r"), blob_sha1(b"l"));
-        let entry = |bus, active, refused| ingest::CatalogStatusEntry {
+        let entry = |bus, active, refused| ingest::CatalogueStatusEntry {
             bus,
             active,
             refused,
         };
-        let status = CatalogStatus {
+        let status = CatalogueStatus {
             entries: vec![
                 entry(
                     4,
-                    ingest::ActiveCatalog::Assigned(assigned),
+                    ingest::ActiveCatalogue::Assigned(assigned),
                     Some((refused, Refusal::DidNotParse)),
                 ),
-                entry(0, ingest::ActiveCatalog::None, None),
-                entry(5, ingest::ActiveCatalog::Local(local), None),
-                entry(9, ingest::ActiveCatalog::None, None),
+                entry(0, ingest::ActiveCatalogue::None, None),
+                entry(5, ingest::ActiveCatalogue::Local(local), None),
+                entry(9, ingest::ActiveCatalogue::None, None),
             ],
         };
         let devices = [
@@ -730,7 +734,7 @@ mod tests {
             findings("[meta]\nname = \"\"\n"),
             [(
                 "meta.name".to_string(),
-                "Catalog name must not be empty".to_string()
+                "Catalogue name must not be empty".to_string()
             )]
         );
     }

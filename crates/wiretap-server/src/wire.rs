@@ -7,8 +7,8 @@
 //! record.
 
 use wiretap_model::{CanSample, Direction, ModbusSample, Sample, SerialSample, SourceId};
-use wiretap_protocol::can::CanFrame;
-use wiretap_protocol::ingest as proto;
+use wslib_can::CanFrame;
+use wslib_wiretap_protocol::ingest as proto;
 
 /// A capture timestamp as the protocol carries it. One spelling, because the
 /// base and the deltas measured from it have to agree.
@@ -75,26 +75,15 @@ pub fn can_frame(c: &CanSample) -> CanFrame {
     frame
 }
 
-/// The `(ts_us, kind, payload_len)` that [`proto::fit_batch`] measures a sample by.
-pub fn fit_input(s: &Sample) -> (u64, proto::RecordKind, usize) {
+/// `s` as one record of a `BATCH`.
+pub fn record(s: &Sample) -> proto::BatchRecord<'_> {
     let (fields, payload) = parts(s);
-    (ts_us(s), fields.kind(), payload.len())
-}
-
-/// Append `s` as one record, measured from `base_ts_us`.
-pub fn encode_into(out: &mut Vec<u8>, base_ts_us: u64, s: &Sample) {
-    let (fields, payload) = parts(s);
-    let (id_flags, flags) = fields.to_wire();
-    proto::encode_record_into(
-        out,
-        base_ts_us,
-        ts_us(s),
-        fields.kind(),
-        flags,
-        s.bus().0,
-        id_flags,
+    proto::BatchRecord {
+        ts_us: ts_us(s),
+        fields,
+        bus: s.bus().0,
         payload,
-    );
+    }
 }
 
 /// The sample a record describes, stamped at `ts_us`.
@@ -194,31 +183,15 @@ mod tests {
                 data: (0..=255).collect(),
             }),
         ];
-        let mut records = Vec::new();
-        for s in &samples {
-            encode_into(&mut records, BASE as u64, s);
-        }
-        assert_eq!(
-            records.len(),
-            samples
-                .iter()
-                .map(|s| {
-                    let (_, kind, len) = fit_input(s);
-                    proto::record_wire_len(kind, len)
-                })
-                .sum::<usize>(),
-            "fit_input sizes what encode_into writes"
-        );
-
-        let mut buf = proto::encode_batch(1, BASE as u64, samples.len() as u16, &records);
+        let (mut buf, len) = proto::encode_batch_from(1, &mut Vec::new(), &samples, record);
+        assert_eq!(len, samples.len());
         let frame = proto::take_frame(&mut buf).unwrap().unwrap();
         let batch = proto::parse_batch(&frame.body, proto::MAX_BATCH_RECORDS)
             .unwrap()
             .unwrap();
         let decoded: Vec<Sample> = batch
-            .records
-            .into_iter()
-            .map(|r| decode(BASE + i64::from(r.delta_us), r))
+            .stamped(false, 0)
+            .map(|(ts_us, r)| decode(ts_us as i64, r))
             .collect();
         assert_eq!(decoded, samples);
     }

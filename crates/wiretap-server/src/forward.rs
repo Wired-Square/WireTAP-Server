@@ -1,7 +1,7 @@
 //! Forwarding frames to a WireTAP gateway over the binary ingest protocol.
 //!
 //! The only [`BatchSink`] there is. It speaks the client half of
-//! `wiretap_protocol::ingest`, whose server half the gateway parses — one codec,
+//! `wslib_wiretap_protocol::ingest`, whose server half the gateway parses — one codec,
 //! both ends, so a change to the wire format cannot land on one side only.
 //!
 //! Every batch is acknowledged **after** the gateway has written it, so a slow
@@ -12,7 +12,7 @@
 //! Each connection starts with a v3 `HELLO` naming this daemon and the devices
 //! the database carries, and pulls any catalogue the gateway assigned before
 //! the first batch. It then reports what each of those devices frames with in a
-//! `CATALOG_STATUS`, and again ahead of the next batch or `PING` after any
+//! `CATALOGUE_STATUS`, and again ahead of the next batch or `PING` after any
 //! line's catalogue or refusal changes.
 
 use std::path::PathBuf;
@@ -24,8 +24,8 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{info, warn};
 use wiretap_model::{blob_sha1_hex, Sample};
-use wiretap_protocol::ingest as proto;
 use wslib_secret::Secret;
+use wslib_wiretap_protocol::ingest as proto;
 
 use crate::archive::{BatchSink, SinkError, SinkResult, WriteError};
 use crate::cache::{FrameCache, SqliteCache};
@@ -98,21 +98,16 @@ impl ForwardSink {
             .ok_or_else(|| SinkError::Failed("forward: not connected".into()))
     }
 
-    /// Send one `BATCH` and wait for its acknowledgement.
-    ///
-    /// `chunk` and `base_ts_us` are one [`proto::fit_batch`]'s: a chunk that fits
-    /// one batch, and its earliest frame's stamp.
-    async fn send_chunk(&mut self, chunk: &[Arc<Sample>], base_ts_us: u64) -> SinkResult {
+    /// Send one `BATCH` of as many of `samples` from the front as fit one,
+    /// wait for its acknowledgement, and say how many it carried.
+    async fn send_chunk(&mut self, samples: &[Arc<Sample>]) -> Result<usize, SinkError> {
         // Absolute timestamps: the `[forward]` client does not set
         // `TIME_RELATIVE`, so the gateway takes these at face value rather than
         // re-basing them on its own clock.
-        self.records.clear();
-        for f in chunk {
-            wire::encode_into(&mut self.records, base_ts_us, f);
-        }
         self.seq = self.seq.wrapping_add(1);
         let seq = self.seq;
-        let message = proto::encode_batch(seq, base_ts_us, chunk.len() as u16, &self.records);
+        let (message, len) =
+            proto::encode_batch_from(seq, &mut self.records, samples, |s| wire::record(s));
 
         let conn = self.connection()?;
         conn.send(&message).await?;
@@ -131,12 +126,12 @@ impl ForwardSink {
             )));
         }
         match ack.status {
-            proto::ACK_OK => Ok(()),
+            proto::ACK_OK => Ok(len),
             // Back-pressure, and the reason this protocol has an ACK at all:
             // failing here caches the frames rather than dropping them into a
             // gateway that has said it cannot take them.
             proto::ACK_OVERLOADED => Err(SinkError::Failed("forward: gateway overloaded".into())),
-            proto::ACK_MALFORMED => self.quarantine(chunk, seq),
+            proto::ACK_MALFORMED => self.quarantine(&samples[..len], seq).map(|()| len),
             status => Err(SinkError::Failed(format!(
                 "forward: batch nacked (seq={} status={status})",
                 ack.seq
@@ -263,11 +258,11 @@ impl ForwardSink {
         self.catalogues.store(&hex, &blob)
     }
 
-    /// The `CATALOG_STATUS` of every device in this session's `HELLO`.
+    /// The `CATALOGUE_STATUS` of every device in this session's `HELLO`.
     fn status_message(&mut self) -> Option<Vec<u8>> {
         self.catalogue_changes.mark_unchanged();
         let status = self.catalogues.status(&self.devices);
-        proto::encode_catalog_status(&status)
+        proto::encode_catalogue_status(&status)
             .inspect_err(|e| warn!("forward: cannot report the catalogues: {e}"))
             .ok()
     }
@@ -316,25 +311,28 @@ impl Connection {
         with_timeout("write", self.stream.write_all(bytes)).await
     }
 
-    /// The next reply that is not a `CATALOG`: one arriving now answers a
+    /// The next reply that is not a `CATALOGUE`: one arriving now answers a
     /// fetch that gave up waiting for it.
     async fn recv(&mut self) -> Result<proto::WireFrame, SinkError> {
         loop {
             let frame = self.recv_any().await?;
-            if frame.mtype != proto::MSG_CATALOG {
+            if frame.mtype != proto::MSG_CATALOGUE {
                 return Ok(frame);
             }
         }
     }
 
-    /// The `CATALOG` answering `get`.
-    async fn recv_catalog(&mut self, get: &proto::CatalogGet) -> Result<proto::Catalog, String> {
+    /// The `CATALOGUE` answering `get`.
+    async fn recv_catalog(
+        &mut self,
+        get: &proto::CatalogueGet,
+    ) -> Result<proto::Catalogue, String> {
         loop {
             let frame = self.recv_any().await.map_err(|e| e.to_string())?;
-            if frame.mtype != proto::MSG_CATALOG {
+            if frame.mtype != proto::MSG_CATALOGUE {
                 return Err(format!("a reply of type {:#04x}", frame.mtype));
             }
-            let chunk = proto::parse_catalog(&frame.body)?;
+            let chunk = proto::parse_catalogue(&frame.body)?;
             if (chunk.blob_sha, chunk.offset) == (get.blob_sha, get.offset) {
                 return Ok(chunk);
             }
@@ -344,20 +342,20 @@ impl Connection {
     /// A whole blob, a chunk at a time.
     async fn fetch(&mut self, sha: &[u8; 20]) -> Result<Vec<u8>, String> {
         let mut blob = Vec::new();
-        let mut next = Some(proto::CatalogGet {
+        let mut next = Some(proto::CatalogueGet {
             blob_sha: *sha,
             offset: 0,
         });
         while let Some(get) = next {
-            self.send(&proto::encode_catalog_get(&get))
+            self.send(&proto::encode_catalogue_get(&get))
                 .await
                 .map_err(|e| e.to_string())?;
             let chunk = self.recv_catalog(&get).await?;
             match chunk.status {
-                proto::CATALOG_OK => {}
-                proto::CATALOG_UNKNOWN => return Err("the gateway does not have it".into()),
-                proto::CATALOG_UNAVAILABLE => return Err("the gateway cannot read it now".into()),
-                status => return Err(format!("CATALOG status={status}")),
+                proto::CATALOGUE_OK => {}
+                proto::CATALOGUE_UNKNOWN => return Err("the gateway does not have it".into()),
+                proto::CATALOGUE_UNAVAILABLE => return Err("the gateway cannot read it now".into()),
+                status => return Err(format!("CATALOGUE status={status}")),
             }
             blob.extend_from_slice(&chunk.data);
             next = chunk.next();
@@ -461,12 +459,10 @@ impl BatchSink for ForwardSink {
         // chunk on a quiet bus can outspan a `u32` of microseconds, and two bus
         // readers mean its head is not always its earliest frame.
         while delivered < batch.len() {
-            let rest = &batch[delivered..];
-            let fit = proto::fit_batch(rest.iter().map(|f| wire::fit_input(f)));
-            self.send_chunk(&rest[..fit.len], fit.base_ts_us)
+            delivered += self
+                .send_chunk(&batch[delivered..])
                 .await
                 .map_err(|cause| WriteError { delivered, cause })?;
-            delivered += fit.len;
         }
         Ok(())
     }
@@ -510,7 +506,7 @@ mod tests {
         catalog_gets: usize,
         batches: Vec<proto::Batch>,
         pings: usize,
-        statuses: Vec<proto::CatalogStatus>,
+        statuses: Vec<proto::CatalogueStatus>,
         /// Every message type, in the order they came.
         order: Vec<u8>,
     }
@@ -610,9 +606,10 @@ mod tests {
             let Some(frame) = frame else { return };
             assert!(frame.crc_ok, "the client sent a bad CRC");
             seen.order.push(frame.mtype);
-            if frame.mtype == proto::MSG_CATALOG_STATUS {
-                let status = proto::parse_catalog_status(&frame.body);
-                seen.statuses.push(status.expect("a valid CATALOG_STATUS"));
+            if frame.mtype == proto::MSG_CATALOGUE_STATUS {
+                let status = proto::parse_catalogue_status(&frame.body);
+                seen.statuses
+                    .push(status.expect("a valid CATALOGUE_STATUS"));
                 continue;
             }
 
@@ -638,14 +635,14 @@ mod tests {
                     proto::encode_hello_ack(script.hello_status, version, 1_234, assignments)
                         .unwrap()
                 }
-                proto::MSG_CATALOG_GET => {
+                proto::MSG_CATALOGUE_GET => {
                     seen.catalog_gets += 1;
-                    let get = proto::parse_catalog_get(&frame.body).unwrap();
+                    let get = proto::parse_catalogue_get(&frame.body).unwrap();
                     let blob = script.blobs.iter().find(|(sha, _)| *sha == get.blob_sha);
                     let blob = blob
                         .map(|(_, b)| b.as_slice())
-                        .ok_or(proto::CATALOG_UNKNOWN);
-                    proto::encode_catalog(&get, blob)
+                        .ok_or(proto::CATALOGUE_UNKNOWN);
+                    proto::encode_catalogue(&get, blob)
                 }
                 proto::MSG_BATCH => {
                     if script.close_on_batch {
@@ -833,7 +830,7 @@ mod tests {
     fn long_crlf_catalogue() -> Vec<u8> {
         let padding = "# a vendor's notes, kept as they were written\r\n".repeat(2_000);
         let text = format!("{}{padding}", CATALOGUE.replace('\n', "\r\n"));
-        assert!(text.len() > proto::MAX_CATALOG_CHUNK);
+        assert!(text.len() > proto::MAX_CATALOGUE_CHUNK);
         text.into_bytes()
     }
 
@@ -1000,19 +997,19 @@ mod tests {
         let seen = gateway.await.unwrap();
         let (hello, get, status, batch) = (
             proto::MSG_HELLO,
-            proto::MSG_CATALOG_GET,
-            proto::MSG_CATALOG_STATUS,
+            proto::MSG_CATALOGUE_GET,
+            proto::MSG_CATALOGUE_STATUS,
             proto::MSG_BATCH,
         );
         assert_eq!(seen.order, [hello, get, status, batch, batch], "once only");
         let entries = &seen.statuses[0].entries;
-        let assigned = proto::ActiveCatalog::Assigned(blob_sha1(CATALOGUE.as_bytes()));
+        let assigned = proto::ActiveCatalogue::Assigned(blob_sha1(CATALOGUE.as_bytes()));
         assert_eq!(
             entries
                 .iter()
                 .map(|e| (e.bus, e.active))
                 .collect::<Vec<_>>(),
-            [(1, assigned), (0, proto::ActiveCatalog::None)],
+            [(1, assigned), (0, proto::ActiveCatalogue::None)],
             "every device in the HELLO, a CAN device framing with none"
         );
     }
@@ -1033,10 +1030,14 @@ mod tests {
         s.close().await;
 
         let seen = gateway.await.unwrap();
-        let (status, batch, ping) = (proto::MSG_CATALOG_STATUS, proto::MSG_BATCH, proto::MSG_PING);
+        let (status, batch, ping) = (
+            proto::MSG_CATALOGUE_STATUS,
+            proto::MSG_BATCH,
+            proto::MSG_PING,
+        );
         assert_eq!(seen.order[2..], [status, status, batch, status, ping]);
         let line = |n: usize| seen.statuses[n].entries[0];
-        assert_eq!(line(1).active, proto::ActiveCatalog::None);
+        assert_eq!(line(1).active, proto::ActiveCatalogue::None);
         assert_eq!(line(2).refused, Some(refused));
     }
 
@@ -1565,13 +1566,11 @@ mod tests {
         let (port, gateway) = fake_gateway(Script::default()).await;
         let mut s = sink(port, "");
         s.connect().await.unwrap();
-        s.send_chunk(&[sample(1, 1)], 1)
-            .await
-            .expect("acknowledged");
+        s.send_chunk(&[sample(1, 1)]).await.expect("acknowledged");
         let stale = proto::encode_ack(1, proto::ACK_OK, 0);
         s.conn.as_mut().unwrap().rx.extend_from_slice(&stale);
 
-        let err = s.send_chunk(&[sample(2, 2)], 2).await.unwrap_err();
+        let err = s.send_chunk(&[sample(2, 2)]).await.unwrap_err();
         assert!(err.to_string().contains("seq=1"), "{err}");
         assert!(err.to_string().contains("seq=2"), "{err}");
         s.close().await;
@@ -1587,7 +1586,7 @@ mod tests {
         let unread_seq = proto::encode_ack(0, proto::ACK_MALFORMED, 0);
         s.conn.as_mut().unwrap().rx.extend_from_slice(&unread_seq);
 
-        s.send_chunk(&[sample(1, 1)], 1)
+        s.send_chunk(&[sample(1, 1)])
             .await
             .expect("quarantined, not failed");
         s.close().await;

@@ -9,7 +9,7 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
   storage, one database per capture. Not published to the network.
 - **`wiretap-backend`** (Rust / axum) — the only process that talks to Postgres.
   Two listeners plus a built-in admin UI:
-  - **Binary ingest** (TCP 9323) — the protocol in wiretap-protocol's
+  - **Binary ingest** (TCP 9323) — the protocol in wslib-wiretap-protocol's
     `docs/ingest.md` (linked from
     [docs/ingest-protocol.md](../../docs/ingest-protocol.md)), for MCUs and the
     Pi's forward mode. Writes are **ACK-after-write**: a batch is stored in Postgres
@@ -192,7 +192,7 @@ Times cross the wire as microseconds since the epoch, as `time-bounds` and
 `frames` already do. A key that can read a database can annotate it.
 
 `POST /v1/db/{db}/import` streams a local capture into a database, as an
-`ingest` or `admin` key. The body is version 2 of wiretap-protocol's
+`ingest` or `admin` key. The body is version 2 of wslib-wiretap-protocol's
 `docs/import.md`: a `WTIM` header, then records carrying each frame's RTR,
 BRS and ESI, stored as ingest stores them. A body without the header, from an
 older desktop, or of another version is a 400 saying why. **Upgrade every
@@ -282,7 +282,7 @@ half compressed) exported in 0.7 s to a 7.5 MB archive, and imported as new in
 A capture daemon names itself and its devices in a v3 `HELLO`, and the gateway
 can assign each serial line a catalogue to frame with (see
 [docs/ingest-protocol.md](../../docs/ingest-protocol.md)). The admin role
-manages it over HTTP, with `wiretap-gateway`'s types; a SHA is the
+manages it over HTTP, with `wslib-wiretap-gateway`'s types; a SHA is the
 catalogue's Git blob SHA-1 as 40 hex characters, and times are epoch µs.
 
 | endpoint | body | answers |
@@ -295,10 +295,10 @@ catalogue's Git blob SHA-1 as 40 hex characters, and times are epoch µs.
 `daemons` lists every daemon that has named a device or been assigned a
 catalogue. An interface assigned but never named has a null `bus`, `database`
 and `last_seen_us`. Each device's `active` is the daemon's latest
-`CATALOG_STATUS` for it, null before one.
+`CATALOGUE_STATUS` for it, null before one.
 
 A `PUT` stores `content` exactly as sent, CRLF and BOM included, and answers
-400 with `findings` when `wiretap_catalog::validate` finds anything, when the
+400 with `findings` when `wslib_wiretap_catalogue::validate` finds anything, when the
 daemon's own reader would refuse the catalogue (`rtu_rules`, or an empty
 `meta.name`), when the daemon id or interface could not be carried in a
 `HELLO`, or when `provenance.blob_sha` is not the content's SHA. `warnings` is

@@ -19,14 +19,20 @@ wiretap-model = { path = "../wiretap-model" }
 wslib-backoff.workspace = true
 wslib-secret = { workspace = true, features = ["serde"] }
 wslib-file-atomic.workspace = true
-# The GVRET, ingest and test-pattern codecs and the DLC table. No frame type crosses the
-# boundary: the codecs take scalars and this crate adapts, which is what will
-# let the desktop adopt them without touching the serde type its frontend reads.
-wiretap-protocol.workspace = true
-# `RtuTap`, which frames and stamps the serial tap's bytes. It brings the
-# catalogue's other dependencies with it; what that costs the musl binary is
-# recorded in the vault.
-wiretap-catalog.workspace = true
+# The ingest and test-pattern codecs and the raw serial tap.
+wslib-wiretap-protocol.workspace = true
+# The GVRET codec. No frame type crosses the boundary: the codecs take scalars
+# and this crate adapts, which is what will let the desktop adopt them without
+# touching the serde type its frontend reads.
+wslib-can-gvret.workspace = true
+# The CAN frame and the DLC table.
+wslib-can.workspace = true
+# A catalogue's Modbus RTU rules. What it costs the musl binary is recorded in
+# the vault.
+wslib-wiretap-catalogue.workspace = true
+# `RtuTap`, which frames and stamps the serial tap's bytes.
+wslib-modbus.workspace = true
+wslib-serial.workspace = true
 # No `color` (stdout is a journal pipe) and no `suggestions` (a typo at an
 # interactive shell is one --help away): together they cost 33 KB and 7 crates.
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
@@ -38,7 +44,7 @@ http-body-util.workspace = true
 # `bundled` compiles SQLite in, so the .deb depends on no libsqlite3 and the
 # musl cross-build has nothing to find on the host.
 rusqlite = { workspace = true, features = ["bundled"] }
-# `assignments.json` and the control socket. wiretap-catalog links it already.
+# `assignments.json` and the control socket. wslib-wiretap-catalogue links it already.
 serde_json.workspace = true
 # `ui.toml`. wiretap-model links both already.
 serde.workspace = true
@@ -52,12 +58,14 @@ wslib-telemetry = { workspace = true, features = ["setup-core"] }
 wslib-service.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# `serial` alone, never `serial-write`: without it the only open compiled in is
+# `task` alone, never `write`: without it the only open compiled in is
 # read-only, and no serialport or libudev is built.
-wiretap-io = { workspace = true, features = ["can-socketcan", "serial"] }
+wslib-serial = { workspace = true, features = ["task"] }
+wslib-can = { workspace = true, features = ["task"] }
+wslib-can-socketcan = { workspace = true, features = ["transport"] }
 
 [dev-dependencies]
-wiretap-checksum.workspace = true
+wslib-checksum.workspace = true
 wslib-service = { workspace = true, features = ["testing"] }
 # The outage drill and the vcan loopback are integration tests, so they link
 # against the crate rather than into it and need their own runtime. `net` and
@@ -72,4 +80,4 @@ tracing-subscriber = { workspace = true, features = ["fmt", "std"] }
 
 # The serial tap's pty tests run on a Mac too.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-wiretap-io = { workspace = true, features = ["serial"] }
+wslib-serial = { workspace = true, features = ["task"] }
