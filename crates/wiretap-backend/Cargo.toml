@@ -19,13 +19,14 @@ wslib-build-id.workspace = true
 wiretap-model = { path = "../wiretap-model", default-features = false }
 wslib-secret.workspace = true
 wslib-file-atomic.workspace = true
-# The ingest codec, and the DLC table: a CAN row's `dlc` column and the `len`
-# served from it.
-wiretap-protocol.workspace = true
+# The ingest codec.
+wslib-wiretap-protocol.workspace = true
+# The DLC table: a CAN row's `dlc` column and the `len` served from it.
+wslib-can.workspace = true
 # What the daemon checks a catalogue with, so an assignment the gateway takes
 # is one every daemon can frame with.
-wiretap-catalog.workspace = true
-wiretap-gateway.workspace = true
+wslib-wiretap-catalogue.workspace = true
+wslib-wiretap-gateway.workspace = true
 axum.workspace = true
 # `wiretap-backend rotate` asks the running gateway, over its own listener.
 http-body-util.workspace = true

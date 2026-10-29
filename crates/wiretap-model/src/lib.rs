@@ -6,8 +6,9 @@
 //!
 //! These types are **this product's**. What crosses to the WireTAP desktop is
 //! the wire format rather than the frame type, and that lives in
-//! `wiretap-protocol` — the data length code table included, because a code on
-//! the wire and a length in a column is a distinction both ends must share.
+//! `wslib-wiretap-protocol` and `wslib-can` — the data length code table
+//! included, because a code on the wire and a length in a column is a
+//! distinction both ends must share.
 
 pub mod blob;
 #[cfg(feature = "config")]

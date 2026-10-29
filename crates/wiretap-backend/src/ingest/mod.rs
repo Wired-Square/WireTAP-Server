@@ -5,7 +5,7 @@
 //! a DB outage back-pressures the device into its own disk cache.
 //!
 //! A capture daemon's v3 HELLO also records its devices and is answered with
-//! their catalogue assignments, which its `CATALOG_GET`s then fetch.
+//! their catalogue assignments, which its `CATALOGUE_GET`s then fetch.
 
 pub mod writer;
 
@@ -20,7 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Notify};
 use tokio_postgres::error::SqlState;
-use wiretap_protocol::ingest::*;
+use wslib_wiretap_protocol::ingest::*;
 
 use crate::catalogs::Catalogs;
 use crate::config::Config;
@@ -109,7 +109,7 @@ trait Gateway {
     async fn hello(&mut self, hello: &Hello) -> (u8, Vec<Assignment>);
     async fn batch(&mut self, incoming: IncomingBatch) -> u8;
     async fn blob(&mut self, sha: &[u8; 20]) -> Result<&[u8], u8>;
-    async fn catalog_status(&mut self, status: CatalogStatus);
+    async fn catalog_status(&mut self, status: CatalogueStatus);
 }
 
 /// One client's connection to this gateway.
@@ -148,10 +148,10 @@ impl Gateway for Connection<'_> {
         if self.served.as_ref().is_none_or(|(served, _)| served != sha) {
             self.served = match self.server.catalogs.blob(sha).await {
                 Ok(Some(content)) => Some((*sha, content)),
-                Ok(None) => return Err(CATALOG_UNKNOWN),
+                Ok(None) => return Err(CATALOGUE_UNKNOWN),
                 Err(e) => {
                     tracing::warn!("ingest client {}: {e}", self.peer);
-                    return Err(CATALOG_UNAVAILABLE);
+                    return Err(CATALOGUE_UNAVAILABLE);
                 }
             };
         }
@@ -159,7 +159,7 @@ impl Gateway for Connection<'_> {
     }
 
     /// A meta database failure is logged, and the session goes on.
-    async fn catalog_status(&mut self, status: CatalogStatus) {
+    async fn catalog_status(&mut self, status: CatalogueStatus) {
         let Some(session) = self.authed.as_ref().filter(|s| !s.daemon_id.is_empty()) else {
             return;
         };
@@ -218,10 +218,10 @@ async fn serve(
                     machine.ack(seq, status, 0)
                 }
                 Action::Nack { seq, status } => machine.ack(seq, status, 0),
-                Action::CatalogGet(get) => {
-                    machine.answer_catalog(gateway.blob(&get.blob_sha).await)
+                Action::CatalogueGet(get) => {
+                    machine.answer_catalogue(gateway.blob(&get.blob_sha).await)
                 }
-                Action::CatalogStatus(status) => {
+                Action::CatalogueStatus(status) => {
                     gateway.catalog_status(status).await;
                     continue;
                 }
@@ -528,7 +528,7 @@ mod tests {
         /// Fired while the batch is being written, as an assignment changing
         /// mid-write would.
         reassigned_mid_batch: Option<Arc<Notify>>,
-        statuses: Arc<std::sync::Mutex<Vec<CatalogStatus>>>,
+        statuses: Arc<std::sync::Mutex<Vec<CatalogueStatus>>>,
     }
 
     impl Gateway for Fake {
@@ -548,10 +548,10 @@ mod tests {
                 .blobs
                 .iter()
                 .find(|b| wiretap_model::blob_sha1(b) == *sha);
-            found.map(Vec::as_slice).ok_or(CATALOG_UNKNOWN)
+            found.map(Vec::as_slice).ok_or(CATALOGUE_UNKNOWN)
         }
 
-        async fn catalog_status(&mut self, status: CatalogStatus) {
+        async fn catalog_status(&mut self, status: CatalogueStatus) {
             self.statuses.lock().unwrap().push(status);
         }
     }
@@ -618,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn a_blob_is_served_a_chunk_at_a_time_byte_for_byte() {
         let blob = "[meta]\r\nname = \"crlf\"\r\n# padding\r\n".repeat(3_000);
-        assert!(blob.len() > MAX_CATALOG_CHUNK);
+        assert!(blob.len() > MAX_CATALOGUE_CHUNK);
         let sha = wiretap_model::blob_sha1(blob.as_bytes());
         let (mut c, _) = serving(Fake {
             blobs: vec![blob.clone().into_bytes()],
@@ -629,27 +629,30 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut got = Vec::new();
-        let mut next = Some(CatalogGet {
+        let mut next = Some(CatalogueGet {
             blob_sha: sha,
             offset: 0,
         });
         while let Some(get) = next {
-            c.write_all(&encode_catalog_get(&get)).await.unwrap();
+            c.write_all(&encode_catalogue_get(&get)).await.unwrap();
             let frame = reply(&mut c, &mut buf).await.unwrap();
-            let chunk = parse_catalog(&frame.body).unwrap();
-            assert_eq!(chunk.status, CATALOG_OK);
+            let chunk = parse_catalogue(&frame.body).unwrap();
+            assert_eq!(chunk.status, CATALOGUE_OK);
             got.extend_from_slice(&chunk.data);
             next = chunk.next();
         }
         assert_eq!(got, blob.as_bytes());
 
-        let unknown = CatalogGet {
+        let unknown = CatalogueGet {
             blob_sha: [0; 20],
             offset: 0,
         };
-        c.write_all(&encode_catalog_get(&unknown)).await.unwrap();
+        c.write_all(&encode_catalogue_get(&unknown)).await.unwrap();
         let frame = reply(&mut c, &mut buf).await.unwrap();
-        assert_eq!(parse_catalog(&frame.body).unwrap().status, CATALOG_UNKNOWN);
+        assert_eq!(
+            parse_catalogue(&frame.body).unwrap().status,
+            CATALOGUE_UNKNOWN
+        );
     }
 
     #[tokio::test]
@@ -658,14 +661,14 @@ mod tests {
         let statuses = Arc::clone(&fake.statuses);
         let (mut c, _) = serving(fake).await;
         hello_ack(&mut c, &daemon_hello("bench", vec![device(0, "can0")])).await;
-        let status = CatalogStatus {
-            entries: vec![CatalogStatusEntry {
+        let status = CatalogueStatus {
+            entries: vec![CatalogueStatusEntry {
                 bus: 0,
-                active: ActiveCatalog::Assigned([7; 20]),
+                active: ActiveCatalogue::Assigned([7; 20]),
                 refused: None,
             }],
         };
-        c.write_all(&encode_catalog_status(&status).unwrap())
+        c.write_all(&encode_catalogue_status(&status).unwrap())
             .await
             .unwrap();
         c.write_all(&encode_message(MSG_PING, b"")).await.unwrap();

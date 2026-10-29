@@ -1,5 +1,5 @@
 //! Modbus RTU samples off a serial line, framed and stamped by
-//! `wiretap-catalog`'s tap.
+//! `wslib-modbus`'s tap.
 //!
 //! Every function code is framed and address 0 may start a message: a tap
 //! stores bytes, and for it a code left undeclared is that traffic lost. The
@@ -9,8 +9,9 @@
 
 use std::time::SystemTime;
 
-use wiretap_catalog::{LineSettings, ModbusRtuOptions, TappedMessage};
 use wiretap_model::{ModbusSample, SourceId};
+use wslib_modbus::{ModbusRtuOptions, TappedMessage};
+use wslib_serial::LineSettings;
 
 use super::system_time_to_us;
 use crate::settings::LineCatalogue;
@@ -24,24 +25,22 @@ fn options(catalogue: Option<&LineCatalogue>) -> ModbusRtuOptions {
 
 /// One serial line's tap, and the bus number its messages carry.
 pub struct RtuTap {
-    tap: wiretap_catalog::RtuTap,
+    tap: wslib_modbus::RtuTap,
     bus: SourceId,
-    line: LineSettings,
 }
 
 impl RtuTap {
     pub fn new(bus: SourceId, line: LineSettings, catalogue: Option<&LineCatalogue>) -> Self {
         Self {
-            tap: wiretap_catalog::RtuTap::new(&options(catalogue), line),
+            tap: wslib_modbus::RtuTap::new(&options(catalogue), line.baud, line.bits_per_char()),
             bus,
-            line,
         }
     }
 
     /// Frame with `catalogue` from here on. What is held of a message is
     /// dropped with the old rules.
     pub fn reframe(&mut self, catalogue: Option<&LineCatalogue>) {
-        *self = Self::new(self.bus, self.line, catalogue);
+        self.tap.set_options(&options(catalogue));
     }
 
     /// One read's bytes, and the wall clock when that read returned.
@@ -70,13 +69,14 @@ impl RtuTap {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use wiretap_catalog::{Catalog, LineSettings, Parity};
-    use wiretap_checksum::algorithms::crc16_modbus_checksum;
+    use wslib_checksum::algorithms::crc16_modbus_checksum;
+    use wslib_serial::Parity;
+    use wslib_wiretap_catalogue::Catalogue;
 
     use super::*;
     use crate::settings::{Framing, LineCatalogue, SerialSettings};
     use crate::source::raw::RawTap;
-    use wiretap_protocol::ingest::RecordKind;
+    use wslib_wiretap_protocol::ingest::RecordKind;
 
     const EXAMPLE_CATALOGUE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -162,7 +162,7 @@ mod tests {
     /// changes.
     #[test]
     fn a_catalogue_tap_is_the_plain_tap_plus_its_rules() {
-        let empty = Catalog::parse("[meta]\nname = \"empty\"\n").unwrap();
+        let empty = Catalogue::parse("[meta]\nname = \"empty\"\n").unwrap();
         let line = SerialSettings {
             catalogue: Some(LineCatalogue {
                 path: String::new(),
@@ -189,6 +189,15 @@ mod tests {
         let framed = |line: &SerialSettings| keys(&tap_for(line).push(&dispatch, at(0)));
         assert_eq!(framed(&line_9600_8n1()), [(0, 0x60, 18)]);
         assert_eq!(framed(&sungrow_line()), [(0, 0x60, 19)]);
+    }
+
+    #[test]
+    fn a_reframe_never_stamps_behind_a_message_already_out() {
+        let request = with_crc(&[0x01, 0x03, 0x00, 0x00, 0x00, 0x01]);
+        let mut tap = tap_on_9600_8n1(SourceId(0));
+        assert_eq!(tap.push(&request, at(2_000_000))[0].ts_us, 2_000_000);
+        tap.reframe(sungrow_line().catalogue.as_ref());
+        assert_eq!(tap.push(&request, at(1_000_000))[0].ts_us, 2_000_000);
     }
 
     /// Joined across a gap, half a message leaves the framer lost, holding

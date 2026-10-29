@@ -1,7 +1,7 @@
 //! What a capture source produces.
 
 use serde::{Deserialize, Serialize};
-use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
+pub use wslib_wiretap_protocol::Protocol;
 
 /// Which interface a sample came from. `bus` is the GVRET-visible number,
 /// which is the socket's index plus the configured `bus_offset`.
@@ -55,50 +55,10 @@ impl std::str::FromStr for Direction {
     }
 }
 
-/// What a sample came off the wire as: the `protocol` column's value, and
-/// the tag a disk cache stores.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Protocol {
-    Can,
-    Modbus,
-    Serial,
-}
-
-impl Protocol {
-    /// The tag the archive stores, as the desktop's capture store does.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Protocol::Can => "can",
-            Protocol::Modbus => MODBUS_RTU_PROTOCOL,
-            Protocol::Serial => "serial",
-        }
-    }
-}
-
-impl std::fmt::Display for Protocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for Protocol {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, ()> {
-        match s {
-            "can" => Ok(Protocol::Can),
-            // A disk cache written before the archive's tag became modbus_rtu.
-            MODBUS_RTU_PROTOCOL | "modbus" => Ok(Protocol::Modbus),
-            "serial" => Ok(Protocol::Serial),
-            _ => Err(()),
-        }
-    }
-}
-
 /// One CAN or CAN FD frame.
 ///
 /// A data frame's length code is **not** stored: it is derivable from
-/// `data.len()` and `is_fd` via `wiretap_protocol::payload_dlc`, and carrying
+/// `data.len()` and `is_fd` via `wslib_can::payload_dlc`, and carrying
 /// both invites the two to disagree. The one case that is not derivable — a
 /// classic frame declaring a code of 9–15 while carrying 8 bytes — has no
 /// producer or consumer here, and the Python this replaces did not preserve it
@@ -188,7 +148,7 @@ impl Sample {
     pub fn protocol(&self) -> Protocol {
         match self {
             Sample::Can(_) => Protocol::Can,
-            Sample::Modbus(_) => Protocol::Modbus,
+            Sample::Modbus(_) => Protocol::ModbusRtu,
             Sample::Serial(_) => Protocol::Serial,
         }
     }
@@ -220,15 +180,16 @@ mod tests {
     }
 
     #[test]
-    fn protocol_tags_round_trip_and_a_cached_modbus_still_parses() {
-        for p in [Protocol::Can, Protocol::Modbus, Protocol::Serial] {
-            assert_eq!(p.as_str().parse(), Ok(p));
+    fn protocol_tags_are_the_stored_ones_and_a_cached_modbus_still_parses() {
+        let tags: Vec<String> = Protocol::ALL.iter().map(Protocol::to_string).collect();
+        assert_eq!(tags, ["can", "modbus_rtu", "serial"]);
+        for p in Protocol::ALL {
             assert_eq!(p.to_string(), p.as_str());
+            assert_eq!(p.as_str().parse(), Ok(p));
         }
-        assert_eq!(Protocol::Modbus.as_str(), MODBUS_RTU_PROTOCOL);
-        assert_eq!("modbus".parse(), Ok(Protocol::Modbus));
-        assert_eq!("modbsu".parse::<Protocol>(), Err(()));
-        assert_eq!("CAN".parse::<Protocol>(), Err(()), "case is the column's");
+        assert_eq!("modbus".parse(), Ok(Protocol::ModbusRtu));
+        assert!("modbsu".parse::<Protocol>().is_err());
+        assert!("CAN".parse::<Protocol>().is_err(), "case is the column's");
     }
 
     #[test]
@@ -259,7 +220,7 @@ mod tests {
         );
         assert_eq!(
             (modbus.ts_us(), modbus.bus(), modbus.protocol()),
-            (2, SourceId(1), Protocol::Modbus)
+            (2, SourceId(1), Protocol::ModbusRtu)
         );
         let serial = Sample::Serial(SerialSample {
             ts_us: 3,

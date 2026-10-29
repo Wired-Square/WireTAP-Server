@@ -18,7 +18,7 @@ config = ["dep:toml"]
 serde.workspace = true
 sha1.workspace = true
 toml = { workspace = true, optional = true }
-wiretap-protocol.workspace = true
+wslib-wiretap-protocol.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

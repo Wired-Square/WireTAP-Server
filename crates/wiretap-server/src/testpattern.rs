@@ -5,7 +5,7 @@
 //! produces a capture that looks entirely healthy. Test Pattern proves the link
 //! instead — one end measures, the other answers. This is the answering end.
 //!
-//! **Every byte of the protocol lives in `wiretap_protocol::testpattern`**, and
+//! **Every byte of the protocol lives in `wslib_wiretap_protocol::testpattern`**, and
 //! deliberately not here. Hand-written copies of these codecs across the
 //! WireTAP repositories are what extracting that crate existed to end — its own
 //! `dlc` module records the sixteen-entry length table alone having been
@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::warn;
 use wiretap_model::{Sample, SourceId};
-use wiretap_protocol::testpattern::{capability, is_test_pattern_frame, Reply, Responder};
+use wslib_wiretap_protocol::testpattern::{capability, is_test_pattern_frame, Reply, Responder};
 
 /// Where a reply goes once the state machine has produced one.
 ///
@@ -41,9 +41,9 @@ pub trait ReplySink: Send {
 
 /// BRS off, so an FD reply goes out as it did before the writer could set it.
 #[cfg(target_os = "linux")]
-impl ReplySink for wiretap_io::can::CanWriter {
+impl ReplySink for wslib_can::CanWriter {
     async fn send(&self, reply: &Reply) -> io::Result<()> {
-        let frame = wiretap_io::can::CanFrame::data(
+        let frame = wslib_can::CanFrame::data(
             0,
             reply.arb_id,
             reply.extended,
@@ -51,7 +51,7 @@ impl ReplySink for wiretap_io::can::CanWriter {
             false,
             reply.data.clone(),
         );
-        wiretap_io::can::CanWriter::send(self, frame)
+        wslib_can::CanWriter::send(self, frame)
             .await
             .map_err(io::Error::other)?
     }
@@ -122,7 +122,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use wiretap_model::{CanSample, Direction};
-    use wiretap_protocol::testpattern::{
+    use wslib_wiretap_protocol::testpattern::{
         encode, Command, Flags, Message, SWEEP_ECHO_BASE, SWEEP_REQUEST_BASE,
     };
 
@@ -184,7 +184,7 @@ mod tests {
     }
 
     fn hello_capabilities(replies: &[Reply]) -> u8 {
-        let (msg, _) = wiretap_protocol::testpattern::decode(&replies[0].data)
+        let (msg, _) = wslib_wiretap_protocol::testpattern::decode(&replies[0].data)
             .expect("a well-formed framed message");
         match msg {
             Message::Control(Command::HelloReply { capabilities, bus }) => {

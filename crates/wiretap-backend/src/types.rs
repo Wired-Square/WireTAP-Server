@@ -1,6 +1,6 @@
-//! The HTTP API's types: `wiretap-gateway`'s, which the desktop parses with.
+//! The HTTP API's types: `wslib-wiretap-gateway`'s, which the desktop parses with.
 
-pub use wiretap_gateway::{
+pub use wslib_wiretap_gateway::{
     ByteChangeQueryResult, ByteChangeResult, ByteChangesParams, BytePositionStats,
     DatabaseActivity, DatabaseActivityResult, DatabaseInfo, DistributionParams,
     DistributionQueryResult, DistributionResult, ErrorBody, Event, EventPatch, EventsQuery,

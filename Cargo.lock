@@ -204,8 +204,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "912874d84099e530055bac10893f2d2b09c63bcf41c02e854e42ca42ec33ade1"
 dependencies = [
  "can-dbc-pest",
- "encoding_rs",
- "serde",
  "thiserror",
 ]
 
@@ -367,31 +365,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-deque"
-version = "0.8.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
-dependencies = [
- "crossbeam-epoch",
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-epoch"
-version = "0.9.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-utils"
-version = "0.8.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
-
-[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -519,7 +492,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1383,7 +1356,7 @@ version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
 dependencies = [
- "toml_edit 0.25.15+spec-1.1.0",
+ "toml_edit",
 ]
 
 [[package]]
@@ -1491,26 +1464,6 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
-
-[[package]]
-name = "rayon"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
-dependencies = [
- "either",
- "rayon-core",
-]
-
-[[package]]
-name = "rayon-core"
-version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
-dependencies = [
- "crossbeam-deque",
- "crossbeam-utils",
-]
 
 [[package]]
 name = "redox_syscall"
@@ -1656,15 +1609,6 @@ dependencies = [
  "itoa",
  "serde",
  "serde_core",
-]
-
-[[package]]
-name = "serde_spanned"
-version = "0.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -2016,38 +1960,17 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.8.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
-dependencies = [
- "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
- "toml_edit 0.22.27",
-]
-
-[[package]]
-name = "toml"
 version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
  "indexmap",
  "serde_core",
- "serde_spanned 1.1.1",
- "toml_datetime 1.1.1+spec-1.1.0",
+ "serde_spanned",
+ "toml_datetime",
  "toml_parser",
  "toml_writer",
- "winnow 1.0.4",
-]
-
-[[package]]
-name = "toml_datetime"
-version = "0.6.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
-dependencies = [
- "serde",
+ "winnow",
 ]
 
 [[package]]
@@ -2061,28 +1984,15 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.22.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
-dependencies = [
- "indexmap",
- "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
- "toml_write",
- "winnow 0.7.15",
-]
-
-[[package]]
-name = "toml_edit"
 version = "0.25.15+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
 dependencies = [
  "indexmap",
- "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_datetime",
  "toml_parser",
- "winnow 1.0.4",
+ "toml_writer",
+ "winnow",
 ]
 
 [[package]]
@@ -2091,14 +2001,8 @@ version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
- "winnow 1.0.4",
+ "winnow",
 ]
-
-[[package]]
-name = "toml_write"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "toml_writer"
@@ -2345,7 +2249,6 @@ dependencies = [
  "cfg-if",
  "once_cell",
  "rustversion",
- "serde",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
 ]
@@ -2599,15 +2502,6 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winnow"
-version = "0.7.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
@@ -2639,74 +2533,15 @@ dependencies = [
  "tokio-postgres",
  "tower-http",
  "tracing",
- "wiretap-catalog",
- "wiretap-gateway",
  "wiretap-model",
- "wiretap-protocol",
  "wslib-build-id",
+ "wslib-can",
  "wslib-file-atomic",
  "wslib-secret",
  "wslib-telemetry",
-]
-
-[[package]]
-name = "wiretap-catalog"
-version = "0.10.2"
-source = "git+https://github.com/Wired-Square/wslib-wiretap-rs.git?tag=v0.10.2#73858f484418584ab748cd91a1f97b966db72245"
-dependencies = [
- "can-dbc",
- "rust_decimal",
- "serde",
- "serde_json",
- "thiserror",
- "toml 0.8.23",
- "toml_edit 0.22.27",
- "wiretap-checksum",
- "wiretap-decode",
- "wiretap-protocol",
-]
-
-[[package]]
-name = "wiretap-checksum"
-version = "0.10.2"
-source = "git+https://github.com/Wired-Square/wslib-wiretap-rs.git?tag=v0.10.2#73858f484418584ab748cd91a1f97b966db72245"
-dependencies = [
- "rayon",
- "serde",
- "serde_json",
- "wiretap-decode",
-]
-
-[[package]]
-name = "wiretap-decode"
-version = "0.10.2"
-source = "git+https://github.com/Wired-Square/wslib-wiretap-rs.git?tag=v0.10.2#73858f484418584ab748cd91a1f97b966db72245"
-dependencies = [
- "rust_decimal",
- "serde",
-]
-
-[[package]]
-name = "wiretap-gateway"
-version = "0.10.2"
-source = "git+https://github.com/Wired-Square/wslib-wiretap-rs.git?tag=v0.10.2#73858f484418584ab748cd91a1f97b966db72245"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "wiretap-io"
-version = "0.10.2"
-source = "git+https://github.com/Wired-Square/wslib-wiretap-rs.git?tag=v0.10.2#73858f484418584ab748cd91a1f97b966db72245"
-dependencies = [
- "libc",
- "nix 0.29.0",
- "socketcan",
- "thiserror",
- "tokio",
- "wiretap-catalog",
- "wiretap-protocol",
- "wiretap-serialport",
+ "wslib-wiretap-catalogue",
+ "wslib-wiretap-gateway",
+ "wslib-wiretap-protocol",
 ]
 
 [[package]]
@@ -2716,21 +2551,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
- "toml 1.1.5+spec-1.1.0",
- "wiretap-protocol",
-]
-
-[[package]]
-name = "wiretap-protocol"
-version = "0.10.2"
-source = "git+https://github.com/Wired-Square/wslib-wiretap-rs.git?tag=v0.10.2#73858f484418584ab748cd91a1f97b966db72245"
-
-[[package]]
-name = "wiretap-serialport"
-version = "0.1.0"
-source = "git+https://github.com/Wired-Square/wslib-wiretap-rs.git?tag=v0.10.2#73858f484418584ab748cd91a1f97b966db72245"
-dependencies = [
- "serialport",
+ "toml",
+ "wslib-wiretap-protocol",
 ]
 
 [[package]]
@@ -2747,20 +2569,24 @@ dependencies = [
  "serde_json",
  "socketcan",
  "tokio",
- "toml 1.1.5+spec-1.1.0",
+ "toml",
  "tracing",
  "tracing-subscriber",
- "wiretap-catalog",
- "wiretap-checksum",
- "wiretap-io",
  "wiretap-model",
- "wiretap-protocol",
  "wslib-backoff",
  "wslib-build-id",
+ "wslib-can",
+ "wslib-can-gvret",
+ "wslib-can-socketcan",
+ "wslib-checksum",
  "wslib-file-atomic",
+ "wslib-modbus",
  "wslib-secret",
+ "wslib-serial",
  "wslib-service",
  "wslib-telemetry",
+ "wslib-wiretap-catalogue",
+ "wslib-wiretap-protocol",
 ]
 
 [[package]]
@@ -2859,15 +2685,68 @@ dependencies = [
 
 [[package]]
 name = "wslib-backoff"
+version = "0.1.2"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "9da7d552ef3942676aebe16e24107331f5167c502e39832a025a5538a8042c5c"
+
+[[package]]
+name = "wslib-bits"
 version = "0.1.0"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "27a90db8a9c74e6dd46a9fea5c7cee4f6451856bd34b17213c5f27e54fa9367e"
+checksum = "35b1bec308f2382e7b1079105d1a34d0ea28960c4c160928db59b1d88dfa4a53"
+dependencies = [
+ "rust_decimal",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "wslib-build-id"
 version = "0.1.0"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
 checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
+
+[[package]]
+name = "wslib-can"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "c16bdfd7d1c1e13468b68a8ed114f216ce5bbf75f9dd2cb9b946364b1807ac0d"
+dependencies = [
+ "thiserror",
+ "tokio",
+ "wslib-backoff",
+]
+
+[[package]]
+name = "wslib-can-gvret"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "f7231c8db8fa342083ec0b7ec2984206a5d9f9787c63b8f3abb4b2d23d2df9ea"
+dependencies = [
+ "wslib-can",
+]
+
+[[package]]
+name = "wslib-can-socketcan"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "51a9e47627441b30e27d102e23bc4d84817b543d8e5a2c01ba13ea6d97f62dd2"
+dependencies = [
+ "libc",
+ "socketcan",
+ "tokio",
+ "wslib-can",
+]
+
+[[package]]
+name = "wslib-checksum"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "460a0d9e5ec8ac6bf7681a7c3d8435c36e911329158cbb4165a7efcc998a24cd"
+dependencies = [
+ "serde",
+ "wslib-bits",
+]
 
 [[package]]
 name = "wslib-file-atomic"
@@ -2880,6 +2759,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "wslib-modbus"
+version = "0.2.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "13057fe86d0ef9aea798f66573d908d178cc83b7a7394d6b157c3bf2167062e5"
+dependencies = [
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "toml_edit",
+ "wslib-backoff",
+ "wslib-bits",
+ "wslib-checksum",
+]
+
+[[package]]
 name = "wslib-secret"
 version = "0.1.1"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
@@ -2887,6 +2783,19 @@ checksum = "1cecb90fec3688b4d4e14cfcd6aca61f6b41500f1244f65e3e697abf1b0da931"
 dependencies = [
  "serde",
  "subtle",
+]
+
+[[package]]
+name = "wslib-serial"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "5d18dffe2012f2ef0cb1cb3d40bcd1df38d14b6897a9e87998f0cbf80e3a5623"
+dependencies = [
+ "libc",
+ "serialport",
+ "thiserror",
+ "tokio",
+ "wslib-backoff",
 ]
 
 [[package]]
@@ -2926,6 +2835,47 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "wslib-wiretap-catalogue"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "21c95c5443508a4213fa8f0ac9a6a2ef706591867d6704af97887dc1b8a49d24"
+dependencies = [
+ "can-dbc",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "toml_edit",
+ "wslib-bits",
+ "wslib-checksum",
+ "wslib-modbus",
+ "wslib-serial",
+ "wslib-wiretap-protocol",
+]
+
+[[package]]
+name = "wslib-wiretap-gateway"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "3b5fed2000df81a8a8d689ef662268543726abd1871afc3ec04d4833d8f4d6c6"
+dependencies = [
+ "serde",
+ "wslib-wiretap-protocol",
+]
+
+[[package]]
+name = "wslib-wiretap-protocol"
+version = "0.2.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "87b2594711405c1c9ca2b90366cb75b9868da343d192a848e42e71a18bea5309"
+dependencies = [
+ "serde",
+ "wslib-can",
+ "wslib-checksum",
 ]
 
 [[package]]

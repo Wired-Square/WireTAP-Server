@@ -1,4 +1,4 @@
-//! A serial line opened through `wiretap-io` and drained into an [`RtuTap`], a
+//! A serial line opened through `wslib-serial` and drained into an [`RtuTap`], a
 //! [`RawTap`], or both.
 
 use std::io;
@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::{error, info, warn};
-use wiretap_catalog::LineSettings;
-use wiretap_io::serial::{self, Access, SerialError, SerialEvent, SerialOptions, SerialTask};
 use wiretap_model::{Sample, SourceId};
+use wslib_serial::{
+    self as serial, Access, LineSettings, SerialError, SerialEvent, SerialOptions, SerialTask,
+};
 
 use super::modbus::RtuTap;
 use super::raw::RawTap;
@@ -141,8 +142,8 @@ mod tests {
 
     use tokio::sync::mpsc;
     use tokio::time::timeout;
-    use wiretap_catalog::{LineSettings, Parity};
     use wiretap_model::{ModbusSample, SerialSample, SourceId};
+    use wslib_serial::{LineSettings, Parity};
 
     use super::*;
     use crate::settings::Framing;
@@ -325,7 +326,7 @@ mod tests {
             0x00, 0x60, 0x00, 0x00, 0x00, 0x05, 0x0A, 0x00, 0x04, 0x01, 0xBB, 0x00, 0x00, 0x00,
             0x00, 0x00, 0xE5,
         ];
-        let crc = wiretap_checksum::algorithms::crc16_modbus_checksum(&body);
+        let crc = wslib_checksum::algorithms::crc16_modbus_checksum(&body);
         [&body[..], &crc.to_le_bytes()].concat()
     }
 

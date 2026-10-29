@@ -18,7 +18,7 @@
 use std::fmt::Write;
 
 use wiretap_model::{CanSample, ModbusSample, SerialSample, SourceId};
-use wiretap_protocol::payload_dlc;
+use wslib_can::payload_dlc;
 
 const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";

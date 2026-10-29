@@ -28,9 +28,9 @@ use tracing::info;
 #[cfg(target_os = "linux")]
 use tracing::{error, warn};
 #[cfg(target_os = "linux")]
-use wiretap_io::can::{self, CanError, CanEvent, CanFrame, CanTask, CanWriter};
-#[cfg(target_os = "linux")]
 use wiretap_model::{Direction, Sample, SourceId};
+#[cfg(target_os = "linux")]
+use wslib_can::{self as can, CanError, CanEvent, CanFrame, CanTask, CanWriter};
 use wslib_service::Stop;
 
 #[cfg(target_os = "linux")]

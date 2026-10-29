@@ -7,6 +7,14 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **The WireTAP crates come from the `wired-square` registry**, in place of
+  wslib-wiretap-rs `v0.10.2`'s git tag: `wslib-wiretap-protocol`,
+  `wslib-wiretap-catalogue`, `wslib-wiretap-gateway`, `wslib-can`,
+  `wslib-can-gvret`, `wslib-can-socketcan`, `wslib-serial`, `wslib-modbus` and
+  `wslib-checksum`. No wire bytes change. A lost serial line or CAN interface
+  is reopened after 1 s, doubling to at most 30 s, where it was every second;
+  a new catalogue no longer stamps a Modbus message earlier than one already
+  sent; and catalogue errors say "Catalogue".
 - **`wiretap-server` runs as a service through `wslib-service`**, which takes
   over its runtime, its signals and what it tells systemd. A stop now has 25 s
   to flush, and a daemon still flushing after that exits non-zero.

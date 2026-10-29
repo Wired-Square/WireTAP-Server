@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Reference client and conformance suite for the WireTAP binary ingest protocol
-(wiretap-protocol's docs/ingest.md, linked from docs/ingest-protocol.md).
+(wslib-wiretap-protocol's docs/ingest.md, linked from docs/ingest-protocol.md).
 Always against a running server, over a real socket.
 
 Conformance mode walks the protocol's edge cases — bad CRC, malformed batch,

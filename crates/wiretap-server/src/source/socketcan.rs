@@ -1,15 +1,12 @@
-//! A Linux SocketCAN interface, through `wiretap-io`: the socket, its kernel
+//! A Linux SocketCAN interface, through `wslib-can-socketcan`: the socket, its kernel
 //! stamps and its reopen by name are the library's, and what this server
 //! archives and reports is decided here.
 
 use std::io;
 
-use wiretap_io::can::{
-    self,
-    socketcan::{self, SocketCanOptions},
-    CanError, CanOptions, CanRead, CanTask,
-};
 use wiretap_model::{CanSample, Direction, SourceId};
+use wslib_can::{self as can, CanError, CanOptions, CanRead, CanTask};
+use wslib_can_socketcan::{self as socketcan, SocketCanOptions};
 
 use super::{system_time_to_us, Bitrates};
 
@@ -69,7 +66,7 @@ pub fn loss(error: &CanError) -> String {
 mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
-    use wiretap_io::can::{CanEvent, CanFrame};
+    use wslib_can::{CanEvent, CanFrame};
 
     #[tokio::test]
     async fn an_interface_missing_at_startup_is_waited_for() {

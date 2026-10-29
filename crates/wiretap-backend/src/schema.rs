@@ -755,7 +755,7 @@ mod tests {
     /// agree on the tag the code writes.
     #[test]
     fn the_modbus_rtu_migration_drops_relabels_then_checks() {
-        use wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
+        use wslib_wiretap_protocol::ingest::MODBUS_RTU_PROTOCOL;
         let stmts = split_statements(MIGRATIONS[4].sql);
         let at = |what: &str| {
             stmts
@@ -818,7 +818,7 @@ mod tests {
     /// The SQL spells `CanFlags`' bits as literals; these are the ones it uses.
     #[test]
     fn the_schema_spells_the_bits_canflags_names() {
-        use wiretap_protocol::can::CanFlags;
+        use wslib_can::CanFlags;
         let (rtr, ext, fd, tx) = (
             CanFlags::RTR.0,
             CanFlags::EXT.0,
