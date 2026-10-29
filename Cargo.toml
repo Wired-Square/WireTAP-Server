@@ -22,12 +22,12 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 
 [workspace.dependencies]
 # --- the wslib-rs toolkit, from the private registry (.cargo/config.toml) ---
-wslib-backoff = { version = "0.1", registry = "wired-square" }
+wslib-backoff = { version = "0.1.2", registry = "wired-square" }
 wslib-build-id = { version = "0.1", registry = "wired-square" }
-wslib-secret = { version = "0.1", registry = "wired-square" }
+wslib-secret = { version = "0.1.1", registry = "wired-square" }
 wslib-telemetry = { version = "0.1.5", registry = "wired-square", default-features = false }
-wslib-service = { version = "0.1", registry = "wired-square" }
-wslib-file-atomic = { version = "0.1.2", registry = "wired-square" }
+wslib-service = { version = "0.1.1", registry = "wired-square" }
+wslib-file-atomic = { version = "0.1.5", registry = "wired-square" }
 # The WireTAP codecs and types, shared with the desktop. Two members on
 # different versions of one would be two protocols on one link.
 wslib-wiretap-protocol = { version = "0.2.1", registry = "wired-square" }
@@ -46,14 +46,14 @@ clap = { version = "4", default-features = false }
 # --- CAN capture (Linux only) ---
 # Only the vcan drills' end of the bus: the server reads and writes through
 # wslib-can-socketcan.
-socketcan = { version = "3.6", default-features = false }
+socketcan = { version = "3.6.1", default-features = false }
 
 # --- async runtime and HTTP ---
 axum = "0.8"
 http-body-util = "0.1"
-hyper = "1"
-hyper-util = "0.1"
-tokio = "1"
+hyper = "1.1.0"
+hyper-util = "0.1.3"
+tokio = "1.53.3"
 tower-http = "0.6"
 futures-util = "0.3"
 
@@ -62,9 +62,9 @@ futures-util = "0.3"
 # ingest protocol rather than writing to PostgreSQL, which is what keeps its .deb
 # a static musl binary with no TLS stack and no libpq.
 deadpool-postgres = "0.14"
-tokio-postgres = "0.7"
+tokio-postgres = "0.7.9"
 # The SCRAM verifier for a rotated password, computed client-side.
-postgres-protocol = "0.6"
+postgres-protocol = "0.6.6"
 
 # --- local storage ---
 # The capture server's disk cache, holding frames through a gateway outage. The
@@ -73,27 +73,27 @@ postgres-protocol = "0.6"
 rusqlite = "0.40"
 
 # --- serialisation and encoding ---
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1.0.225", features = ["derive"] }
+serde_json = "1.0.85"
 toml = "1"
-chrono = "0.4"
+chrono = "0.4.39"
 base64 = "0.22"
-bytes = "1"
+bytes = "1.4.0"
 hex = "0.4"
 # A database archive's compression: gzip, which a browser can also read with
 # its own DecompressionStream, and pure Rust behind the default backend.
-flate2 = "1"
+flate2 = "1.0.2"
 
 # --- hashing and secrets ---
 # sha2 hashes API keys at rest.
 sha2 = "0.10"
 # A catalogue is named by its Git blob SHA-1, as `git hash-object` names it.
 sha1 = "0.10"
-rand = "0.8"
+rand = "0.8.5"
 
 # --- logging ---
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", default-features = false }
 
 # One binary per package, shipped to appliances over the network: size and
 # start-up cost more than build time does. codegen-units = 1 is worth its ~5s —
