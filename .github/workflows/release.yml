@@ -309,7 +309,7 @@ jobs:
         if: matrix.arch == 'arm64'
         env:
           CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
-        run: cargo install --config .cargo/config.toml wslib-appliance-xtask --locked --version =0.1.3 --registry wired-square
+        run: cargo install --config .cargo/config.toml wslib-appliance-xtask --locked --version =0.2.0 --registry wired-square
 
       - uses: actions/setup-node@v5
         with:

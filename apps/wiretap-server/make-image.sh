@@ -30,7 +30,6 @@ stage_arch() {
 		export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-$lld}"
 		export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=--fix-cortex-a53-843419"
 		BINARY=wiretap-server-ui
-		PACKAGE=$BINARY
 		TARGET_DIR=target
 		. scaffold/packaging/build-binary.sh
 		binary_arch
