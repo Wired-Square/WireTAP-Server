@@ -27,6 +27,9 @@ __pycache__/
 *.key
 *.crt
 
+# Stopgaps copied from other repos, never committed.
+packaging/vendor/
+
 # Release artefacts
 *.deb
 

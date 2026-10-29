@@ -146,6 +146,8 @@ protocol_manifest="$(cd "${ROOT}" && cargo metadata --format-version 1 --locked 
 		for p in json.load(sys.stdin)["packages"] if p["name"] == "wslib-wiretap-protocol"))')" \
 	|| die "could not find wslib-wiretap-protocol in cargo metadata"
 PROTOCOL="$(dirname "${protocol_manifest}")/docs/ingest.md"
+# wslib-wiretap-protocol 0.2.0 shipped without its docs; drop this at 0.2.1.
+[ -f "${PROTOCOL}" ] || PROTOCOL="${ROOT}/packaging/vendor/ingest.md"
 
 for f in "${UNIT}" "${CONFIG}" "${CAN_UNIT}" "${CAN_UP}" "${CAN_RULES}" "${CAN_CONF}" \
          "${CATALOGUE}" "${PROTOCOL}"; do
