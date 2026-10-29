@@ -1,5 +1,4 @@
-# cargo-release config — the one canonical release path, mirroring
-# wslib-wiretap-rs so the two repos are released the same way. Every crate here
+# cargo-release config — the one canonical release path. Every crate here
 # inherits `[workspace.package] version`, so one command bumps all five and cuts
 # one tag.
 #
@@ -11,8 +10,7 @@
 #
 # ## Releasing ends in one push
 #
-# `push = false` below, which is the one deliberate difference from
-# wslib-wiretap-rs. GitHub runs CI only on a release tag (scripts/ci-local.sh
+# `push = false` below. GitHub runs CI only on a release tag (scripts/ci-local.sh
 # runs it locally before then), so `.github/workflows/release.yml` runs all of
 # `ci.yml` on the tagged commit before it drafts or builds anything:
 #
