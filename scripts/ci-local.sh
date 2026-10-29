@@ -21,14 +21,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="$ROOT/target/ci-local"
 JOB_TIMEOUT=30m
-JOBS="gates capture package-amd64 package-arm64 image server-ui server-ui-browser
-	server-image"
+JOBS="gates minimal-versions capture package-amd64 package-arm64 image server-ui
+	server-ui-browser server-image"
 
 export CARGO_TERM_COLOR=always
 
 job_name() {
 	case $1 in
 	gates) echo "Gates" ;;
+	minimal-versions) echo "Minimal versions" ;;
 	capture) echo "Capture path and gateway (vcan)" ;;
 	package-amd64) echo "Package lifecycle (amd64)" ;;
 	package-arm64) echo "Package lifecycle (arm64)" ;;
@@ -77,6 +78,18 @@ job_gates() {
 	cargo clippy -p wiretap-server --target aarch64-unknown-linux-musl \
 		--all-targets --locked -- -D warnings
 	cargo test --workspace --locked
+}
+
+# On a copy of the tree, so the real lockfiles keep their versions.
+job_minimal_versions() {
+	local tree="$SCRATCH/minimal-versions"
+	rsync -a --delete --exclude .git --exclude target --exclude node_modules ./ "$tree/"
+	export CARGO_TARGET_DIR="$SCRATCH/minimal-versions-target"
+	for ws in "$tree" "$tree/apps/wiretap-server"; do
+		(cd "$ws" &&
+			cargo +nightly update -Z direct-minimal-versions &&
+			cargo +nightly check --workspace --all-targets --locked)
+	done
 }
 
 job_package_amd64() { package_lifecycle amd64; }

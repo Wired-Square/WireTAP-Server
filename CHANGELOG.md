@@ -75,6 +75,12 @@ All notable changes to this project are documented here. Entries go under
   `<state dir>/catalogs/<sha>.toml` and `assignments.json` are synced, with
   their directory, before they replace what was there, and are `0600`, where
   they were `0644`.
+- **Both workspaces' dependency versions are the lowest they build and pass
+  their tests with**, raised where `wslib-*` needs more or an older release
+  falls short: `wslib-secret` 0.1.1, for example, is the first that keeps a
+  secret out of a config type error. `scripts/ci-local.sh minimal-versions`
+  checks them with `cargo +nightly update -Z direct-minimal-versions`, on a
+  copy of the tree.
 
 ### Removed
 

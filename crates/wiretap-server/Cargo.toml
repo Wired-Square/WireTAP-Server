@@ -50,7 +50,7 @@ serde_json.workspace = true
 serde.workspace = true
 toml.workspace = true
 # For naming the errno an open failed with, and the host's own name.
-libc = "0.2"
+libc = "0.2.183"
 tracing.workspace = true
 # `setup-core`, not `setup`: no `env-filter`, whose regex engine would ship in
 # a binary that goes over the network. No `ansi`: stderr is a journal pipe.
