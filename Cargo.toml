@@ -30,7 +30,7 @@ wslib-service = { version = "0.1", registry = "wired-square" }
 wslib-file-atomic = { version = "0.1.2", registry = "wired-square" }
 # The WireTAP codecs and types, shared with the desktop. Two members on
 # different versions of one would be two protocols on one link.
-wslib-wiretap-protocol = { version = "0.2", registry = "wired-square" }
+wslib-wiretap-protocol = { version = "0.2.1", registry = "wired-square" }
 wslib-wiretap-catalogue = { version = "0.1", registry = "wired-square" }
 wslib-wiretap-gateway = { version = "0.1", registry = "wired-square" }
 wslib-can = { version = "0.1", registry = "wired-square" }
