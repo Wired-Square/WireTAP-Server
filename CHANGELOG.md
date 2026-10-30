@@ -57,6 +57,10 @@ All notable changes to this project are documented here. Entries go under
   crates, and `WIRETAP_LOG_BUFFER` is gone. Stdout is coloured only on a
   terminal, and a `RUST_LOG` that does not parse is now warned about rather
   than silently replaced by the default.
+- **The gateway logs `tokio_postgres`'s records when `RUST_LOG` asks for
+  them** (`RUST_LOG=tokio_postgres=debug,wiretap_backend=info`), through
+  `wslib-telemetry` 0.1.9's `log` bridge; they were dropped. The ring still
+  keeps only the gateway's own.
 - **`wiretap-server-ui`'s logging comes from `wslib-telemetry`**, through the
   chassis, so a `RUST_LOG` that does not parse is warned about too.
 - **The capture daemon's logging comes from `wslib-telemetry`**, without its

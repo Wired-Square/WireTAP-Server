@@ -1947,13 +1947,14 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.18"
+version = "0.7.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
 dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]
@@ -2093,6 +2094,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+ "valuable",
+]
+
+[[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
 ]
 
 [[package]]
@@ -2109,6 +2122,7 @@ dependencies = [
  "thread_local",
  "tracing",
  "tracing-core",
+ "tracing-log",
 ]
 
 [[package]]
@@ -2176,6 +2190,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vcpkg"
@@ -2708,9 +2728,9 @@ checksum = "6ddb0861a3c9415212e73a9f74447ad23463284e6820c29ca49136d9cffdc0e1"
 
 [[package]]
 name = "wslib-can"
-version = "0.1.0"
+version = "0.1.1"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "c16bdfd7d1c1e13468b68a8ed114f216ce5bbf75f9dd2cb9b946364b1807ac0d"
+checksum = "087323f5c5d4508ba1d1a75bd323c421135c0f8cdb0f594fd368ad0beac1caec"
 dependencies = [
  "thiserror",
  "tokio",
@@ -2750,9 +2770,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-file-atomic"
-version = "0.1.5"
+version = "0.1.8"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "abfc0ce5f3519700cb11d65c569852dc0c8fc1d42770630c98b2ce935916a7a0"
+checksum = "df7cfd680bf02c921f8738a2b302e5d01f4a048563f00cc3527844aa3f9a5a55"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -2777,19 +2797,20 @@ dependencies = [
 
 [[package]]
 name = "wslib-secret"
-version = "0.1.1"
+version = "0.1.3"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "1cecb90fec3688b4d4e14cfcd6aca61f6b41500f1244f65e3e697abf1b0da931"
+checksum = "c1f4958996effa421ce87a8106fd18c205d34d922995b857e14216a64b0b5b09"
 dependencies = [
  "serde",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
 name = "wslib-serial"
-version = "0.1.0"
+version = "0.1.1"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "5d18dffe2012f2ef0cb1cb3d40bcd1df38d14b6897a9e87998f0cbf80e3a5623"
+checksum = "3aede8ec33e6b557bea8163ea763b2d4d6871ec9f798a96371c9d69a79948f68"
 dependencies = [
  "libc",
  "serialport",
@@ -2800,9 +2821,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-service"
-version = "0.1.2"
+version = "0.1.4"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "f9ee3b3c2745a14b484e60ae4e7f540b171129c780ce037d0bf155c0de54279e"
+checksum = "74ecb3e6fe7b3fb975c152180c2bcbe3f9b0ac41be657926f2af1f313f812c4f"
 dependencies = [
  "libc",
  "thiserror",
@@ -2826,14 +2847,15 @@ dependencies = [
 
 [[package]]
 name = "wslib-telemetry"
-version = "0.1.5"
+version = "0.1.9"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "727a8ac0e4ec207a5b3d2b37cb0b0f5ce2a04705cb696cd6a04e819219bab536"
+checksum = "a24c24236e064a435eafa34909ecec1e1fc8069bc787bd8e8396b02e89c92678"
 dependencies = [
  "chrono",
  "serde",
  "tokio",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 
@@ -2897,6 +2919,12 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zlib-rs"
