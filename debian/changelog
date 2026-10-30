@@ -1,3 +1,19 @@
+wiretap-server (0.1.14) UNRELEASED; urgency=medium
+
+  * The unit is Type=notify with WatchdogSec=30s. systemctl start returns
+    once the daemon is up and fails if it refuses to start, and a daemon
+    that misses 30 s of watchdog pings is restarted. Remove any drop-in
+    overriding ExecStart or Type before upgrading.
+  * A stop has 25 s to flush; a daemon still flushing then exits non-zero.
+  * A lost serial line or CAN interface is reopened after 1 s, doubling to
+    at most 30 s, where it was every second.
+  * A RUST_LOG of target and level directives now overrides --log-level
+    and [logging] level, and stderr carries no colour escape codes.
+  * The catalogue cache files are 0600, where they were 0644.
+  * Install and restart.
+
+ -- Alex Ferrara <alex@wiredsquare.com>  Fri, 30 Oct 2026 18:29:26 +1100
+
 wiretap-server (0.1.13) bookworm; urgency=medium
 
   * The gateway no longer takes captures into its own database, wiretap.
