@@ -3381,9 +3381,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-appliance-types"
-version = "0.1.1"
+version = "0.1.2"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "36e0699005f19c48b2e7b6c7d7feb1fc20c424521d063b11850b01a644e81237"
+checksum = "692e84a65a879a3fe9dd220624d12f259ac287326a8895c3ce55e86480b7d576"
 dependencies = [
  "chrono",
  "serde",
@@ -3489,9 +3489,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-db-sqlite"
-version = "0.2.1"
+version = "0.2.4"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "a7549bec0d88b6c3eb5d68f556278499dcb59b9f64f7bd6c23ab28421dcc124d"
+checksum = "58bba5658346cfaf54911c72ec4c56a719dea578bec4229e5384b1de32d004da"
 dependencies = [
  "chrono",
  "serde",
@@ -3506,9 +3506,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-file-atomic"
-version = "0.1.6"
+version = "0.1.8"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "bfdaaaae12f955ae895fba93ce4487674186b0255b7c73681d75dbdf711fc92c"
+checksum = "df7cfd680bf02c921f8738a2b302e5d01f4a048563f00cc3527844aa3f9a5a55"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -3540,9 +3540,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-http-error"
-version = "0.1.1"
+version = "0.1.2"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "e6be6e8331c79c275c71bf7b68286312f5faf73e509c9923a04250ef8698abdd"
+checksum = "f66095c33dcc4873dad79999f4cdda489a750e92b6431d58d830c41f3afec69f"
 dependencies = [
  "axum",
  "http",
@@ -3554,9 +3554,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-http-scaffold"
-version = "0.1.3"
+version = "0.1.4"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "35c2620199e50e3ecdebdfab734f287a7d0ec74a35e76606a5e326e873d9241b"
+checksum = "9b8ae6faa4b599ed3e46e6e34a453791e762e16b3491d9f4f6f3d0ac9cc66e69"
 dependencies = [
  "axum",
  "flate2",
@@ -3572,35 +3572,39 @@ dependencies = [
 
 [[package]]
 name = "wslib-http-server"
-version = "0.1.1"
+version = "0.1.5"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "0e41916b9db59a9b0b6ae28ae0a55764ea4350424d745b40a32b062c8a9f6e9a"
+checksum = "680abad1f000b3c8eea4cec2154ce07111ddeafd37c5460a066e1aca8cdb98d0"
 dependencies = [
  "axum",
  "axum-server",
  "hyper-util",
+ "libc",
  "rustls",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tower",
  "tracing",
+ "wslib-host",
 ]
 
 [[package]]
 name = "wslib-secret"
-version = "0.1.1"
+version = "0.1.3"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "1cecb90fec3688b4d4e14cfcd6aca61f6b41500f1244f65e3e697abf1b0da931"
+checksum = "c1f4958996effa421ce87a8106fd18c205d34d922995b857e14216a64b0b5b09"
 dependencies = [
  "serde",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
 name = "wslib-service"
-version = "0.1.3"
+version = "0.1.4"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "8ec5ba14e33ddd6c8cd72a88fd13767aca9b718853153325f5ee21967b2ed83b"
+checksum = "74ecb3e6fe7b3fb975c152180c2bcbe3f9b0ac41be657926f2af1f313f812c4f"
 dependencies = [
  "libc",
  "thiserror",
