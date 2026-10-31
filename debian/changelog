@@ -10,6 +10,8 @@ wiretap-server (0.1.14) UNRELEASED; urgency=medium
   * A RUST_LOG of target and level directives now overrides --log-level
     and [logging] level, and stderr carries no colour escape codes.
   * The catalogue cache files are 0600, where they were 0644.
+  * A daemon that fails to start is restarted after 15 s, where it was 5 s;
+    on systemd 254 and later the delay still grows to 60 s.
   * Install and restart.
 
  -- Alex Ferrara <alex@wiredsquare.com>  Fri, 30 Oct 2026 18:29:26 +1100
