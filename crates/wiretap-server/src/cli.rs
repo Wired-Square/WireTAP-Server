@@ -33,6 +33,11 @@ pub struct Cli {
     #[arg(short, long, default_value_t = 23)]
     pub port: u16,
 
+    /// Networks allowed to connect to GVRET, as comma-separated CIDR ranges.
+    /// Default: loopback only.
+    #[arg(long)]
+    pub allowed_clients: Option<String>,
+
     /// GVRET bus number offset; the first interface becomes bus N.
     #[arg(long, default_value_t = 0)]
     pub bus_offset: u8,

@@ -626,6 +626,7 @@ mod tests {
         for bad in [
             "[[devices]]\ninterface = \"can0\"\nmode = \"active\"\n",
             "[test_pattern]\nenable = true\n",
+            "[server]\nallowed_clients = [\"0.0.0.0/0\"]\n",
             "[forward]\ncache_path = \"/elsewhere\"\n",
             "[forward\n",
         ] {

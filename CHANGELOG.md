@@ -7,6 +7,16 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **GVRET accepts clients from loopback only by default.** Anyone who could
+  reach port 23 could put frames on every active bus, and GVRET has no
+  authentication. A client outside `[server] allowed_clients` (or
+  `--allowed-clients`), a list of CIDR ranges, is closed at connect and
+  logged once per address. **SavvyCAN or the WireTAP desktop on another
+  machine is refused after upgrading until its network is added**, e.g.
+  `allowed_clients = ["127.0.0.0/8", "::1/128", "192.168.1.0/24"]`. It can be
+  set only in the config file or on the command line, not from the UI, and
+  `--check-config` shows it as `gvret clients`. A range with host bits set
+  (`192.168.1.5/24`) is refused at start.
 - **The WireTAP crates come from the `wired-square` registry**, in place of
   wslib-wiretap-rs `v0.10.2`'s git tag: `wslib-wiretap-protocol`,
   `wslib-wiretap-catalogue`, `wslib-wiretap-gateway`, `wslib-can`,

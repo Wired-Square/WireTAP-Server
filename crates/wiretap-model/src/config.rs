@@ -36,6 +36,7 @@ pub struct ServerSection {
     pub iface: Option<String>,
     pub host: Option<String>,
     pub port: Option<u16>,
+    pub allowed_clients: Option<Vec<String>>,
     pub bus_offset: Option<u8>,
     pub echo_console: Option<bool>,
     pub colour: Option<bool>,

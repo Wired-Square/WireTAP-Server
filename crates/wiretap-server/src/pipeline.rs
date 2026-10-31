@@ -369,6 +369,7 @@ async fn start_capture(
     let listener = gvret::Server::bind(
         &settings.host,
         settings.port,
+        settings.allowed_clients.clone(),
         buses.clone(),
         frames.clone(),
         transmits,
