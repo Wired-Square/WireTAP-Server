@@ -196,7 +196,9 @@ group is every process's, so the directory is the boundary. Everything
 persistent is under `/data`, the only volume: the daemon's `ui.toml` and disk
 cache, the UI's database, and in standalone mode its certificate.
 `/etc/wiretap-server/wiretap-server.toml` in the image sets the device-push
-listener's port to 9324, so a UI shows it as fixed.
+listener's port to 9324, so a UI shows it as fixed, and lets GVRET clients
+connect from private, link-local and Tailscale networks, where the daemon
+alone allows loopback only.
 
 **On ApplianceOS** the manifest asks for host networking, so the daemon sees
 the host's CAN interfaces, with `NET_RAW` and `NET_BIND_SERVICE`. When the

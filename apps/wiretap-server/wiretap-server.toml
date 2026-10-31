@@ -1,6 +1,16 @@
 # The image's settings for the capture daemon, which outrank the web UI's.
 # Mount a file over /etc/wiretap-server/wiretap-server.toml to replace them.
 
+[server]
+# GVRET from private, link-local and Tailscale networks, where the daemon's own
+# default is loopback only: on ApplianceOS nothing else can widen it.
+allowed_clients = [
+    "127.0.0.0/8", "::1/128",
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
+    "100.64.0.0/10",
+    "fc00::/7", "fe80::/10",
+]
+
 [ingest]
 # Not 9323: on ApplianceOS the wiretap-gateway app holds that port on the host.
 port = 9324
