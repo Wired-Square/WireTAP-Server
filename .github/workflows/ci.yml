@@ -26,7 +26,7 @@ env:
   # A fresh checkout cannot reuse incremental output, and it is roughly 40% of
   # the target directory — so it is cache weight and slower codegen for nothing.
   CARGO_INCREMENTAL: 0
-  WSLIB_APPLIANCE_XTASK: 0.1.3
+  WSLIB_APPLIANCE_XTASK: 0.2.0
 
 jobs:
   gates:
@@ -178,16 +178,16 @@ jobs:
           key: ${{ runner.os }}-cargo-capture-${{ env.RUSTC_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-capture-${{ env.RUSTC_VERSION }}-
 
-      # The runner image does not ship `vcan`: the Azure kernel keeps it in
-      # `linux-modules-extra`, without which `modprobe vcan` below fails. The
-      # package has to match the running kernel exactly, so `$(uname -r)`
-      # rather than the `-azure` meta-package, which tracks the archive's
-      # current kernel and not the one the runner booted.
+      # The Azure kernel has kept `vcan` in `linux-modules-extra`, which has to
+      # match the running kernel exactly, so `$(uname -r)` rather than the
+      # `-azure` meta-package. The archive has no such package for every
+      # kernel a runner boots (7.0.0-1017-azure, 2026-10-31), so it is
+      # installed only when the module is not already there.
       - name: Install can-utils, psql, and the vcan module
         run: |
           sudo apt-get update
-          sudo apt-get install -y can-utils postgresql-client \
-            "linux-modules-extra-$(uname -r)"
+          sudo apt-get install -y can-utils postgresql-client
+          sudo modprobe vcan || sudo apt-get install -y "linux-modules-extra-$(uname -r)"
 
       # The whole reason this job exists. Only this needs root: an unprivileged
       # process may open an AF_CAN socket, which is why candump works as a
