@@ -1,4 +1,4 @@
-wiretap-server (0.1.14) UNRELEASED; urgency=medium
+wiretap-server (0.1.14) bookworm; urgency=medium
 
   * The unit is Type=notify with WatchdogSec=30s. systemctl start returns
     once the daemon is up and fails if it refuses to start, and a daemon
