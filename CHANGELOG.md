@@ -92,6 +92,13 @@ All notable changes to this project are documented here. Entries go under
   workspace, with its CI jobs. A Pi runs `wiretap-server` from the `.deb`, or
   as the ApplianceOS app.
 
+### Fixed
+
+- **On Debian 12 a daemon that fails to start retries every 15 s, not every
+  5 s.** bookworm's systemd 252 ignores `RestartSteps` and
+  `RestartMaxDelaySec`, so the unit's first delay is now 15 s; systemd 254 and
+  later still back off to 60 s from there.
+
 ## [0.1.13] — 2026-10-16
 
 Export and import a capture database, rotate the gateway's secrets, and keep

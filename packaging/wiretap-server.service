@@ -60,10 +60,11 @@ TimeoutStopSec=30
 # only if that fails does it exit 75, for this to start it on the change.
 Restart=always
 SuccessExitStatus=75
-RestartSec=5s
+RestartSec=15s
 # A device absent at boot is waited for, but a refused open (a permission, a
 # missing module) fails every start until fixed; one a minute is enough to
-# notice it, and the cap bounds the hole a real crash leaves.
+# notice it, and the cap bounds the hole a real crash leaves. These two need
+# systemd 254: bookworm's 252 ignores them and retries every RestartSec.
 RestartSteps=5
 RestartMaxDelaySec=60s
 # Pinged every 15 s from the runtime, through a slow start, a gateway outage
