@@ -19,6 +19,7 @@ pub const VERSION: &str = wslib_build_id::build_version!();
 pub mod archive;
 pub mod cache;
 pub mod catalogues;
+pub mod cidr;
 pub mod cli;
 pub mod console;
 pub mod control;

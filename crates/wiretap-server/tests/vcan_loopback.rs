@@ -45,11 +45,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use wiretap_model::{Direction, Sample, SourceId};
 use wiretap_server::cache::{FrameCache, SqliteCache};
+use wiretap_server::cidr::Cidr;
 use wiretap_server::pipeline;
 use wiretap_server::settings::{
     Batching, Device, DeviceKind, Forward, LogLevel, Settings, TestPattern,
 };
 use wiretap_server::source::{socketcan as server_can, system_time_to_us, Bitrates};
+use wiretap_server::ui::Source;
 use wslib_can::{CanEvent, CanRead, CanTask};
 use wslib_secret::Secret;
 use wslib_wiretap_protocol::testpattern::{
@@ -134,6 +136,8 @@ fn settings(iface: &str, port: u16, test_pattern: Option<TestPattern>) -> Settin
         devices: vec![Device::can(iface, false, "")],
         host: "127.0.0.1".to_string(),
         port,
+        allowed_clients: Cidr::LOOPBACK.to_vec(),
+        allowed_clients_source: Source::Default,
         bus_offset: 0,
         // On, so the console echo is exercised too: it is a subscriber like
         // any other and has never run either.

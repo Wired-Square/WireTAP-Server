@@ -11,8 +11,9 @@
 //! subscription, the frames it missed are counted and logged, and the capture
 //! side never waits for it.
 
+use std::collections::HashSet;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,6 +28,7 @@ use wslib_can_gvret::{
     encode_timebase, ClientCommand, Decoder, MAX_FRAME_BYTES,
 };
 
+use crate::cidr::Cidr;
 use crate::source::Transmit;
 use crate::status::Connected;
 
@@ -44,6 +46,10 @@ const WRITE_COALESCE: usize = 8 * 1024;
 /// How long to wait after a failed `accept` before trying again, so a
 /// process-wide file-descriptor exhaustion cannot become a spin.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Refused addresses remembered so each is logged once; a scan from more is
+/// forgotten and logged again rather than held without bound.
+const REFUSED_REMEMBERED: usize = 1024;
 
 /// What every client is told about the buses this server exposes.
 #[derive(Debug)]
@@ -80,6 +86,7 @@ impl BusInfo {
 /// The listening socket, and everything a client task is given at accept.
 pub struct Server {
     listener: TcpListener,
+    allowed: Vec<Cidr>,
     buses: Arc<BusInfo>,
     frames: broadcast::Sender<Arc<Sample>>,
     transmits: mpsc::Sender<Transmit>,
@@ -93,12 +100,14 @@ impl Server {
     pub async fn bind(
         host: &str,
         port: u16,
+        allowed: Vec<Cidr>,
         buses: Arc<BusInfo>,
         frames: broadcast::Sender<Arc<Sample>>,
         transmits: mpsc::Sender<Transmit>,
     ) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind((host, port)).await?,
+            allowed,
             buses,
             frames,
             transmits,
@@ -117,8 +126,9 @@ impl Server {
         self.listener.local_addr()
     }
 
-    /// Accept forever, one task per client.
+    /// Accept forever, one task per allowed client.
     pub async fn run(self) {
+        let mut refused = HashSet::<IpAddr>::new();
         loop {
             let (stream, peer) = match self.listener.accept().await {
                 Ok(accepted) => accepted,
@@ -131,6 +141,18 @@ impl Server {
                     continue;
                 }
             };
+            if !self.allowed.iter().any(|n| n.contains(peer.ip())) {
+                if refused.len() == REFUSED_REMEMBERED {
+                    refused.clear();
+                }
+                if refused.insert(peer.ip()) {
+                    warn!(
+                        "Client {peer} refused: not in allowed_clients; \
+                         further attempts from it are not logged"
+                    );
+                }
+                continue;
+            }
             info!("Client {peer} connected");
 
             let client = Client {
@@ -347,9 +369,13 @@ mod tests {
     }
 
     async fn harness(buses: Arc<BusInfo>) -> Harness {
+        harness_allowing(buses, Cidr::LOOPBACK.to_vec()).await
+    }
+
+    async fn harness_allowing(buses: Arc<BusInfo>, allowed: Vec<Cidr>) -> Harness {
         let (frames, _) = broadcast::channel(64);
         let (tx, transmits) = mpsc::channel(8);
-        let server = Server::bind("127.0.0.1", 0, buses, frames.clone(), tx)
+        let server = Server::bind("127.0.0.1", 0, allowed, buses, frames.clone(), tx)
             .await
             .expect("bind an ephemeral port");
         let addr = server.local_addr().expect("bound");
@@ -598,5 +624,24 @@ mod tests {
             us < 5_000_000,
             "a connection seconds old, not the server's uptime: {us}"
         );
+    }
+
+    /// A refused peer is closed before a byte is read, so it is never answered.
+    #[tokio::test]
+    async fn only_an_allowed_peer_is_served() {
+        for (allowed, served) in [("127.0.0.1", true), ("10.0.0.0/8", false)] {
+            let h = harness_allowing(two_buses(), vec![allowed.parse().unwrap()]).await;
+            let mut c = TcpStream::connect(h.addr).await.unwrap();
+            // A refused peer may see the write reset; the read says which.
+            let _ = c.write_all(&[&SYNC[..], &[0xF1, 0x0C]].concat()).await;
+            let mut buf = [0u8; 3];
+            let read = tokio::time::timeout(Duration::from_secs(5), c.read_exact(&mut buf))
+                .await
+                .expect("answered or closed in time");
+            assert_eq!(read.is_ok(), served, "allowing {allowed}: {read:?}");
+            if served {
+                assert_eq!(buf, [0xF1, 0x0C, 0x02]);
+            }
+        }
     }
 }

@@ -12,6 +12,10 @@ wiretap-server (0.1.14) UNRELEASED; urgency=medium
   * The catalogue cache files are 0600, where they were 0644.
   * A daemon that fails to start is restarted after 15 s, where it was 5 s;
     on systemd 254 and later the delay still grows to 60 s.
+  * GVRET accepts clients from loopback only. Before upgrading, add
+    the network SavvyCAN or the desktop connects from to [server]
+    allowed_clients in /etc/wiretap-server/wiretap-server.toml, e.g.
+    allowed_clients = ["127.0.0.0/8", "::1/128", "192.168.1.0/24"].
   * Install and restart.
 
  -- Alex Ferrara <alex@wiredsquare.com>  Fri, 30 Oct 2026 18:29:26 +1100

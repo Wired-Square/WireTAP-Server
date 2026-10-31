@@ -25,9 +25,10 @@ use wslib_wiretap_catalogue::rtu_rules;
 use wslib_wiretap_protocol::ingest::{self as proto, valid_daemon_id, valid_database_name};
 
 use crate::catalogues::Catalogues;
+use crate::cidr::Cidr;
 use crate::cli::Cli;
 use crate::source::bus_for_index;
-use crate::ui::UiConfig;
+use crate::ui::{Source, UiConfig};
 
 /// Apply a file value over a flag value, where the file speaks.
 fn over<T>(dst: &mut T, src: Option<T>) {
@@ -672,6 +673,9 @@ pub struct Settings {
     pub devices: Vec<Device>,
     pub host: String,
     pub port: u16,
+    /// From the file or a flag only: a UI cannot widen who may transmit.
+    pub allowed_clients: Vec<Cidr>,
+    pub allowed_clients_source: Source,
     pub bus_offset: u8,
     pub echo_console: bool,
     pub colour: bool,
@@ -742,6 +746,7 @@ pub enum SettingsError {
     },
     BadDatabase(String),
     BadDaemonId(String),
+    BadAllowedClient(String),
 }
 
 impl fmt::Display for SettingsError {
@@ -771,6 +776,7 @@ impl fmt::Display for SettingsError {
                 "database name {d:?} is not what the gateway accepts: \
                  a lowercase letter, then lowercase letters, digits or _, at most 63"
             ),
+            Self::BadAllowedClient(why) => write!(f, "allowed_clients: {why}"),
             Self::BadDaemonId(id) if id.is_empty() => write!(
                 f,
                 "[forward] daemon_id defaults to the host's short name, and this host has \
@@ -957,10 +963,13 @@ impl Settings {
             warnings.push(Warning::RetiredFlags(retired));
         }
 
+        let (allowed_clients, allowed_clients_source) = allowed_clients(cli, file)?;
         let mut s = Settings {
             devices: Vec::new(),
             host: cli.host.clone(),
             port: cli.port,
+            allowed_clients,
+            allowed_clients_source,
             bus_offset: cli.bus_offset,
             echo_console: cli.echo_console,
             colour: cli.colour,
@@ -1324,6 +1333,23 @@ impl Settings {
         }
         r.extend([
             ("gvret listen", format!("{}:{}", self.host, self.port)),
+            (
+                "gvret clients",
+                format!(
+                    "{} ({})",
+                    match &self.allowed_clients[..] {
+                        [] => "none, every client is refused".into(),
+                        networks => networks
+                            .iter()
+                            .map(Cidr::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    },
+                    self.allowed_clients_source
+                        .place(None)
+                        .unwrap_or_else(|| self.allowed_clients_source.name().into())
+                ),
+            ),
             ("bus offset", self.bus_offset.to_string()),
             ("direction", self.default_dir.to_string()),
             (
@@ -1441,6 +1467,26 @@ impl Settings {
             .map(|(label, value)| format!("{label:<16}{value}\n"))
             .collect()
     }
+}
+
+/// The file's list, else the flag's, else loopback only.
+fn allowed_clients(
+    cli: &Cli,
+    file: Option<&FileConfig>,
+) -> Result<(Vec<Cidr>, Source), SettingsError> {
+    let (given, source) = match (
+        file.and_then(|f| f.server.allowed_clients.clone()),
+        &cli.allowed_clients,
+    ) {
+        (Some(list), _) => (list, Source::File),
+        (None, Some(flag)) => (parse_ifaces(flag), Source::Flag("allowed_clients")),
+        (None, None) => return Ok((Cidr::LOOPBACK.to_vec(), Source::Default)),
+    };
+    given
+        .iter()
+        .map(|c| c.parse().map_err(SettingsError::BadAllowedClient))
+        .collect::<Result<_, _>>()
+        .map(|networks| (networks, source))
 }
 
 fn parse_direction(s: &str) -> Result<Direction, SettingsError> {
@@ -1859,6 +1905,51 @@ mod tests {
             "{:?}",
             r.warnings
         );
+    }
+
+    #[test]
+    fn gvret_clients_are_loopback_unless_the_file_or_a_flag_says() {
+        let clients = |args: &[&str], toml| {
+            let s = resolve(args, toml).unwrap().settings;
+            let row = s
+                .rows(&Catalogues::default())
+                .into_iter()
+                .find(|(l, _)| *l == "gvret clients");
+            (s.allowed_clients, row.expect("a row").1)
+        };
+        let flag = ["--allowed-clients", "10.0.0.0/8, 192.168.1.7"];
+        let file = Some("[server]\nallowed_clients = [\"fd00::/8\"]\n");
+
+        assert_eq!(clients(&[], None).1, "127.0.0.0/8, ::1/128 (default)");
+        assert_eq!(
+            clients(&flag, None).1,
+            "10.0.0.0/8, 192.168.1.7/32 (flag --allowed-clients)"
+        );
+        assert_eq!(
+            clients(&flag, file).1,
+            "fd00::/8 (file)",
+            "file wins over the flag"
+        );
+        assert_eq!(
+            clients(&[], Some("[server]\nallowed_clients = []\n")),
+            (vec![], "none, every client is refused (file)".into())
+        );
+    }
+
+    #[test]
+    fn a_bad_gvret_client_range_is_refused_from_either_source() {
+        let from_file = resolve(
+            &[],
+            Some("[server]\nallowed_clients = [\"192.168.1.5/24\"]\n"),
+        );
+        assert!(
+            matches!(&from_file, Err(SettingsError::BadAllowedClient(why)) if why.contains("192.168.1.0/24")),
+            "{from_file:?}"
+        );
+        assert!(matches!(
+            resolve(&["--allowed-clients", "10.0.0.0/33"], None),
+            Err(SettingsError::BadAllowedClient(_))
+        ));
     }
 
     #[test]
