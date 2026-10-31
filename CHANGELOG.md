@@ -5,6 +5,8 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+## [0.1.14] — 2026-10-31
+
 ### Changed
 
 - **GVRET accepts clients from loopback only by default.** Anyone who could
@@ -1059,7 +1061,12 @@ through its own Compose stack.
   20 hours: 83.7 M frames, nothing dropped, no restarts, and a byte-identical
   comparison against the Python implementation this replaces.
 
-[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.14...HEAD
+[0.1.14]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.12...v0.1.13
+[0.1.12]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.11...v0.1.12
+[0.1.11]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/Wired-Square/WireTAP-Server/compare/v0.1.6...v0.1.7
