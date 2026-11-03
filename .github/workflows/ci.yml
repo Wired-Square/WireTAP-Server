@@ -26,7 +26,7 @@ env:
   # A fresh checkout cannot reuse incremental output, and it is roughly 40% of
   # the target directory — so it is cache weight and slower codegen for nothing.
   CARGO_INCREMENTAL: 0
-  WSLIB_APPLIANCE_XTASK: 0.2.0
+  WSLIB_APPLIANCE_XTASK: 0.2.2
 
 jobs:
   gates:
