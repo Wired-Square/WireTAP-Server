@@ -31,8 +31,8 @@ wslib-file-atomic = { version = "0.1.5", registry = "wired-square" }
 # The WireTAP codecs and types, shared with the desktop. Two members on
 # different versions of one would be two protocols on one link.
 wslib-wiretap-protocol = { version = "0.2.1", registry = "wired-square" }
-wslib-wiretap-catalogue = { version = "0.1", registry = "wired-square" }
-wslib-wiretap-gateway = { version = "0.1", registry = "wired-square" }
+wslib-wiretap-catalogue = { version = "0.2", registry = "wired-square" }
+wslib-wiretap-gateway = { version = "0.2", registry = "wired-square" }
 wslib-can = { version = "0.1", registry = "wired-square" }
 wslib-can-gvret = { version = "0.1", registry = "wired-square" }
 wslib-can-socketcan = { version = "0.1", registry = "wired-square" }
@@ -73,7 +73,7 @@ postgres-protocol = "0.6.6"
 rusqlite = "0.40"
 
 # --- serialisation and encoding ---
-serde = { version = "1.0.225", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.85"
 toml = "1"
 chrono = "0.4.39"

@@ -2607,6 +2607,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wslib-quantity"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "d11568f220b9ae6a11cac1b4e45ea02fcb5699e9abc8dfa893a2dad3464bcad7"
+dependencies = [
+ "rust_decimal",
+]
+
+[[package]]
 name = "wslib-secret"
 version = "0.1.5"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
@@ -2672,9 +2681,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-wiretap-catalogue"
-version = "0.1.0"
+version = "0.2.0"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "21c95c5443508a4213fa8f0ac9a6a2ef706591867d6704af97887dc1b8a49d24"
+checksum = "e4d75d2cca060c3de894f834dc8943e96d381cc04e927afc0b35ea896da99fbe"
 dependencies = [
  "can-dbc",
  "rust_decimal",
@@ -2686,15 +2695,16 @@ dependencies = [
  "wslib-bits",
  "wslib-checksum",
  "wslib-modbus",
+ "wslib-quantity",
  "wslib-serial",
  "wslib-wiretap-protocol",
 ]
 
 [[package]]
 name = "wslib-wiretap-gateway"
-version = "0.1.0"
+version = "0.2.1"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "3b5fed2000df81a8a8d689ef662268543726abd1871afc3ec04d4833d8f4d6c6"
+checksum = "a6e03b9a71f426e1eb8c0f446428a47fcd2c7741963a5828e274e25f298bf1ff"
 dependencies = [
  "serde",
  "wslib-wiretap-protocol",
