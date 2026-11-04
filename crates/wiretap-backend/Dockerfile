@@ -69,11 +69,10 @@ ENV WSLIB_BUILD_ID=${WSLIB_BUILD_ID}
 # re-resolve is a build that can drift off what was committed and tested.
 #
 # The wslib-* crates come from the registry mirror, wherever this runs: the
-# image does not trust the CA that signs Forgejo. The token is a BuildKit
-# secret, so it reaches no layer, and the two configs are mounted, not copied.
+# image does not trust the CA that signs Forgejo. The two configs are
+# mounted, not copied.
 RUN --mount=type=bind,source=.cargo/config.toml,target=/src/.cargo/config.toml \
     --mount=type=bind,source=.cargo/mirror.toml,target=/usr/local/cargo/config.toml \
-    --mount=type=secret,id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN,required=true \
     cargo build --release --locked -p wiretap-backend
 
 # --- runtime ---

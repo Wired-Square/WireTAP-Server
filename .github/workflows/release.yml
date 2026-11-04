@@ -117,10 +117,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      # The one place this workflow names the secret: Actions holds only the
-      # mirror's read token, and cannot reach Forgejo.
-      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: &mirror-token ${{ secrets.CARGO_REGISTRIES_WIRED_SQUARE_TOKEN }}
     steps:
       - uses: actions/checkout@v7
 
@@ -175,8 +171,6 @@ jobs:
       # with it.
       contents: read
       packages: write
-    env:
-      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
     strategy:
       fail-fast: false
       matrix:
@@ -213,7 +207,6 @@ jobs:
             --platform "linux/${{ matrix.arch }}" \
             --file crates/wiretap-backend/Dockerfile \
             --build-arg "WSLIB_BUILD_ID=g${GITHUB_SHA:0:12}" \
-            --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN \
             --output "type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true" \
             --metadata-file "${RUNNER_TEMP}/metadata.json" \
             .
@@ -307,8 +300,6 @@ jobs:
       # for the `wired-square` registry.
       - name: Install wslib-appliance-xtask
         if: matrix.arch == 'arm64'
-        env:
-          CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
         run: cargo install --config .cargo/config.toml wslib-appliance-xtask --locked --version =0.2.3 --registry wired-square
 
       - uses: actions/setup-node@v5
@@ -317,24 +308,11 @@ jobs:
           cache: npm
           cache-dependency-path: apps/wiretap-server/frontend/package-lock.json
 
-      # The kit comes from the registry's npm mirror, on the crates' token,
-      # which is gone again before any npm script runs.
-      - name: Read the kit from the registry's mirror
-        env:
-          MIRROR_TOKEN: *mirror-token
-        run: printf '//mirror.wiredsquare.com/npm/:_authToken=%s\n' "${MIRROR_TOKEN#Bearer }" > "$HOME/.npmrc"
-
       - name: Install the server app's browser half
         working-directory: apps/wiretap-server/frontend
         run: npm ci
 
-      - name: Forget the mirror's token
-        run: rm "$HOME/.npmrc"
-
-      # Here, not on the job, so no npm script ever sees it.
       - name: Build both apps
-        env:
-          CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
         run: |
           apps/wiretap-gateway/make-image.sh ${{ matrix.arch }}
           apps/wiretap-server/make-image.sh ${{ matrix.arch }}

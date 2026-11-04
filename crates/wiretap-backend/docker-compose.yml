@@ -36,9 +36,6 @@ services:
       #   WSLIB_BUILD_ID=$(../../packaging/build-id.sh) docker compose up -d --build
       args:
         WSLIB_BUILD_ID: ${WSLIB_BUILD_ID:-}
-      # The registry mirror's read token: ../../scripts/cargo-mirror-token.sh.
-      secrets:
-        - cargo-mirror-token
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       WIRETAP_ADMIN_KEY: ${WIRETAP_ADMIN_KEY:-}
@@ -74,7 +71,3 @@ volumes:
   pgdata:
   pgbackrest-repo:
   pgsocket:
-
-secrets:
-  cargo-mirror-token:
-    environment: CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN

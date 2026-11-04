@@ -49,16 +49,10 @@ host, then:
 ```bash
 docker build -f crates/wiretap-backend/Dockerfile \
   --build-arg "WSLIB_BUILD_ID=$(packaging/build-id.sh)" \
-  --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN \
   -t wiretap-backend:latest .
 ```
 Run it from the repo root — `wiretap-backend` is a workspace member, so cargo
 needs the root `Cargo.toml` and `Cargo.lock`, and the context must include them.
-
-`--secret` is the read token of the private Cargo registry's mirror, which the
-build fetches the `wslib-*` crates from; it reaches no image layer. Export
-`CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN` first, or take it from
-`~/.cargo/credentials.toml` with `scripts/cargo-mirror-token.sh`.
 
 `--build-arg` is what lets the image name the commit it came from, on
 `/v1/health` and in its `org.opencontainers.image.revision` label — a container
@@ -77,7 +71,6 @@ the target's architecture, then stream it over SSH:
 ```bash
 docker build --platform linux/amd64 -f crates/wiretap-backend/Dockerfile \
   --build-arg "WSLIB_BUILD_ID=$(packaging/build-id.sh)" \
-  --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN \
   -t wiretap-backend:latest .
 docker save wiretap-backend:latest | ssh root@nas 'docker load'
 ```

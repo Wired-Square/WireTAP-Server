@@ -15,22 +15,18 @@ it for nothing. Each workspace has its own `Cargo.lock` and its own
 ## The private registry
 
 The root and `apps/wiretap-server/` take the `wslib-*` crates from the
-`wired-square` Cargo registry on Forgejo, which `.cargo/config.toml` declares,
-so a fork cannot build either. Cargo reads its read token from
-`CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`, as `Bearer <token>`, or from
-`~/.cargo/credentials.toml`.
+`wired-square` Cargo registry on Forgejo, which `.cargo/config.toml` declares.
+Cargo reads its read token from `CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`, as
+`Bearer <token>`, or from `~/.cargo/credentials.toml`.
 
-Off the network, Forgejo is out of reach and a read-only mirror stands in:
-[`.cargo/mirror.toml`](../.cargo/mirror.toml) in `$CARGO_HOME/config.toml`
-replaces the Forgejo source with it, and its token is
-`CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN`. `Cargo.lock` records Forgejo
-either way. The gateway image always reads the mirror, with that token as the
-BuildKit secret `cargo-mirror-token`;
-[`scripts/cargo-mirror-token.sh`](../scripts/cargo-mirror-token.sh) finds it.
+Off the network, or in a fork, Forgejo is out of reach and a read-only mirror
+stands in: [`.cargo/mirror.toml`](../.cargo/mirror.toml) in
+`$CARGO_HOME/config.toml` replaces the Forgejo source with it, and needs no
+token. `Cargo.lock` records Forgejo either way. The gateway image always reads
+the mirror.
 
 The server app's browser half takes the `@wired-square/*` packages from the
-mirror's npm half, which `apps/wiretap-server/frontend/.npmrc` declares; the same token goes
-in your own `~/.npmrc` as `//mirror.wiredsquare.com/npm/:_authToken=<token>`.
+mirror's npm half, which `apps/wiretap-server/frontend/.npmrc` declares.
 
 The root's `.cargo/config.toml` still applies under `apps/wiretap-server/`,
 since cargo reads config from parent directories, so a

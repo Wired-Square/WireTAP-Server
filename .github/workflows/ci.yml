@@ -32,10 +32,6 @@ jobs:
   gates:
     name: Gates
     runs-on: ubuntu-latest
-    env:
-      # The one place this workflow names the secret: Actions holds only the
-      # mirror's read token, and cannot reach Forgejo.
-      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: &mirror-token ${{ secrets.CARGO_REGISTRIES_WIRED_SQUARE_TOKEN }}
     steps:
       - uses: actions/checkout@v7
 
@@ -152,7 +148,6 @@ jobs:
       CANGEN_FRAMES: "1000"
       # Eight hex digits is how cansend is told an id is 29-bit.
       EXTENDED_ID: "01ABCDEF"
-      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
 
     steps:
       - uses: actions/checkout@v7
@@ -384,8 +379,6 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    env:
-      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
     steps:
       - uses: actions/checkout@v7
       - *cargo-mirror
@@ -463,8 +456,6 @@ jobs:
   image:
     name: Gateway image
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
     steps:
       - uses: actions/checkout@v7
 
@@ -477,7 +468,6 @@ jobs:
           docker buildx build \
             --file crates/wiretap-backend/Dockerfile \
             --build-arg "WSLIB_BUILD_ID=g${GITHUB_SHA:0:12}" \
-            --secret id=cargo-mirror-token,env=CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN \
             --output type=cacheonly \
             .
 
@@ -486,8 +476,6 @@ jobs:
   server-ui:
     name: Server UI gates
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
     defaults:
       run:
         working-directory: apps/wiretap-server
@@ -557,20 +545,8 @@ jobs:
           cache: npm
           cache-dependency-path: apps/wiretap-server/frontend/package-lock.json
 
-      # The kit comes from the registry's npm mirror, on the crates' token,
-      # which is gone again before any npm script runs.
-      - &npm-mirror
-        name: Read the kit from the registry's mirror
-        env:
-          MIRROR_TOKEN: *mirror-token
-        run: printf '//mirror.wiredsquare.com/npm/:_authToken=%s\n' "${MIRROR_TOKEN#Bearer }" > "$HOME/.npmrc"
-
       - name: Install exactly the lockfile
         run: npm ci
-
-      - &npm-forget
-        name: Forget the mirror's token
-        run: rm "$HOME/.npmrc"
 
       - name: Typecheck, test and build
         run: npm run ci
@@ -600,16 +576,9 @@ jobs:
           cache: npm
           cache-dependency-path: apps/wiretap-server/frontend/package-lock.json
 
-      - *npm-mirror
-
       - name: Install the browser half's lockfile
         working-directory: apps/wiretap-server/frontend
         run: npm ci
 
-      - *npm-forget
-
-      # Here, not on the job, so no npm script ever sees it.
       - name: Build it, keep nothing
-        env:
-          CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN: *mirror-token
         run: apps/wiretap-server/make-image.sh amd64

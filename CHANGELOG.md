@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Changed
+
+- **The registry mirror needs no token.** The gateway image builds without a
+  BuildKit secret, `docker compose up --build` without exporting one, and the
+  server app's `npm ci` without an `~/.npmrc` entry for the mirror; the
+  script that found the token is gone. Forgejo itself still takes
+  `CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`.
+
 ## [0.1.14] — 2026-10-31
 
 ### Changed
