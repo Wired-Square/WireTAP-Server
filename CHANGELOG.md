@@ -13,6 +13,14 @@ All notable changes to this project are documented here. Entries go under
   `wslib-auth`. A field holding a Unicode format or line-separator character,
   such as a zero-width space, is now refused with a 400, as the chassis refuses
   it.
+- **Wrong API keys and ingest tokens are limited per address**, to five in
+  fifteen minutes, by `wslib-auth`'s `Attempts`. Past that the gateway's HTTP
+  API answers 429 with `Retry-After`, even to the right key, and a HELLO to the
+  gateway's ingest or the daemon's is refused as a bad token and logged. A right
+  key clears its address's count. The gateway counts its API and its ingest
+  together, in memory, so a restart forgets them. Clients behind one NAT address
+  share a count, so one with a stale key can lock the others out for up to 15
+  minutes.
 
 ## [0.1.14] — 2026-10-31
 

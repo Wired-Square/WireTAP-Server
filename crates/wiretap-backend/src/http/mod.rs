@@ -284,10 +284,19 @@ async fn auth_mw(
     State(state): State<St>,
     mut req: Request,
     next: Next,
-) -> Result<Response, ApiError> {
+) -> Result<Response, Unauthenticated> {
     let info = match req.extensions().get::<OnAppSocket>() {
         Some(&OnAppSocket { from_console }) => console_caller(from_console, req.headers())?,
-        None => key_caller(&state, req.headers()).await?,
+        None => {
+            let peer = req
+                .extensions()
+                .get::<ConnectInfo<std::net::SocketAddr>>()
+                .map_or(
+                    std::net::Ipv6Addr::UNSPECIFIED.into(),
+                    |ConnectInfo(addr)| addr.ip(),
+                );
+            key_caller(&state, peer, req.headers()).await?
+        }
     };
     req.extensions_mut().insert(info.clone());
     let mut response = next.run(req).await;
@@ -297,20 +306,50 @@ async fn auth_mw(
     Ok(response)
 }
 
-async fn key_caller(state: &St, headers: &axum::http::HeaderMap) -> Result<KeyInfo, ApiError> {
+enum Unauthenticated {
+    Refused(ApiError),
+    TooManyAttempts(wslib_auth::TooManyAttempts),
+}
+
+impl From<ApiError> for Unauthenticated {
+    fn from(refused: ApiError) -> Self {
+        Self::Refused(refused)
+    }
+}
+
+impl IntoResponse for Unauthenticated {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Refused(refused) => refused.into_response(),
+            Self::TooManyAttempts(refusal) => {
+                let seconds = refusal.retry_after.as_millis().div_ceil(1000).to_string();
+                (
+                    [(header::RETRY_AFTER, seconds)],
+                    ApiError(StatusCode::TOO_MANY_REQUESTS, refusal.to_string()),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+async fn key_caller(
+    state: &St,
+    peer: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+) -> Result<KeyInfo, Unauthenticated> {
+    let unauthorised = |msg: &str| ApiError(StatusCode::UNAUTHORIZED, msg.into()).into();
     let key = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "missing bearer token".into(),
-        ))?;
+        .ok_or_else(|| unauthorised("missing bearer token"))?;
     state
         .keys
-        .validate(key)
+        .validate_from(peer, key)
         .await
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid API key".into()))
+        .map_err(Unauthenticated::TooManyAttempts)?
+        .ok_or_else(|| unauthorised("invalid API key"))
 }
 
 /// Only the console's assertion counts on the app socket: anybody else there is
@@ -2468,6 +2507,23 @@ mod tests {
         ] {
             assert_eq!(request(method, path, None, None).await.0, 401, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn after_five_wrong_keys_even_the_right_one_is_told_when_to_retry() {
+        let at = gateway(db::tests::unreachable_databases(false)).await;
+        let whoami = |key| exchange(at, "GET", "/v1/whoami", Some(key), "text/plain", b"");
+        for _ in 0..5 {
+            assert_eq!(whoami("wrong").await.0, 401);
+        }
+        let (status, head, body) = whoami("bootstrap").await;
+        assert_eq!(status, 429, "{body}");
+        let retry_after: u64 = head
+            .lines()
+            .find_map(|line| line.strip_prefix("retry-after: "))
+            .and_then(|seconds| seconds.parse().ok())
+            .expect(&head);
+        assert!((14 * 60..=15 * 60).contains(&retry_after), "{head}");
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@
 pub mod writer;
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,7 +116,7 @@ trait Gateway {
 /// One client's connection to this gateway.
 struct Connection<'a> {
     server: &'a IngestServer,
-    peer: &'a str,
+    peer: SocketAddr,
     authed: Option<Session>,
     reassigned: Arc<Notify>,
     /// The blob last served: a daemon pulls one a chunk at a time.
@@ -177,7 +178,7 @@ impl Gateway for Connection<'_> {
 /// `reassigned` says its catalogue assignment changed.
 async fn serve(
     mut stream: TcpStream,
-    peer: &str,
+    peer: SocketAddr,
     mut machine: ServerSession,
     gateway: &mut impl Gateway,
     reassigned: &Notify,
@@ -251,9 +252,8 @@ impl IngestServer {
                 Ok((stream, peer)) => {
                     let server = self.clone();
                     tokio::spawn(async move {
-                        let peer = peer.to_string();
                         tracing::info!("ingest client {peer} connected");
-                        if let Err(e) = server.handle_client(stream, &peer).await {
+                        if let Err(e) = server.handle_client(stream, peer).await {
                             tracing::debug!("ingest client {peer}: {e}");
                         }
                         tracing::info!("ingest client {peer} disconnected");
@@ -264,7 +264,7 @@ impl IngestServer {
         }
     }
 
-    async fn handle_client(&self, stream: TcpStream, peer: &str) -> Result<(), String> {
+    async fn handle_client(&self, stream: TcpStream, peer: SocketAddr) -> Result<(), String> {
         let reassigned = Arc::new(Notify::new());
         let mut conn = Connection {
             server: self,
@@ -293,13 +293,20 @@ impl IngestServer {
     async fn handle_hello(
         &self,
         hello: &Hello,
-        peer: &str,
+        peer: SocketAddr,
         reassigned: Arc<Notify>,
     ) -> Result<(Session, Vec<Assignment>), u8> {
         let key = String::from_utf8_lossy(&hello.token).into_owned();
-        let Some(info) = self.keys.validate(&key).await else {
-            tracing::warn!("ingest client {peer} failed auth");
-            return Err(HELLO_BAD_AUTH);
+        let info = match self.keys.validate_from(peer.ip(), &key).await {
+            Ok(Some(info)) => info,
+            Ok(None) => {
+                tracing::warn!("ingest client {peer} failed auth");
+                return Err(HELLO_BAD_AUTH);
+            }
+            Err(refusal) => {
+                tracing::warn!("ingest client {peer} refused: {refusal}");
+                return Err(HELLO_BAD_AUTH);
+            }
         };
         if !info.role.allows_ingest() {
             tracing::warn!("ingest client {peer} key '{}' lacks ingest role", info.name);
@@ -376,7 +383,12 @@ impl IngestServer {
     /// Record a daemon's devices and read their assignments. The meta
     /// database failing costs the daemon its assignments, not its session:
     /// it keeps the catalogues it has and archives on.
-    async fn daemon_hello(&self, hello: &Hello, database: &str, peer: &str) -> Vec<Assignment> {
+    async fn daemon_hello(
+        &self,
+        hello: &Hello,
+        database: &str,
+        peer: SocketAddr,
+    ) -> Vec<Assignment> {
         let id = &hello.daemon_id;
         let read = async {
             self.catalogs
@@ -480,7 +492,7 @@ mod tests {
 
     async fn hello_status(dbs: Databases, database: &str) -> u8 {
         let hello = hello(PROTO_VERSION, database);
-        let peer = "192.0.2.10:40000";
+        let peer = "192.0.2.10:40000".parse().unwrap();
         match server(dbs).handle_hello(&hello, peer, Arc::default()).await {
             Ok(_) => HELLO_OK,
             Err(status) => status,
@@ -492,7 +504,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            let _ = server.handle_client(stream, &peer.to_string()).await;
+            let _ = server.handle_client(stream, peer).await;
         });
         TcpStream::connect(addr).await.unwrap()
     }
@@ -563,14 +575,14 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let notify = reassigned.clone();
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, peer) = listener.accept().await.unwrap();
             let machine = ServerSession::new(ServerConfig {
                 versions: 2..=3,
                 max_records: MAX_BATCH_RECORDS,
                 short_batch: ShortBatch::NackSeqZero,
                 idle_limit: None,
             });
-            let _ = serve(stream, "test", machine, &mut fake, &notify).await;
+            let _ = serve(stream, peer, machine, &mut fake, &notify).await;
         });
         (TcpStream::connect(addr).await.unwrap(), reassigned)
     }
@@ -721,7 +733,8 @@ mod tests {
     async fn a_meta_database_failure_at_hello_answers_no_assignments() {
         let server = server(unreachable_databases(true));
         let hello = daemon_hello("bench", vec![device(0, "can0")]);
-        let assignments = server.daemon_hello(&hello, "wiretap", "test").await;
+        let peer = "192.0.2.10:40000".parse().unwrap();
+        let assignments = server.daemon_hello(&hello, "wiretap", peer).await;
         assert!(assignments.is_empty());
     }
 
@@ -790,6 +803,31 @@ mod tests {
     async fn an_invalid_database_name_at_hello_is_a_bad_database() {
         let status = hello_status(unreachable_databases(true), "no spaces").await;
         assert_eq!(status, HELLO_BAD_DATABASE);
+    }
+
+    #[tokio::test]
+    async fn after_five_wrong_keys_an_address_is_refused_even_the_right_one() {
+        let server = server(unreachable_databases(true));
+        let status = |token: &'static [u8], peer: &'static str| {
+            let hello = Hello::v2(token, "no spaces", false);
+            let server = &server;
+            async move {
+                let peer = peer.parse().unwrap();
+                match server.handle_hello(&hello, peer, Arc::default()).await {
+                    Ok(_) => HELLO_OK,
+                    Err(status) => status,
+                }
+            }
+        };
+        for _ in 0..5 {
+            assert_eq!(status(b"wrong", "192.0.2.1:1").await, HELLO_BAD_AUTH);
+        }
+        assert_eq!(status(b"bootstrap", "192.0.2.1:2").await, HELLO_BAD_AUTH);
+        assert_eq!(
+            status(b"bootstrap", "192.0.2.2:1").await,
+            HELLO_BAD_DATABASE,
+            "another address got past the key"
+        );
     }
 
     /// Before anything asks PostgreSQL, which is down here.

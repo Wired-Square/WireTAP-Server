@@ -2500,6 +2500,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiretap-model",
+ "wslib-auth",
  "wslib-backoff",
  "wslib-build-id",
  "wslib-can",

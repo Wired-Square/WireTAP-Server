@@ -5,6 +5,7 @@
 //! itself out.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
+use wslib_auth::{Attempts, TooManyAttempts};
 
 use crate::db::Databases;
 use crate::secrets;
@@ -207,6 +209,9 @@ pub struct KeyStore {
     bootstrap: Arc<std::sync::RwLock<Bootstrap>>,
     /// key_hash -> KeyInfo for enabled keys.
     cache: Arc<RwLock<HashMap<String, KeyInfo>>>,
+    /// Shared by the HTTP API and ingest, so a guesser gains nothing by
+    /// switching between them.
+    wrong_keys: Attempts<IpAddr>,
 }
 
 impl KeyStore {
@@ -219,6 +224,7 @@ impl KeyStore {
                 configured,
             })),
             cache: Arc::new(RwLock::new(HashMap::new())),
+            wrong_keys: Attempts::default(),
         }
     }
 
@@ -354,6 +360,21 @@ impl KeyStore {
         let info = self.cache.read().await.get(&h).cloned()?;
         self.touch_last_used(info.id);
         Some(info)
+    }
+
+    /// As [`validate`](Self::validate), refused once `peer` has presented too
+    /// many wrong keys, even when this one is right.
+    pub async fn validate_from(
+        &self,
+        peer: IpAddr,
+        key: &str,
+    ) -> Result<Option<KeyInfo>, TooManyAttempts> {
+        let attempt = self.wrong_keys.admit(peer)?;
+        let info = self.validate(key).await;
+        if info.is_some() {
+            attempt.succeeded();
+        }
+        Ok(info)
     }
 
     /// Fire-and-forget last_used update (best effort, never blocks auth).
@@ -525,6 +546,30 @@ pub(crate) mod tests {
         );
         assert_eq!(standing("n", &[row("c", None)]), Standing::Unknown);
         assert_eq!(standing("n", &[]), Standing::Unknown);
+    }
+
+    #[tokio::test]
+    async fn an_address_is_refused_after_five_wrong_keys_and_a_right_one_clears_its_count() {
+        let store = KeyStore::new(
+            crate::db::tests::unreachable_databases(false),
+            Some("right"),
+        );
+        let (guesser, other) = ([192, 0, 2, 1].into(), [192, 0, 2, 2].into());
+        let validated = |peer, key| {
+            let store = store.clone();
+            async move { store.validate_from(peer, key).await.map(|k| k.is_some()) }
+        };
+
+        for _ in 0..4 {
+            assert_eq!(validated(guesser, "wrong").await, Ok(false));
+        }
+        assert_eq!(validated(guesser, "right").await, Ok(true));
+        for _ in 0..5 {
+            assert_eq!(validated(guesser, "wrong").await, Ok(false));
+        }
+        let refused = validated(guesser, "right").await.unwrap_err();
+        assert!(refused.retry_after > std::time::Duration::from_secs(14 * 60));
+        assert_eq!(validated(other, "right").await, Ok(true));
     }
 
     #[tokio::test]
