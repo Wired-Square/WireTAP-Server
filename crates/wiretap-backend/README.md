@@ -38,7 +38,6 @@ WireTAP desktop app, not microcontroller capture devices, not the Raspberry Pi
 cd crates/wiretap-backend
 cp .env.example .env
 # edit .env: set POSTGRES_PASSWORD and WIRETAP_ADMIN_KEY (openssl rand -hex 32)
-export CARGO_REGISTRIES_WIRED_SQUARE_MIRROR_TOKEN="$(../../scripts/cargo-mirror-token.sh)"
 docker compose up -d --build
 curl -fsS http://localhost:8423/v1/health      # {"status":"ok",...}
 open http://localhost:8423/admin               # sign in with WIRETAP_ADMIN_KEY
@@ -47,9 +46,8 @@ open http://localhost:8423/admin               # sign in with WIRETAP_ADMIN_KEY
 The default capture database (`wiretap`) and the API-key store are created on
 first start.
 
-The build fetches the `wslib-*` crates from the private Cargo registry's mirror,
-with its read token as a build secret: the variable, or the
-`wired-square-mirror` token in `~/.cargo/credentials.toml`.
+The build fetches the `wslib-*` crates from the private Cargo registry's
+read-only mirror, which needs no token.
 
 `/v1/health` reports `0.1.0 (unknown)` for an image built this way, because a
 container build has no `.git` to read. That is honest and fine for development.

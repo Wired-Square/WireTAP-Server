@@ -7,6 +7,11 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **The registry mirror needs no token.** The gateway image builds without a
+  BuildKit secret, `docker compose up --build` without exporting one, and the
+  server app's `npm ci` without an `~/.npmrc` entry for the mirror; the
+  script that found the token is gone. Forgejo itself still takes
+  `CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`.
 - **The gateway reads a console's `Appliance-Identity` with
   `wslib-appliance-types`**, the chassis's own parser, in place of its copy,
   and takes the five-minute window for a recently confirmed password from
