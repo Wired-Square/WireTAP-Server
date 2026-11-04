@@ -356,17 +356,17 @@ impl KeyStore {
         Some(info)
     }
 
-    /// As [`validate`](Self::validate), refused once `peer` has presented too
-    /// many wrong keys, even when this one is right.
+    /// As [`validate`](Self::validate), counting wrong keys per `peer` and
+    /// refusing one past the limit. A right key always gets in and leaves the
+    /// count alone: behind Docker's proxy every client shares one address.
     pub async fn validate_from(
         &self,
         peer: IpAddr,
         key: &str,
     ) -> Result<Option<KeyInfo>, TooManyAttempts> {
-        let attempt = self.wrong_keys.admit(peer)?;
         let info = self.validate(key).await;
-        if info.is_some() {
-            attempt.succeeded();
+        if info.is_none() {
+            let _wrong = self.wrong_keys.admit(peer)?;
         }
         Ok(info)
     }
@@ -543,7 +543,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_address_is_refused_after_five_wrong_keys_and_a_right_one_clears_its_count() {
+    async fn past_five_wrong_keys_an_address_is_refused_a_wrong_one_but_never_the_right_one() {
         let store = KeyStore::new(
             crate::db::tests::unreachable_databases(false),
             Some("right"),
@@ -554,16 +554,17 @@ pub(crate) mod tests {
             async move { store.validate_from(peer, key).await.map(|k| k.is_some()) }
         };
 
-        for _ in 0..4 {
-            assert_eq!(validated(guesser, "wrong").await, Ok(false));
-        }
-        assert_eq!(validated(guesser, "right").await, Ok(true));
         for _ in 0..5 {
             assert_eq!(validated(guesser, "wrong").await, Ok(false));
         }
-        let refused = validated(guesser, "right").await.unwrap_err();
+        let refused = validated(guesser, "wrong").await.unwrap_err();
         assert!(refused.retry_after > std::time::Duration::from_secs(14 * 60));
-        assert_eq!(validated(other, "right").await, Ok(true));
+        assert_eq!(validated(guesser, "right").await, Ok(true));
+        assert!(
+            validated(guesser, "wrong").await.is_err(),
+            "the right key cleared the count"
+        );
+        assert_eq!(validated(other, "wrong").await, Ok(false));
     }
 
     #[tokio::test]

@@ -19,13 +19,14 @@ All notable changes to this project are documented here. Entries go under
   such as a zero-width space, is now refused with a 400, as the chassis refuses
   it.
 - **Wrong API keys and ingest tokens are limited per address**, to five in
-  fifteen minutes, by `wslib-auth`'s `Attempts`. Past that the gateway's HTTP
-  API answers 429 with `Retry-After`, even to the right key, and a HELLO to the
-  gateway's ingest or the daemon's is refused as a bad token and logged. A right
-  key clears its address's count. The gateway counts its API and its ingest
-  together, in memory, so a restart forgets them. Clients behind one NAT address
-  share a count, so one with a stale key can lock the others out for up to 15
-  minutes.
+  fifteen minutes, by `wslib-auth`'s `Attempts`. Past that the gateway answers a
+  wrong key with 429 and `Retry-After` on its HTTP API, and refuses and logs it
+  as a bad token on its ingest, but a right key always gets in and leaves the
+  count alone: behind Docker's proxy every client shares one address. The
+  gateway counts its API and its ingest together, in memory, so a restart
+  forgets them. The daemon's ingest refuses even the right token past the
+  limit, and a right one clears its address's count, so clients behind one NAT
+  address can lock each other out for up to 15 minutes.
 
 ## [0.1.14] — 2026-10-31
 

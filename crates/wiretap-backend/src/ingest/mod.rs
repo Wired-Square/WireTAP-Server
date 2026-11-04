@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn after_five_wrong_keys_an_address_is_refused_even_the_right_one() {
+    async fn after_five_wrong_keys_an_address_is_still_let_in_with_the_right_one() {
         let server = server(unreachable_databases(true));
         let status = |token: &'static [u8], peer: &'static str| {
             let hello = Hello::v2(token, "no spaces", false);
@@ -822,11 +822,11 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(status(b"wrong", "192.0.2.1:1").await, HELLO_BAD_AUTH);
         }
-        assert_eq!(status(b"bootstrap", "192.0.2.1:2").await, HELLO_BAD_AUTH);
+        assert_eq!(status(b"wrong", "192.0.2.1:2").await, HELLO_BAD_AUTH);
         assert_eq!(
-            status(b"bootstrap", "192.0.2.2:1").await,
+            status(b"bootstrap", "192.0.2.1:3").await,
             HELLO_BAD_DATABASE,
-            "another address got past the key"
+            "the right key was refused"
         );
     }
 

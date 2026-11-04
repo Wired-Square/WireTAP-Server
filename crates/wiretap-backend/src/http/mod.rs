@@ -2510,13 +2510,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn after_five_wrong_keys_even_the_right_one_is_told_when_to_retry() {
+    async fn after_five_wrong_keys_a_wrong_one_is_told_when_to_retry_and_the_right_one_gets_in() {
         let at = gateway(db::tests::unreachable_databases(false)).await;
         let whoami = |key| exchange(at, "GET", "/v1/whoami", Some(key), "text/plain", b"");
         for _ in 0..5 {
             assert_eq!(whoami("wrong").await.0, 401);
         }
-        let (status, head, body) = whoami("bootstrap").await;
+        assert_eq!(whoami("bootstrap").await.0, 200);
+        let (status, head, body) = whoami("wrong").await;
         assert_eq!(status, 429, "{body}");
         let retry_after: u64 = head
             .lines()
