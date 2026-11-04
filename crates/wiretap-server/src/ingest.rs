@@ -15,7 +15,7 @@
 //! `wslib_wiretap_protocol::ingest::ServerSession`; this file is the socket, the
 //! token and the archive around it.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 use wiretap_model::Sample;
+use wslib_auth::Attempts;
 use wslib_secret::Secret;
 use wslib_wiretap_protocol::ingest::{
     self as proto, Action, CloseReason, IncomingBatch, ServerConfig, ServerSession, ShortBatch,
@@ -55,6 +56,7 @@ struct Config {
     /// Empty disables authentication, which is the Python's behaviour and what
     /// a closed private network deployment relies on.
     token: Secret,
+    wrong_tokens: Attempts<IpAddr>,
     session: ServerConfig,
     relays_raw_serial: bool,
 }
@@ -89,6 +91,7 @@ impl Server {
             listener,
             config: Arc::new(Config {
                 token: ingest.token.clone(),
+                wrong_tokens: Attempts::default(),
                 session: ServerConfig {
                     versions: 2..=3,
                     max_records: ingest.max_batch_frames,
@@ -210,11 +213,19 @@ impl Session {
 
     fn hello(&self, hello: &proto::Hello) -> u8 {
         if !self.config.token.is_empty() {
+            let attempt = match self.config.wrong_tokens.admit(self.peer.ip()) {
+                Ok(attempt) => attempt,
+                Err(refusal) => {
+                    warn!("Ingest client {} refused: {refusal}", self.peer);
+                    return proto::HELLO_BAD_AUTH;
+                }
+            };
             let presented = String::from_utf8(hello.token.clone()).map(Secret::from);
             if !presented.is_ok_and(|token| token.matches(&self.config.token)) {
                 warn!("Ingest client {} failed auth", self.peer);
                 return proto::HELLO_BAD_AUTH;
             }
+            attempt.succeeded();
         }
 
         if !hello.database.is_empty() {
@@ -535,6 +546,32 @@ mod tests {
         // attempt.
         let mut buf = [0u8; 8];
         assert_eq!(c.read(&mut buf).await.unwrap(), 0, "closed after bad auth");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn after_five_wrong_tokens_an_address_is_refused_even_the_right_one() {
+        let (archive, _, _stop) = archive_capturing(100);
+        let server = Server::bind(&ingest_settings("sekrit"), archive.clone(), false)
+            .await
+            .expect("bind");
+        let hello_from = |peer: &str, token: &[u8]| {
+            let session = Session {
+                peer: peer.parse().unwrap(),
+                config: server.config.clone(),
+                archive: archive.clone(),
+            };
+            session.hello(&proto::Hello::v2(token, "", false))
+        };
+
+        for _ in 0..4 {
+            assert_eq!(hello_from("192.0.2.1:1", b"wrong"), proto::HELLO_BAD_AUTH);
+        }
+        assert_eq!(hello_from("192.0.2.1:1", b"sekrit"), proto::HELLO_OK);
+        for _ in 0..5 {
+            assert_eq!(hello_from("192.0.2.1:1", b"wrong"), proto::HELLO_BAD_AUTH);
+        }
+        assert_eq!(hello_from("192.0.2.1:2", b"sekrit"), proto::HELLO_BAD_AUTH);
+        assert_eq!(hello_from("192.0.2.2:1", b"sekrit"), proto::HELLO_OK);
     }
 
     #[tokio::test(flavor = "multi_thread")]

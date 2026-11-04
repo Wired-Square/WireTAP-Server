@@ -25,9 +25,11 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 wslib-backoff = { version = "0.1.2", registry = "wired-square" }
 wslib-build-id = { version = "0.1", registry = "wired-square" }
 wslib-secret = { version = "0.1.1", registry = "wired-square" }
-wslib-telemetry = { version = "0.1.5", registry = "wired-square", default-features = false }
+wslib-telemetry = { version = "0.1.9", registry = "wired-square", default-features = false }
 wslib-service = { version = "0.1.1", registry = "wired-square" }
 wslib-file-atomic = { version = "0.1.5", registry = "wired-square" }
+wslib-auth = { version = "0.1.5", registry = "wired-square", default-features = false }
+wslib-appliance-types = { version = "0.1.4", registry = "wired-square", default-features = false }
 # The WireTAP codecs and types, shared with the desktop. Two members on
 # different versions of one would be two protocols on one link.
 wslib-wiretap-protocol = { version = "0.2.1", registry = "wired-square" }
@@ -86,7 +88,7 @@ flate2 = "1.0.2"
 
 # --- hashing and secrets ---
 # sha2 hashes API keys at rest.
-sha2 = "0.10"
+sha2 = "0.10.9"
 # A catalogue is named by its Git blob SHA-1, as `git hash-object` names it.
 sha1 = "0.10"
 rand = "0.8.5"

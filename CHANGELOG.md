@@ -12,6 +12,20 @@ All notable changes to this project are documented here. Entries go under
   server app's `npm ci` without an `~/.npmrc` entry for the mirror; the
   script that found the token is gone. Forgejo itself still takes
   `CARGO_REGISTRIES_WIRED_SQUARE_TOKEN`.
+- **The gateway reads a console's `Appliance-Identity` with
+  `wslib-appliance-types`**, the chassis's own parser, in place of its copy,
+  and takes the five-minute window for a recently confirmed password from
+  `wslib-auth`. A field holding a Unicode format or line-separator character,
+  such as a zero-width space, is now refused with a 400, as the chassis refuses
+  it.
+- **Wrong API keys and ingest tokens are limited per address**, to five in
+  fifteen minutes, by `wslib-auth`'s `Attempts`. Past that the gateway's HTTP
+  API answers 429 with `Retry-After`, even to the right key, and a HELLO to the
+  gateway's ingest or the daemon's is refused as a bad token and logged. A right
+  key clears its address's count. The gateway counts its API and its ingest
+  together, in memory, so a restart forgets them. Clients behind one NAT address
+  share a count, so one with a stale key can lock the others out for up to 15
+  minutes.
 
 ## [0.1.14] — 2026-10-31
 
