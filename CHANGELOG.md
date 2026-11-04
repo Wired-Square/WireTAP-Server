@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Changed
+
+- **The gateway reads a console's `Appliance-Identity` with
+  `wslib-appliance-types`**, the chassis's own parser, in place of its copy,
+  and takes the five-minute window for a recently confirmed password from
+  `wslib-auth`. A field holding a Unicode format or line-separator character,
+  such as a zero-width space, is now refused with a 400, as the chassis refuses
+  it.
+
 ## [0.1.14] — 2026-10-31
 
 ### Changed

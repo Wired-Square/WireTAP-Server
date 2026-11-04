@@ -325,22 +325,17 @@ fn console_caller(
             "only the console may call this on the app socket",
         ));
     }
-    let asserted = console::asserted(headers)
-        .map_err(|why| {
-            ApiError(
-                StatusCode::BAD_REQUEST,
-                format!("the Appliance-Identity header is malformed: {why}"),
-            )
-        })?
+    let identity = console::asserted(headers)
+        .map_err(|why| ApiError(StatusCode::BAD_REQUEST, why))?
         .ok_or_else(|| unauthorised("missing Appliance-Identity"))?;
     Ok(KeyInfo {
         id: 0,
-        name: format!("console:{}", asserted.username),
-        role: asserted.role,
+        name: format!("console:{}", identity.username),
+        role: console::gateway_role(identity.role),
         database_pin: None,
         console: Some(ConsoleUser {
-            name: asserted.username,
-            reauthenticated_at: asserted.reauthenticated_at,
+            name: identity.username,
+            reauthenticated_at: identity.reauthenticated_at,
         }),
     })
 }
@@ -420,7 +415,7 @@ fn check_admin_reauthenticated(key: &KeyInfo) -> Result<(), ApiError> {
             Err(forbidden(&format!(
                 "{} in the last {} minutes",
                 console::STALE_PROOF,
-                console::REAUTHENTICATION_WINDOW.as_secs() / 60
+                console::REAUTHENTICATION_WINDOW.num_minutes()
             )))
         }
         _ => Ok(()),
@@ -2134,7 +2129,7 @@ mod tests {
                 }
             };
         let now = chrono::Utc::now().timestamp();
-        let stale = now - console::REAUTHENTICATION_WINDOW.as_secs() as i64 - 1;
+        let stale = now - console::REAUTHENTICATION_WINDOW.num_seconds() - 1;
 
         for (method, path, body) in REAUTHENTICATED_ROUTES {
             for reauth in [None, Some(stale), Some(now + 60)] {

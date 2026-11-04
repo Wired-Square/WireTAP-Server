@@ -129,6 +129,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1258,7 +1264,7 @@ version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08808e3c483c46e999108051c78334f473d5adb59d78bb80a1268c7e6aa6c514"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "byteorder",
  "bytes",
  "fallible-iterator 0.2.0",
@@ -2433,7 +2439,7 @@ name = "wiretap-backend"
 version = "0.1.14"
 dependencies = [
  "axum",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "deadpool-postgres",
@@ -2453,6 +2459,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "wiretap-model",
+ "wslib-appliance-types",
+ "wslib-auth",
  "wslib-build-id",
  "wslib-can",
  "wslib-file-atomic",
@@ -2513,6 +2521,54 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wslib-appliance-types"
+version = "0.1.3"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "95a517d3cc774372322806349f793247f0fe5c38797ad3e5a683cfe1e88dbae0"
+dependencies = [
+ "chrono",
+ "serde",
+ "thiserror",
+ "wslib-auth-passkey",
+ "wslib-auth-totp",
+ "wslib-http-error",
+ "wslib-secret",
+ "wslib-telemetry",
+]
+
+[[package]]
+name = "wslib-auth"
+version = "0.1.5"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "07813681cfac5c15b304db90ad99a76ba4979533c4967b0b506a53f3b4b0ce55"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "getrandom 0.3.4",
+ "http",
+ "sha2 0.10.9",
+ "subtle",
+]
+
+[[package]]
+name = "wslib-auth-passkey"
+version = "0.1.0"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "7cf6226c1a32e8b24217af7780feff93a70fe7daeb02cdb99a380f205a2111c9"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "wslib-auth-totp"
+version = "0.1.1"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "af7fab67cfbfa07f6b8cfaeeed329762c2c39e3c1f4dd3215abec9431a764c48"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "wslib-backoff"
@@ -2587,6 +2643,19 @@ checksum = "021a7dd837bfc7cdb695bc535274f845fac7d0fb7f4ad3be0196206845c4aa63"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "wslib-http-error"
+version = "0.1.2"
+source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
+checksum = "f66095c33dcc4873dad79999f4cdda489a750e92b6431d58d830c41f3afec69f"
+dependencies = [
+ "http",
+ "serde",
+ "serde_json",
+ "tracing",
+ "wslib-telemetry",
 ]
 
 [[package]]
