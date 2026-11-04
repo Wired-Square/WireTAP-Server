@@ -29,7 +29,7 @@ wslib-telemetry = { version = "0.1.9", registry = "wired-square", default-featur
 wslib-service = { version = "0.1.1", registry = "wired-square" }
 wslib-file-atomic = { version = "0.1.5", registry = "wired-square" }
 wslib-auth = { version = "0.1.5", registry = "wired-square", default-features = false }
-wslib-appliance-types = { version = "0.1.3", registry = "wired-square", default-features = false }
+wslib-appliance-types = { version = "0.1.4", registry = "wired-square", default-features = false }
 # The WireTAP codecs and types, shared with the desktop. Two members on
 # different versions of one would be two protocols on one link.
 wslib-wiretap-protocol = { version = "0.2.1", registry = "wired-square" }

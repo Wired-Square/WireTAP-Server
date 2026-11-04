@@ -35,7 +35,7 @@ use crate::config::{AppSocket, Config};
 use crate::db;
 use crate::events;
 use crate::ingest::writer::FrameRow;
-use crate::keys::{ConsoleUser, KeyInfo, KeyRotation, Role};
+use crate::keys::{KeyInfo, KeyRotation, Role};
 use crate::running;
 use crate::schema;
 use crate::sql;
@@ -263,7 +263,7 @@ async fn access_log_mw(req: Request, next: Next) -> Response {
         Some(KeyInfo {
             console: Some(user),
             ..
-        }) => format!("user={}", user.name),
+        }) => format!("user={}", user.username),
         Some(key) => format!("key={}", key.name),
         None => "key=-".into(),
     };
@@ -372,10 +372,7 @@ fn console_caller(
         name: format!("console:{}", identity.username),
         role: console::gateway_role(identity.role),
         database_pin: None,
-        console: Some(ConsoleUser {
-            name: identity.username,
-            reauthenticated_at: identity.reauthenticated_at,
-        }),
+        console: Some(identity),
     })
 }
 
@@ -414,7 +411,7 @@ async fn read_refused_upload(body: Body) {
 /// Who the caller is and by what, so the admin UI knows whether to ask for a key.
 async fn whoami(Extension(key): Extension<KeyInfo>) -> Json<serde_json::Value> {
     Json(match key.console {
-        Some(user) => json!({ "via": "console", "name": user.name, "role": key.role }),
+        Some(user) => json!({ "via": "console", "name": user.username, "role": key.role }),
         None => json!({ "via": "key", "name": key.name, "role": key.role }),
     })
 }
@@ -446,9 +443,12 @@ fn check_admin(key: &KeyInfo) -> Result<(), ApiError> {
 fn check_admin_reauthenticated(key: &KeyInfo) -> Result<(), ApiError> {
     check_admin(key)?;
     match &key.console {
-        Some(user) if !console::proved_recently(user.reauthenticated_at, chrono::Utc::now()) => {
+        Some(user)
+            if !user
+                .reauthenticated_within(console::REAUTHENTICATION_WINDOW, chrono::Utc::now()) =>
+        {
             tracing::warn!(
-                user = %user.name,
+                user = %user.username,
                 "re-authentication refused: the password was not confirmed recently"
             );
             Err(forbidden(&format!(

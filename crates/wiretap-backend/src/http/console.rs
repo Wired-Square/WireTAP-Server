@@ -10,7 +10,6 @@ use std::path::Path;
 use axum::extract::connect_info::Connected;
 use axum::http::HeaderMap;
 use axum::serve::IncomingStream;
-use chrono::{DateTime, Utc};
 use tokio::net::UnixListener;
 use wslib_appliance_types::console::{ConsoleIdentity, IDENTITY_HEADER};
 use wslib_appliance_types::Role as ConsoleRole;
@@ -20,11 +19,6 @@ use crate::keys::Role;
 
 /// The chassis's refusal of a stale proof, which a console matches on.
 pub const STALE_PROOF: &str = "this needs the password confirmed";
-
-/// Within the window and not ahead of `now`, as the chassis judges it.
-pub fn proved_recently(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    at.is_some_and(|at| at <= now && now - at <= REAUTHENTICATION_WINDOW)
-}
 
 /// `None` when no header was sent; refused when one is malformed or sent twice.
 pub fn asserted(headers: &HeaderMap) -> Result<Option<ConsoleIdentity>, String> {
@@ -100,21 +94,6 @@ mod tests {
             (ConsoleRole::HostAdmin, Role::Admin),
         ] {
             assert_eq!(gateway_role(console), gateway, "{console}");
-        }
-    }
-
-    #[test]
-    fn a_proof_counts_within_the_window_and_not_before_or_after_it() {
-        let now = Utc::now();
-        let second = chrono::TimeDelta::seconds(1);
-        assert!(proved_recently(Some(now), now));
-        assert!(proved_recently(Some(now - REAUTHENTICATION_WINDOW), now));
-        for at in [
-            None,
-            Some(now - REAUTHENTICATION_WINDOW - second),
-            Some(now + second),
-        ] {
-            assert!(!proved_recently(at, now), "{at:?}");
         }
     }
 

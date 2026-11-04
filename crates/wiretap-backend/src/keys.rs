@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
+use wslib_appliance_types::console::ConsoleIdentity;
 use wslib_auth::{Attempts, TooManyAttempts};
 
 use crate::db::Databases;
@@ -99,14 +100,7 @@ pub struct KeyInfo {
     pub role: Role,
     pub database_pin: Option<String>,
     /// Set when an ApplianceOS console asserted the caller instead of a key.
-    pub console: Option<ConsoleUser>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConsoleUser {
-    pub name: String,
-    /// When the console last saw this user prove their password.
-    pub reauthenticated_at: Option<DateTime<Utc>>,
+    pub console: Option<ConsoleIdentity>,
 }
 
 pub enum KeyRotation {
