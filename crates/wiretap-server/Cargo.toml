@@ -19,6 +19,7 @@ wiretap-model = { path = "../wiretap-model" }
 wslib-backoff.workspace = true
 wslib-secret = { workspace = true, features = ["serde"] }
 wslib-file-atomic.workspace = true
+wslib-auth.workspace = true
 # The ingest and test-pattern codecs and the raw serial tap.
 wslib-wiretap-protocol.workspace = true
 # The GVRET codec. No frame type crosses the boundary: the codecs take scalars

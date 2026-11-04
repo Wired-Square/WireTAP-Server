@@ -19,6 +19,9 @@ wslib-build-id.workspace = true
 wiretap-model = { path = "../wiretap-model", default-features = false }
 wslib-secret.workspace = true
 wslib-file-atomic.workspace = true
+wslib-auth.workspace = true
+# The console's `Appliance-Identity`, read as the chassis writes it.
+wslib-appliance-types.workspace = true
 # The ingest codec.
 wslib-wiretap-protocol.workspace = true
 # The DLC table: a CAN row's `dlc` column and the `len` served from it.
