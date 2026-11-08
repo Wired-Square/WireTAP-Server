@@ -22,25 +22,25 @@ repository = "https://github.com/Wired-Square/WireTAP-Server"
 
 [workspace.dependencies]
 # --- the wslib-rs toolkit, from the private registry (.cargo/config.toml) ---
-wslib-backoff = { version = "0.1.2", registry = "wired-square" }
+wslib-backoff = { version = "0.1.3", registry = "wired-square" }
 wslib-build-id = { version = "0.1", registry = "wired-square" }
-wslib-secret = { version = "0.1.1", registry = "wired-square" }
-wslib-telemetry = { version = "0.1.9", registry = "wired-square", default-features = false }
-wslib-service = { version = "0.1.1", registry = "wired-square" }
-wslib-file-atomic = { version = "0.1.5", registry = "wired-square" }
+wslib-secret = { version = "0.1.5", registry = "wired-square" }
+wslib-telemetry = { version = "0.1.10", registry = "wired-square", default-features = false }
+wslib-service = { version = "0.1.5", registry = "wired-square" }
+wslib-file-atomic = { version = "0.1.9", registry = "wired-square" }
 wslib-auth = { version = "0.1.5", registry = "wired-square", default-features = false }
-wslib-appliance-types = { version = "0.1.4", registry = "wired-square", default-features = false }
+wslib-appliance-types = { version = "0.1.7", registry = "wired-square", default-features = false }
 # The WireTAP codecs and types, shared with the desktop. Two members on
 # different versions of one would be two protocols on one link.
-wslib-wiretap-protocol = { version = "0.2.1", registry = "wired-square" }
+wslib-wiretap-protocol = { version = "0.2.2", registry = "wired-square" }
 wslib-wiretap-catalogue = { version = "0.2", registry = "wired-square" }
-wslib-wiretap-gateway = { version = "0.2", registry = "wired-square" }
-wslib-can = { version = "0.1", registry = "wired-square" }
-wslib-can-gvret = { version = "0.1", registry = "wired-square" }
-wslib-can-socketcan = { version = "0.1", registry = "wired-square" }
-wslib-checksum = { version = "0.1", registry = "wired-square" }
-wslib-modbus = { version = "0.2.1", registry = "wired-square", default-features = false }
-wslib-serial = { version = "0.1", registry = "wired-square" }
+wslib-wiretap-gateway = { version = "0.2.1", registry = "wired-square" }
+wslib-can = { version = "0.1.2", registry = "wired-square" }
+wslib-can-gvret = { version = "0.1.1", registry = "wired-square" }
+wslib-can-socketcan = { version = "0.1.1", registry = "wired-square" }
+wslib-checksum = { version = "0.1.1", registry = "wired-square" }
+wslib-modbus = { version = "0.2.2", registry = "wired-square", default-features = false }
+wslib-serial = { version = "0.1.3", registry = "wired-square" }
 
 # --- CLI ---
 clap = { version = "4", default-features = false }
@@ -80,7 +80,7 @@ serde_json = "1.0.85"
 toml = "1"
 chrono = "0.4.39"
 base64 = "0.22"
-bytes = "1.4.0"
+bytes = "1.5.0"
 hex = "0.4"
 # A database archive's compression: gzip, which a browser can also read with
 # its own DecompressionStream, and pure Rust behind the default backend.

@@ -5,8 +5,17 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **The app build scripts read `.env.local` and `.env`** at the repository
+  root, bare `KEY=value` lines that never override the environment;
+  `.env.example` lists the names.
+
 ### Changed
 
+- **The server and gateway take the latest wslib patch releases**, among them
+  `wslib-wiretap-protocol` 0.2.2, `wslib-wiretap-gateway` 0.2.1,
+  `wslib-appliance-types` 0.1.7, `wslib-can` 0.1.2 and `wslib-serial` 0.1.3.
 - **The registry mirror needs no token.** The gateway image builds without a
   BuildKit secret, `docker compose up --build` without exporting one, and the
   server app's `npm ci` without an `~/.npmrc` entry for the mirror; the
@@ -27,6 +36,26 @@ All notable changes to this project are documented here. Entries go under
   forgets them. The daemon's ingest refuses even the right token past the
   limit, and a right one clears its address's count, so clients behind one NAT
   address can lock each other out for up to 15 minutes.
+- **CI and the release build pin `wslib-appliance-xtask` 0.2.5.**
+- **The server app is on `wslib-appliance-https` and `-server` 0.1.4,
+  `-types` 0.1.7 and `-store` 0.1.3, and in the browser on `appliance-ui`
+  0.10.1 and `kit` 0.4.1.** Disabling, enabling or deleting an account on the
+  Users screen now asks for the administrator's own password, or a code or a
+  passkey while their TOTP is on; a page loaded from an older UI has those
+  refused until it reloads. **Upgrading migrates the UI's database one way**:
+  an older image refuses it afterwards, so going back needs a copy of `/data`
+  (or `/var/lib/wiretap-server-ui`) taken before the upgrade, as ApplianceOS's
+  upgrade snapshot is.
+
+### Fixed
+
+- **Opening the gateway app from the ApplianceOS console shows its admin
+  pages.** The console opens `/apps/wiretap-gateway/`, which answered an
+  empty 404 that Chrome showed as its own error page; the gateway's base, with
+  or without the slash, now redirects to `admin/` under it, as `/` does on
+  `:8423`.
+- **The server UI's About lists the capture daemon under Subsystems**, with
+  the control socket it answers on or why it does not; the card was empty.
 
 ## [0.1.14] — 2026-10-31
 

@@ -16,5 +16,10 @@
   display: flex;
   flex-wrap: wrap;
   align-items: end;
-  gap: 0 1rem;
+  gap: 1rem;
+  margin-block-end: 1rem;
+}
+
+.capture-fields > .app-field {
+  margin-block-end: 1rem;
 }

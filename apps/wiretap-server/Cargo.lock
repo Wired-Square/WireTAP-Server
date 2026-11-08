@@ -3273,9 +3273,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-appliance-core"
-version = "0.1.3"
+version = "0.1.4"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "5626507deb21dbb834c2e47765a1d81b059d79aef3629a7933251260d0d7e5e5"
+checksum = "3fa615eaf13db545cbdefc6055bf8a5879cda31f3d62d70f9fe24b5e436d4da8"
 dependencies = [
  "axum",
  "axum-server",
@@ -3319,9 +3319,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-appliance-https"
-version = "0.1.3"
+version = "0.1.4"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "64925d0e6cb8f8af5b9aece2a83c2e9d63af3ea8535274b30e7d27a2fd27dbd2"
+checksum = "24795fb043eec414fdce70d1e9833098edf61fa9d84af0c89563ec0cd8d83d87"
 dependencies = [
  "axum",
  "chrono",
@@ -3342,9 +3342,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-appliance-server"
-version = "0.1.3"
+version = "0.1.4"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "65b65e898732db194f1e3e06bb30f0a7ab57c02db898ea38794543709ce9dea6"
+checksum = "6a7986f50984eabeddd0c3d0de5095c5600deed7f6d622a232b66bc306a061a8"
 dependencies = [
  "axum",
  "tempfile",
@@ -3379,12 +3379,13 @@ dependencies = [
 
 [[package]]
 name = "wslib-appliance-types"
-version = "0.1.3"
+version = "0.1.7"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "95a517d3cc774372322806349f793247f0fe5c38797ad3e5a683cfe1e88dbae0"
+checksum = "a7e052b28c62ff58edd6f36583817a9838c98636d357e2e937c562aaf5e572e3"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
  "thiserror",
  "wslib-auth-passkey",
  "wslib-auth-totp",

@@ -13,8 +13,11 @@
 # SOURCE names the source (default wiretap), as the box holds its root.
 set -euo pipefail
 
-SOURCE=${SOURCE:-wiretap}
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=scripts/env.sh
+. "$ROOT/scripts/env.sh"
+load_env "$ROOT"
+SOURCE=${SOURCE:-wiretap}
 
 die() {
 	echo "make-source: $1" >&2

@@ -120,10 +120,15 @@ struct OnAppSocket {
 }
 
 fn under(base_path: &str, routes: Router<St>) -> Router<St> {
+    let admin = format!("{base_path}/admin/");
+    let to_admin = get(move || async move { Redirect::to(&admin) });
     if base_path.is_empty() {
-        routes
+        routes.route("/", to_admin)
     } else {
-        Router::new().nest(base_path, routes)
+        Router::new()
+            .route(base_path, to_admin.clone())
+            .route(&format!("{base_path}/"), to_admin)
+            .nest(base_path, routes)
     }
 }
 
@@ -2006,6 +2011,22 @@ mod tests {
                 .contains("\r\nlocation: admin/\r\n"),
             "{head}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_base_where_the_console_opens_the_app_goes_to_the_admin_bundle() {
+        for (base, paths) in [("", vec!["/"]), (BASE, vec![BASE, &format!("{BASE}/")])] {
+            let at = gateway_under(base).await;
+            for path in paths {
+                let (status, head, _) = get(at, path).await;
+                assert_eq!(status, 303, "{path}");
+                assert!(
+                    head.to_ascii_lowercase()
+                        .contains(&format!("\r\nlocation: {base}/admin/\r\n")),
+                    "{head}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
