@@ -44,6 +44,11 @@ All notable changes to this project are documented here. Entries go under
   device's fields, CAN FD tick and Remove line up along the row, its database
   saying "the gateway's" when empty. A catalogue the gateway refuses keeps its
   lines, so a TOML error's caret points at the fault.
+- **The Capture screen is split into views**, a pill strip like the Gateway
+  tab's (`#capture/<view>`): Overview (the daemon, a line each on devices and
+  forwarding linking to their views, and the listeners' clients), Devices,
+  Forwarding and Settings. The settings stay one form, saved with one restart;
+  the applying notice and the daemon's warnings show above every view.
 - **The server and gateway take the latest wslib patch releases**, among them
   `wslib-wiretap-protocol` 0.2.2, `wslib-wiretap-gateway` 0.2.1,
   `wslib-appliance-types` 0.1.7, `wslib-can` 0.1.2 and `wslib-serial` 0.1.3.

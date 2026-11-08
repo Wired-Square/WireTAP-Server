@@ -3,6 +3,7 @@
  * Everything here is read from, and written to, the daemon's control socket.
  */
 import { For, Index, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
+import type { Accessor, JSX } from "solid-js";
 
 import { Capability, allows, api, useRefresh } from "@wired-square/appliance-ui";
 import type { Me } from "@wired-square/appliance-ui";
@@ -21,63 +22,119 @@ import {
   Th,
   Tick,
   Tr,
+  Views,
   Warnings,
   ago,
   createAction,
   duration,
+  routed,
 } from "@wired-square/kit";
-import type { Tone } from "@wired-square/kit";
+import type { Routed, Tone } from "@wired-square/kit";
 
 import { GROUPS, LEVELS, changes, devicesOf, draftOf, setting } from "./change";
 import type { DeviceDraft, Draft, Kind, Field as SettingField } from "./change";
 import type { Device, ListedDevice, Reading, Setting, Settings, Status } from "./daemon";
+import { devicesSummary, forwardingSummary } from "./summary";
+import type { Summary } from "./summary";
 
 const STATUS = "/api/capture/status";
 const SETTINGS = "/api/capture/settings";
 
-export function Capture(props: { me: Me }) {
-  return (
-    <>
-      <DaemonStatus />
-      <DaemonSettings editable={allows(props.me.role, "admin")} />
-    </>
-  );
+/** The daemon's status, shared by the views that show it, re-read every 5 s. */
+interface Polled {
+  reading: () => Reading<Status> | undefined;
+  running: () => Status | undefined;
+  failed: () => string | undefined;
+  now: () => number;
 }
 
-function DaemonStatus() {
-  const [status, setStatus] = createSignal<Reading<Status>>();
+function createPolled(): Polled {
+  const [reading, setReading] = createSignal<Reading<Status>>();
   const [now, setNow] = createSignal(Date.now());
-  const reading = createAction();
+  const action = createAction();
   const load = () =>
-    reading.run(async () => {
-      setStatus(await api<Reading<Status>>(STATUS));
+    action.run(async () => {
+      setReading(await api<Reading<Status>>(STATUS));
       setNow(Date.now());
     });
   onMount(() => void load());
   useRefresh(load, 5_000);
+  const running = () => {
+    const r = reading();
+    return r?.state === "ready" ? r : undefined;
+  };
+  return { reading, running, failed: action.failed, now };
+}
+
+export function Capture(props: Routed & { me: Me }) {
+  const polled = createPolled();
+  const route = routed(props);
 
   return (
-    <Section title="Capture" blurb="What the capture daemon is doing now.">
-      <Show when={reading.failed()}>{(why) => <Notice tone="bad">{why()}</Notice>}</Show>
-      <Show when={status()}>
-        {(read) => (
-          <Capability of={read()} what="The capture daemon is not answering">
-            {(running) => <Running status={running()} now={now()} />}
-          </Capability>
-        )}
+    <>
+      <Show when={polled.running()?.applying}>
+        <Notice tone="neutral">Applying a change: the daemon is restarting.</Notice>
       </Show>
-    </Section>
+      <Warnings of={polled.running()?.warnings ?? []} />
+      <Views
+        aria-label="Capture"
+        group="capture"
+        views={[
+          {
+            id: "overview",
+            label: "Overview",
+            panel: () => (
+              <Section title="Overview" blurb="What the capture daemon is doing now.">
+                <Live polled={polled}>{(s) => <Overview status={s()} onView={route.onChange} />}</Live>
+              </Section>
+            ),
+          },
+          {
+            id: "devices",
+            label: "Devices",
+            panel: () => (
+              <Section title="Devices" blurb="The interfaces this daemon captures, and the frames each has read.">
+                <Live polled={polled}>{(s) => <DeviceStates devices={s().devices} />}</Live>
+              </Section>
+            ),
+          },
+          {
+            id: "forwarding",
+            label: "Forwarding",
+            panel: () => (
+              <Section title="Forwarding" blurb="Where captured frames are sent, and how each database's link is doing.">
+                <Live polled={polled}>{(s) => <Forwarding forward={s().forward} now={polled.now()} />}</Live>
+              </Section>
+            ),
+          },
+          {
+            id: "settings",
+            label: "Settings",
+            panel: () => <DaemonSettings editable={allows(props.me.role, "admin")} />,
+          },
+        ]}
+        {...route}
+      />
+    </>
   );
 }
 
-const DEVICE_TONE: Record<Device["state"], Tone> = {
-  starting: "neutral",
-  up: "good",
-  waiting: "warn",
-  error: "bad",
-};
+function Live(props: { polled: Polled; children: (s: Accessor<Status>) => JSX.Element }) {
+  return (
+    <>
+      <Notice tone="bad">{props.polled.failed()}</Notice>
+      <Show when={props.polled.reading()}>
+        {(read) => (
+          <Capability of={read()} what="The capture daemon is not answering">
+            {(running) => props.children(running)}
+          </Capability>
+        )}
+      </Show>
+    </>
+  );
+}
 
-function Running(props: { status: Status; now: number }) {
+function Overview(props: { status: Status; onView: (id: string) => void }) {
   const s = () => props.status;
   return (
     <>
@@ -85,99 +142,16 @@ function Running(props: { status: Status; now: number }) {
         wiretap-server {s().version}, up {duration(s().uptime_secs)}
         <Show when={s().daemon_id}>{(id) => <>, as {id()}</>}</Show>.
       </p>
-      <Show when={s().applying}>
-        <Notice tone="neutral">Applying a change: the daemon is restarting.</Notice>
-      </Show>
-      <Warnings of={s().warnings} />
-
-      <Section title="Devices" level={3}>
-        <Show
-          when={s().devices.length > 0}
-          fallback={
-            <NothingYet
-              label="No local devices"
-              note="This daemon captures nothing itself; frames arrive only by device push."
-            />
-          }
-        >
-          <Table
-            head={
-              <>
-                <Th>Interface</Th>
-                <Th>Kind</Th>
-                <Th>Mode</Th>
-                <Th>State</Th>
-                <Th right>Frames</Th>
-              </>
-            }
-          >
-            <For each={s().devices}>
-              {(d) => (
-                <Tr>
-                  <Td strong>{d.interface}</Td>
-                  <Td>{d.kind === "can" ? "CAN" : "Serial"}</Td>
-                  <Td>{d.mode}</Td>
-                  <Td>
-                    <Badge tone={DEVICE_TONE[d.state]}>{d.state}</Badge>
-                  </Td>
-                  <Td right numeric>
-                    {d.frames.toLocaleString()}
-                  </Td>
-                </Tr>
-              )}
-            </For>
-          </Table>
-        </Show>
-      </Section>
-
-      <Section
-        title="Gateway"
-        level={3}
-        blurb={
-          s().forward.enabled ? `Forwarding to ${s().forward.gateway}.` : "Forwarding is off."
-        }
-      >
-        <Show when={s().forward.links.length > 0}>
-          <Table
-            head={
-              <>
-                <Th>Database</Th>
-                <Th>Link</Th>
-                <Th>Last acknowledged</Th>
-                <Th right>Cached on disk</Th>
-                <Th right>Written</Th>
-                <Th right>Dropped</Th>
-              </>
-            }
-          >
-            <For each={s().forward.links}>
-              {(link) => (
-                <Tr>
-                  <Td strong>{link.database}</Td>
-                  <Td>
-                    <Badge tone={link.connected ? "good" : "warn"}>
-                      {link.connected ? "connected" : "not connected"}
-                    </Badge>
-                  </Td>
-                  <Td muted>
-                    {link.last_ack_unix_ms === null ? "never" : ago(link.last_ack_unix_ms, props.now)}
-                  </Td>
-                  <Td right numeric>
-                    {link.cache_pending.toLocaleString()}
-                  </Td>
-                  <Td right numeric>
-                    {link.written.toLocaleString()}
-                  </Td>
-                  <Td right numeric>
-                    {link.dropped.toLocaleString()}
-                  </Td>
-                </Tr>
-              )}
-            </For>
-          </Table>
-        </Show>
-      </Section>
-
+      <dl class="app-details">
+        <dt>Devices</dt>
+        <dd>
+          <Summarised of={devicesSummary(s().devices)} onShow={() => props.onView("devices")} />
+        </dd>
+        <dt>Forwarding</dt>
+        <dd>
+          <Summarised of={forwardingSummary(s().forward)} onShow={() => props.onView("forwarding")} />
+        </dd>
+      </dl>
       <Section title="Clients" level={3}>
         <Table
           head={
@@ -192,6 +166,106 @@ function Running(props: { status: Status; now: number }) {
           <Listener name="GVRET" on={s().gvret.enabled} at={s().gvret.listen} clients={s().gvret.clients} />
         </Table>
       </Section>
+    </>
+  );
+}
+
+function Summarised(props: { of: Summary; onShow: () => void }) {
+  return (
+    <>
+      <Badge tone={props.of.tone}>{props.of.badge}</Badge> <span class="app-muted">{props.of.detail}</span>{" "}
+      <Button tone="link" onClick={props.onShow}>
+        Show
+      </Button>
+    </>
+  );
+}
+
+const DEVICE_TONE: Record<Device["state"], Tone> = {
+  starting: "neutral",
+  up: "good",
+  waiting: "warn",
+  error: "bad",
+};
+
+function DeviceStates(props: { devices: Device[] }) {
+  return (
+    <Show
+      when={props.devices.length > 0}
+      fallback={
+        <NothingYet label="No local devices" note="This daemon captures nothing itself; frames arrive only by device push." />
+      }
+    >
+      <Table
+        head={
+          <>
+            <Th>Interface</Th>
+            <Th>Kind</Th>
+            <Th>Mode</Th>
+            <Th>State</Th>
+            <Th right>Frames</Th>
+          </>
+        }
+      >
+        <For each={props.devices}>
+          {(d) => (
+            <Tr>
+              <Td strong>{d.interface}</Td>
+              <Td>{d.kind === "can" ? "CAN" : "Serial"}</Td>
+              <Td>{d.mode}</Td>
+              <Td>
+                <Badge tone={DEVICE_TONE[d.state]}>{d.state}</Badge>
+              </Td>
+              <Td right numeric>
+                {d.frames.toLocaleString()}
+              </Td>
+            </Tr>
+          )}
+        </For>
+      </Table>
+    </Show>
+  );
+}
+
+function Forwarding(props: { forward: Status["forward"]; now: number }) {
+  return (
+    <>
+      <p>{props.forward.enabled ? `Forwarding to ${props.forward.gateway}.` : "Forwarding is off."}</p>
+      <Show when={props.forward.links.length > 0}>
+        <Table
+          head={
+            <>
+              <Th>Database</Th>
+              <Th>Link</Th>
+              <Th>Last acknowledged</Th>
+              <Th right>Cached on disk</Th>
+              <Th right>Written</Th>
+              <Th right>Dropped</Th>
+            </>
+          }
+        >
+          <For each={props.forward.links}>
+            {(link) => (
+              <Tr>
+                <Td strong>{link.database}</Td>
+                <Td>
+                  <Badge tone={link.connected ? "good" : "warn"}>{link.connected ? "connected" : "not connected"}</Badge>
+                </Td>
+                <Td muted>{link.last_ack_unix_ms === null ? "never" : ago(link.last_ack_unix_ms, props.now)}</Td>
+                <Td right numeric>
+                  {link.cache_pending.toLocaleString()}
+                </Td>
+                <Td right numeric>
+                  {link.written.toLocaleString()}
+                </Td>
+                <Td right numeric>
+                  {link.dropped.toLocaleString()}
+                </Td>
+              </Tr>
+            )}
+          </For>
+        </Table>
+      </Show>
     </>
   );
 }

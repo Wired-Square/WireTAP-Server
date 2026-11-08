@@ -87,7 +87,7 @@ export function App() {
             }
           >
             <TabPanel id="capture" selected={shown()}>
-              <Capture me={who()} />
+              <Capture me={who()} view={view()} onView={(to) => choose("capture", to)} />
             </TabPanel>
             <TabPanel id="gateway" selected={shown()}>
               <Loaded of={gateway} refetch={refetch} reading="the gateway">
