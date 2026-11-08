@@ -17,7 +17,7 @@ import {
   useSession,
 } from "@wired-square/appliance-ui";
 import type { Role } from "@wired-square/appliance-types";
-import { Loaded, TabPanel, Tabs } from "@wired-square/kit";
+import { Loaded, SchemePicker, TabPanel, Tabs } from "@wired-square/kit";
 
 import { BrandedTitle } from "./BrandedTitle";
 import { Capture } from "./Capture";
@@ -79,7 +79,12 @@ export function App() {
         return (
           <Chrome
             nav={<Tabs aria-label="Sections" tabs={offered()} selected={shown()} onChange={choose} />}
-            controls={<BrandedTitle />}
+            controls={
+              <>
+                <SchemePicker />
+                <BrandedTitle />
+              </>
+            }
           >
             <TabPanel id="capture" selected={shown()}>
               <Capture me={who()} />

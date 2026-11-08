@@ -7,6 +7,7 @@ import "@wired-square/appliance-ui/appliance.css";
 
 import { render } from "solid-js/web";
 import { FirstAccount, Shell, SignIn, useSession } from "@wired-square/appliance-ui";
+import { SchemePicker, applyScheme } from "@wired-square/kit";
 
 import { App } from "./App";
 import { BrandedTitle } from "./BrandedTitle";
@@ -19,10 +20,17 @@ function FirstAdmin() {
   return <FirstAccount appName={branding()?.app_name ?? ""} onDone={refresh} />;
 }
 
+applyScheme();
+
 render(
   () => (
     <Shell
-      controls={<BrandedTitle />}
+      controls={
+        <>
+          <SchemePicker />
+          <BrandedTitle />
+        </>
+      }
       signIn={
         <SignIn
           help={

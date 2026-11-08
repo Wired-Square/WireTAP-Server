@@ -59,3 +59,17 @@
   line-height: var(--app-control-line-height);
 }
 
+/* The dark accent is `tokens_dark` in main.rs, under both of the kit's dark selectors. */
+@media (prefers-color-scheme: dark) {
+  :root:where([data-app-scheme~="dark"]) {
+    --app-accent: #fb923c;
+    --app-accent-sunken: #f97316;
+    --app-accent-contrast: #14171a;
+  }
+}
+
+:root:where([data-app-scheme="dark"]) {
+  --app-accent: #fb923c;
+  --app-accent-sunken: #f97316;
+  --app-accent-contrast: #14171a;
+}

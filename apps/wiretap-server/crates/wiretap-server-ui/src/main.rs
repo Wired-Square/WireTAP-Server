@@ -164,12 +164,16 @@ fn branding(with_gateway: bool) -> Branding {
     }
     .to_string();
     branding.manufacturer = "Wired Square".to_string();
-    // The same accent as frontend/src/theme.css, so the page does not repaint
+    // The same accents as frontend/src/theme.css, so the page does not repaint
     // when the branding request lands.
-    branding.tokens = ThemeTokens::new(BTreeMap::from([(
-        "--app-accent".to_string(),
-        "#c2410c".to_string(),
-    )]))
-    .expect("the compiled-in theme tokens are legal");
+    let accent = |colour: &str| {
+        ThemeTokens::new(BTreeMap::from([(
+            "--app-accent".to_string(),
+            colour.to_string(),
+        )]))
+        .expect("the compiled-in theme tokens are legal")
+    };
+    branding.tokens = accent("#c2410c");
+    branding.tokens_dark = accent("#fb923c");
     branding
 }

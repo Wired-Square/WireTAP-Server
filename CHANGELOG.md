@@ -32,6 +32,9 @@ All notable changes to this project are documented here. Entries go under
   only read sees Databases and Health, without their actions. An export streams
   to disk from its one-time link, an import shows its upload's progress, and
   the Log is the gateway's in-memory log, read every 3 s.
+- **The web UI offers a light, dark or system colour scheme** beside the
+  account in the header and on the sign-in screen, kept per browser. The dark
+  scheme's accent is `#fb923c`.
 
 ### Changed
 
