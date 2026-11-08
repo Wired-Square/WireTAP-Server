@@ -3273,9 +3273,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-appliance-core"
-version = "0.1.4"
+version = "0.1.6"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "3fa615eaf13db545cbdefc6055bf8a5879cda31f3d62d70f9fe24b5e436d4da8"
+checksum = "426c1099552e7a43382d58f87d70fa45a0b2db2b4bb7f33e7d36b7f4f34ca12f"
 dependencies = [
  "axum",
  "axum-server",
@@ -3319,9 +3319,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-appliance-https"
-version = "0.1.4"
+version = "0.1.6"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "24795fb043eec414fdce70d1e9833098edf61fa9d84af0c89563ec0cd8d83d87"
+checksum = "671aceb7ed264f9abe2b6904f2f866a58825a7628b7db656f1ab787ec4cbe858"
 dependencies = [
  "axum",
  "chrono",
@@ -3342,9 +3342,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-appliance-server"
-version = "0.1.4"
+version = "0.1.6"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "6a7986f50984eabeddd0c3d0de5095c5600deed7f6d622a232b66bc306a061a8"
+checksum = "275910b36129b67cb3132a70f03f07dcf3886c466580997aefe5b21234948e4e"
 dependencies = [
  "axum",
  "tempfile",

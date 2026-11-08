@@ -334,6 +334,16 @@ impl FakeGateway {
                 "/healthz",
                 get(move || async move { *status.lock().unwrap() }),
             )
+            .route(
+                "/v1/export",
+                get(|| async {
+                    let archive = "WTAR, gzipped already".repeat(8);
+                    (
+                        [("content-type", "application/vnd.wiretap.archive")],
+                        archive,
+                    )
+                }),
+            )
             .fallback(move |request: axum::extract::Request| async move {
                 *counted.lock().unwrap() += 1;
                 fake_gateway_echo(request).await
@@ -485,6 +495,28 @@ async fn the_gateways_refusals_and_only_its_api_come_through() {
         assert_eq!(outside.status(), StatusCode::NOT_FOUND);
     }
     assert_eq!(fake.heard(), 1);
+}
+
+#[tokio::test]
+async fn an_archive_comes_through_plain_and_the_gateways_json_may_be_gzipped() {
+    let fake = FakeGateway::start().await;
+    let app = with_gateway(Some(fake.gateway())).await;
+    let viewer = console("v", Role::Viewer);
+    let accepting_gzip = async |path| {
+        let request = app.get(path).from_console(&viewer);
+        request.header("accept-encoding", "gzip").send().await
+    };
+
+    let archive = accepting_gzip("/api/gateway/v1/export").await;
+    assert_eq!(archive.status(), StatusCode::OK);
+    assert_eq!(
+        archive.headers()["content-type"],
+        "application/vnd.wiretap.archive"
+    );
+    assert!(archive.headers().get("content-encoding").is_none());
+
+    let json = accepting_gzip("/api/gateway/v1/whoami").await;
+    assert_eq!(json.headers()["content-encoding"], "gzip");
 }
 
 #[tokio::test]

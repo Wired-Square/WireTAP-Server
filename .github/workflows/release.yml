@@ -300,7 +300,7 @@ jobs:
       # for the `wired-square` registry.
       - name: Install wslib-appliance-xtask
         if: matrix.arch == 'arm64'
-        run: cargo install --config .cargo/config.toml wslib-appliance-xtask --locked --version =0.2.5 --registry wired-square
+        run: cargo install --config .cargo/config.toml wslib-appliance-xtask --locked --version =0.2.7 --registry wired-square
 
       - uses: actions/setup-node@v5
         with:

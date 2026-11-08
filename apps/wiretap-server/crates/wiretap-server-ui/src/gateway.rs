@@ -21,7 +21,9 @@ use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
 use serde_json::json;
 use tokio::net::UnixStream;
-use wslib_appliance_server::{About, ApplianceState, Identity, Mount, ProductAbout, Viewer};
+use wslib_appliance_server::{
+    About, ApplianceState, Identity, Mount, ProductAbout, Uncompressed, Viewer,
+};
 use wslib_appliance_store::Store;
 use wslib_appliance_types::Availability;
 use wslib_appliance_types::about::Subsystem;
@@ -36,6 +38,7 @@ const PASSED_BACK: [HeaderName; 5] = [
     RETRY_AFTER,
 ];
 const HEALTH_WAIT: Duration = Duration::from_secs(5);
+const ARCHIVE: &str = "application/vnd.wiretap.archive";
 
 #[derive(Debug, Clone)]
 pub struct Gateway {
@@ -169,6 +172,13 @@ async fn proxy(Viewer(who): Viewer, State(gateway): State<Gateway>, request: Req
             let mut response = Response::new(Body::new(body));
             *response.status_mut() = parts.status;
             copy(&parts.headers, response.headers_mut(), &PASSED_BACK);
+            if parts
+                .headers
+                .get(CONTENT_TYPE)
+                .is_some_and(|t| t == ARCHIVE)
+            {
+                response.extensions_mut().insert(Uncompressed);
+            }
             response
         }
         Err(down) => refused(
