@@ -3,7 +3,7 @@
  * chassis's screens. Tabs are offered by role so nobody is handed one that
  * would 403; every route is gated in the daemon regardless.
  */
-import { Show, createMemo, createResource, createSignal } from "solid-js";
+import { Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 
 import {
   About,
@@ -23,6 +23,7 @@ import { BrandedTitle } from "./BrandedTitle";
 import { Capture } from "./Capture";
 import { Gateway } from "./gateway/Gateway";
 import type { Caller } from "./gateway/wire";
+import { type Route, followHash, pushRoute, routeOf } from "./route";
 
 const TABS = [
   { id: "capture", label: "Capture", needs: "viewer" },
@@ -34,9 +35,6 @@ const TABS = [
 ] as const satisfies readonly { id: string; label: string; needs: Role }[];
 
 type TabId = (typeof TABS)[number]["id"];
-
-const [openedTab, openedView] = window.location.hash.slice(1).split("/");
-const opened = (): TabId => TABS.find((t) => t.id === openedTab)?.id ?? "capture";
 
 /** The gateway bundled with this UI, if there is one: it 404s where there is none. */
 async function bundledGateway(): Promise<Caller | undefined> {
@@ -50,14 +48,16 @@ async function bundledGateway(): Promise<Caller | undefined> {
 
 export function App() {
   const { me } = useSession();
-  const [tab, setTab] = createSignal<TabId>(opened());
-  const [view, setView] = createSignal<string | undefined>(openedView);
+  const [route, setRoute] = createSignal<Route>(routeOf(window.location.hash));
+  onCleanup(followHash(window, setRoute));
+  const tab = (): TabId => TABS.find((t) => t.id === route().tab)?.id ?? "capture";
+  const view = () => route().view;
   const [gateway, { refetch }] = createResource(bundledGateway);
   const hasGateway = () => gateway.state === "errored" || (gateway.state === "ready" && gateway() !== undefined);
   const choose = (id: TabId, to?: string) => {
-    setTab(id);
-    setView(to);
-    history.replaceState(null, "", to ? `#${id}/${to}` : `#${id}`);
+    const chosen = { tab: id, view: to };
+    pushRoute(window, chosen);
+    setRoute(chosen);
   };
 
   return (

@@ -112,6 +112,9 @@ All notable changes to this project are documented here. Entries go under
   "Not running" with why.
 - **The gateway logs its app socket at the root as "under /"**, where the
   base path was left blank.
+- **The web UI's tab and view follow the address's `#<tab>/<view>`** for the
+  page's whole life: a typed hash, a link or Back and Forward switch them, and
+  choosing one adds a history entry. Only the hash on first load was read.
 
 ## [0.1.14] — 2026-10-31
 
