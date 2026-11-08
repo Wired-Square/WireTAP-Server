@@ -35,6 +35,9 @@ All notable changes to this project are documented here. Entries go under
 - **The web UI offers a light, dark or system colour scheme** beside the
   account in the header and on the sign-in screen, kept per browser. The dark
   scheme's accent is `#fb923c`.
+- **Both app images carry a shell's tools**: `bash`, `can-utils` (`candump`,
+  `cansend`…), `curl`, `iproute2`, `less`, `procps` and `strace`, for checking
+  a bus or a process from a shell in the container.
 
 ### Changed
 

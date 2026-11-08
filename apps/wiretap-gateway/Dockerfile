@@ -43,6 +43,7 @@ FROM alpine:3.23.5
 # a per-uid socket directory.
 RUN --mount=type=bind,from=postgres,source=/rundeps,target=/rundeps \
     apk add --no-cache $(cat /rundeps) icu-data-full nss_wrapper tzdata \
+        bash can-utils curl iproute2 less procps strace \
     && install -d -o 10001 -g 0 -m 0770 /data /run/wiretap \
     && install -d -m 1770 /run/wiretap-server
 COPY --from=postgres /usr/local /usr/local
