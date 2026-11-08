@@ -54,6 +54,8 @@ All notable changes to this project are documented here. Entries go under
   empty 404 that Chrome showed as its own error page; the gateway's base, with
   or without the slash, now redirects to `admin/` under it, as `/` does on
   `:8423`.
+- **The server UI's About lists the capture daemon under Subsystems**, with
+  the control socket it answers on or why it does not; the card was empty.
 
 ## [0.1.14] — 2026-10-31
 

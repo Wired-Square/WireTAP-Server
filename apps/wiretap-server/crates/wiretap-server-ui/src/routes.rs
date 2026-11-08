@@ -13,7 +13,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use hyper::Method;
 use serde_json::{Map, Value, json};
-use wslib_appliance_server::{Admin, ApplianceState, Mount, Viewer, audit};
+use wslib_appliance_server::{About, Admin, ApplianceState, Mount, ProductAbout, Viewer, audit};
+use wslib_appliance_store::Store;
+use wslib_appliance_types::Availability;
+use wslib_appliance_types::about::Subsystem;
 
 use crate::daemon::{Daemon, Down};
 
@@ -27,7 +30,23 @@ pub fn routes(daemon: Daemon) -> Mount {
     let routes = Router::new()
         .route("/capture/status", get(status))
         .route("/capture/settings", get(settings).put(change));
-    Mount::new(routes, move |chassis| Capture { chassis, daemon })
+    let about = daemon.clone();
+    Mount::new(routes, move |chassis| Capture { chassis, daemon }).about(about)
+}
+
+impl About for Daemon {
+    async fn about(&self, _: &Store) -> ProductAbout {
+        let availability = self
+            .get("/v1/status")
+            .await
+            .map_or_else(Availability::unsupported, |_| {
+                Availability::ready(self.socket().display().to_string())
+            });
+        ProductAbout::new(
+            Vec::new(),
+            vec![Subsystem::new("Capture daemon", availability)],
+        )
+    }
 }
 
 async fn status(Viewer(_): Viewer, State(daemon): State<Daemon>) -> Response {

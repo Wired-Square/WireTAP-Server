@@ -216,6 +216,32 @@ async fn a_daemon_that_is_not_running_is_a_state_not_an_error() {
 }
 
 #[tokio::test]
+async fn about_lists_the_capture_daemon_and_whether_it_answers() {
+    let fake = Fake::start().await;
+    let absent = fake.dir.path().join("absent.sock");
+    for (daemon, state, said) in [
+        (fake.daemon(), "ready", "control.sock"),
+        (
+            Daemon::new(absent),
+            "unsupported",
+            "there is no control socket",
+        ),
+    ] {
+        let app = behind_a_console(daemon).await;
+        let about = app
+            .get("/api/about")
+            .from_console(&console("a", Role::Admin));
+        let subsystems = body_json(about.send().await).await["subsystems"].clone();
+        assert_eq!(subsystems[0]["name"], "Capture daemon", "{subsystems}");
+        assert_eq!(
+            subsystems[0]["availability"]["state"], state,
+            "{subsystems}"
+        );
+        assert!(subsystems.to_string().contains(said), "{subsystems}");
+    }
+}
+
+#[tokio::test]
 async fn served_self_an_account_meets_the_same_ladder() {
     use wslib_appliance_https::testing::Harness;
 
