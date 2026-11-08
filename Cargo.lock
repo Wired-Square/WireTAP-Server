@@ -2525,12 +2525,13 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wslib-appliance-types"
-version = "0.1.4"
+version = "0.1.7"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "6a9bafd1f75acd06076a29101b5da829462ce3aec369edcb834258aa73f84fc3"
+checksum = "a7e052b28c62ff58edd6f36583817a9838c98636d357e2e937c562aaf5e572e3"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
  "thiserror",
  "wslib-auth-passkey",
  "wslib-auth-totp",

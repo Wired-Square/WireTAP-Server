@@ -7,6 +7,9 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **The server and gateway take the latest wslib patch releases**, among them
+  `wslib-wiretap-protocol` 0.2.2, `wslib-wiretap-gateway` 0.2.1,
+  `wslib-appliance-types` 0.1.7, `wslib-can` 0.1.2 and `wslib-serial` 0.1.3.
 - **The registry mirror needs no token.** The gateway image builds without a
   BuildKit secret, `docker compose up --build` without exporting one, and the
   server app's `npm ci` without an `~/.npmrc` entry for the mirror; the
