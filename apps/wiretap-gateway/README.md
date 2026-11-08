@@ -50,7 +50,7 @@ Everything persistent is under `/data`, the image's only volume:
 
 The first start logs where the admin key is, never the key. Make keys for the
 desktop and the capture daemons in the admin UI's Keys tab, on 8423 under
-`/admin/`. Read the admin key with `docker exec <container> cat
+`/admin/`, or on ApplianceOS in the console's Gateway tab, under Keys. Read the admin key with `docker exec <container> cat
 /data/secrets/admin-key`. Setting `WIRETAP_ADMIN_KEY` on the container uses
 that key instead.
 

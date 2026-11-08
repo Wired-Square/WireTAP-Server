@@ -25,6 +25,13 @@ All notable changes to this project are documented here. Entries go under
   runs the UI on `/run/appliance/app.sock`; the gateway itself now listens on a
   private socket in the 0700 runtime directory and believes only the app's own
   uid there. Its React admin UI stays on 8423.
+- **The gateway app's console has the gateway's screens.** Where the UI is
+  bundled with a gateway, a Gateway tab holds Databases, Keys, Ingest,
+  Daemons, Activity, Log and Health, ported from the React admin UI onto the
+  appliance-ui kit; the console signs the caller in. Someone the gateway gives
+  only read sees Databases and Health, without their actions. An export streams
+  to disk from its one-time link, an import shows its upload's progress, and
+  the Log is the gateway's in-memory log, read every 3 s.
 
 ### Changed
 
