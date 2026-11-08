@@ -212,13 +212,13 @@ console on `app.sock` under `/apps/wiretap-server/`, which is also where
 ApplianceOS probes `healthz`. Under host networking a listener is a
 declaration only: ApplianceOS publishes nothing, and holds every declared
 port for clash checks whether it is on or off. So GVRET is declared on tcp 23,
-on, and the device-push listener on tcp 9324, off, clear of the gateway app's
-9323. The listener stays off until the UI or a config file turns it on.
+on, and the device-push listener on tcp 9324, off. The listener stays off
+until the UI or a config file turns it on.
 
 Don't install this app on a box that runs the
 [wiretap-gateway app](../wiretap-gateway/README.md): that app captures too, and
-both declare GVRET on tcp 23. This one is for capturing on another box and
-forwarding to a gateway.
+both declare GVRET on tcp 23 and device push on tcp 9324. This one is for
+capturing on another box and forwarding to a gateway.
 
 Without `/run/appliance` the UI serves its own HTTPS on 8443, and the image's
 `HEALTHCHECK` asks it for `/healthz`.
