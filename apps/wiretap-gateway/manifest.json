@@ -3,10 +3,13 @@
   "name": "wiretap-gateway",
   "arches": ["arm64", "amd64"],
   "sockets": { "app": true },
-  "network": "bridge",
+  "network": "host",
+  "capabilities": ["NET_RAW", "NET_BIND_SERVICE"],
   "volumes": [{ "name": "data", "at": "/data" }],
   "listeners": [
+    { "name": "gvret", "protocol": "tcp", "port": 23, "dns_sd": null, "enabled": true },
     { "name": "gateway", "protocol": "tcp", "port": 8423, "dns_sd": null, "enabled": true },
-    { "name": "ingest", "protocol": "tcp", "port": 9323, "dns_sd": null, "enabled": true }
+    { "name": "ingest", "protocol": "tcp", "port": 9323, "dns_sd": null, "enabled": true },
+    { "name": "device-push", "protocol": "tcp", "port": 9324, "dns_sd": null, "enabled": false }
   ]
 }

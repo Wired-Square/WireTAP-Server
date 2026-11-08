@@ -2,8 +2,8 @@
 
 | App | What |
 | --- | --- |
-| [wiretap-gateway](wiretap-gateway/README.md) | the gateway with its own Postgres and TimescaleDB |
-| [wiretap-server](wiretap-server/README.md) | the capture daemon and its web UI |
+| [wiretap-gateway](wiretap-gateway/README.md) | the gateway with its own Postgres and TimescaleDB, capturing the box's CAN buses |
+| [wiretap-server](wiretap-server/README.md) | the capture daemon and its web UI, for a box that forwards to a gateway elsewhere |
 
 Each `make-image.sh` writes one `docker load` tarball per architecture under
 `target/apps/`. This page is about shipping them to a box as a signed source.

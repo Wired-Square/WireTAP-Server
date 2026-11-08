@@ -10,6 +10,14 @@ All notable changes to this project are documented here. Entries go under
 - **The app build scripts read `.env.local` and `.env`** at the repository
   root, bare `KEY=value` lines that never override the environment;
   `.env.example` lists the names.
+- **The gateway app captures.** Its image runs the capture daemon beside the
+  gateway and Postgres, forwarding over loopback into the `capture` database
+  with an ingest key generated in `/data/secrets/ingest-key`. The app now asks
+  for host networking, `NET_RAW` and `NET_BIND_SERVICE`, so it installs only
+  from a signed source, and declares GVRET on tcp 23: it cannot share a box
+  with the server app. The gateway honours that key through
+  `WIRETAP_INGEST_KEY` or `WIRETAP_INGEST_KEY_FILE`, an ingest key beside the
+  stored ones.
 
 ### Changed
 
