@@ -1,6 +1,7 @@
 #!/bin/sh
-# Postgres, then the gateway on its Unix socket, then the capture daemon once
-# the gateway's ingest listens; stopped in the reverse order.
+# Postgres, then the gateway, then the capture daemon once the gateway's ingest
+# listens, then, behind an ApplianceOS console, the web UI; stopped in the
+# reverse order.
 set -eu
 
 PGDATA=/data/pg
@@ -37,6 +38,7 @@ halt() {
 }
 
 stop() {
+	halt ui "${ui:-}" 5
 	halt daemon "${daemon:-}" 15
 	halt gateway "${gw:-}" 5
 	[ -z "${pg:-}" ] || { kill -INT "$pg" 2>/dev/null && wait "$pg"; } || :
@@ -89,11 +91,12 @@ if [ ! -d "$PGDATA" ]; then
 	mv "$PGDATA.new" "$PGDATA"
 fi
 
-# Under <uid>:0 every process here shares group 0, so the control socket's
-# 0660 is no boundary: only this uid may enter its directory.
+# Under <uid>:0 every process here shares group 0, so the sockets' 0660 is no
+# boundary: only this uid may enter their directory.
 RUNTIME_DIRECTORY="/run/wiretap-server/$(id -u)"
 mkdir -p "$RUNTIME_DIRECTORY"
 chmod 0700 "$RUNTIME_DIRECTORY"
+GATEWAY_SOCKET="$RUNTIME_DIRECTORY/gateway.sock"
 
 # sysv, not posix: Docker's /dev/shm is 64 MB, and a parallel query outgrows it.
 # TimescaleDB's jobs share max_worker_processes with parallel query.
@@ -108,7 +111,9 @@ pg=$!
 
 # The cluster's password is the file's, which the gateway rotates in place.
 unset POSTGRES_PASSWORD
-wiretap-backend &
+# The UI is the gateway's console: the gateway believes its Appliance-Identity.
+WIRETAP_APP_SOCKET="$GATEWAY_SOCKET" WIRETAP_APP_BASE_PATH=/ WIRETAP_CONSOLE_UID="$(id -u)" \
+	wiretap-backend &
 gw=$!
 
 until ingest_listening; do
@@ -121,7 +126,21 @@ STATE_DIRECTORY=/data TMPDIR=/data RUNTIME_DIRECTORY="$RUNTIME_DIRECTORY" \
 	wiretap-server -C /etc/wiretap-server/wiretap-server.toml &
 daemon=$!
 
-while alive "$pg" "$gw" "$daemon"; do
+# ApplianceOS mounts the app's socket directory here; plain Docker does not, and
+# the gateway's own admin UI on 8423 serves instead.
+if awk '$5 == "/run/appliance" { found = 1 } END { exit !found }' /proc/self/mountinfo; then
+	STATE_DIRECTORY=/data TMPDIR=/data CONFIGURATION_DIRECTORY=/etc/wiretap-server-ui \
+		WIRETAP_SERVER_UI_APP_SOCKET=/run/appliance/app.sock \
+		WIRETAP_SERVER_UI_HOOKS_SOCKET=/run/appliance/hooks.sock \
+		WIRETAP_SERVER_UI_CONSOLE_UID="${WIRETAP_SERVER_UI_CONSOLE_UID:-0}" \
+		WIRETAP_SERVER_UI_BASE_PATH=/apps/wiretap-gateway/ \
+		WIRETAP_SERVER_UI_DAEMON_SOCKET="$RUNTIME_DIRECTORY/control.sock" \
+		WIRETAP_SERVER_UI_GATEWAY_SOCKET="$GATEWAY_SOCKET" \
+		wiretap-server-ui &
+	ui=$!
+fi
+
+while alive "$pg" "$gw" "$daemon" ${ui:+"$ui"}; do
 	tick 1
 done
 fail

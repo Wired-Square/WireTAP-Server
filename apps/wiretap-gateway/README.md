@@ -1,8 +1,9 @@
 # wiretap-gateway, the ApplianceOS app
 
 One image holding `wiretap-backend`, its own PostgreSQL 16 with TimescaleDB
-2.29.2, and the capture daemon `wiretap-server`, which archives the box's own
-CAN buses into it. An ApplianceOS app is one container, so the database rides
+2.29.2, the capture daemon `wiretap-server`, which archives the box's own
+CAN buses into it, and the web UI `wiretap-server-ui`, which serves the
+ApplianceOS console. An ApplianceOS app is one container, so the database rides
 inside it, under the app's `data` volume, until ApplianceOS has companion
 containers.
 
@@ -21,9 +22,11 @@ Each architecture becomes a `docker load` tarball,
 `target/apps/wiretap-gateway-<version>-<arch>.tar`, tagged
 `ghcr.io/wired-square/wiretap-gateway:<version>`, the gateway's version. The
 gateway and the daemon are static musl binaries cross-compiled with
-`cargo zigbuild`, as `packaging/make-deb.sh` builds the daemon, so the script
-needs `cargo-zigbuild`, `zig`, the two
-`*-unknown-linux-musl` Rust targets, `docker buildx` and `jq`.
+`cargo zigbuild`, as `packaging/make-deb.sh` builds the daemon, and the UI and
+its browser half as the [server app](../wiretap-server/README.md) builds them.
+So the script needs `apps/wiretap-server/frontend/node_modules`, the two
+`*-unknown-linux-musl` Rust targets, `cargo-zigbuild`, `zig`, `docker buildx`
+and `jq`, and for arm64 `wslib-appliance-xtask`.
 
 The image's `com.wiredsquare.appliance.manifest` label is `manifest.json` with
 the crate's version stamped in, so the label, the tag and
@@ -43,13 +46,13 @@ Everything persistent is under `/data`, the image's only volume:
 | `/data/secrets/admin-key` | generated on first start, mode 0600 |
 | `/data/secrets/ingest-key` | the daemon's key to the gateway, generated on first start, mode 0600 |
 | `/data/ui.toml`, `/data/cache*.db` | the daemon's settings from a UI, and its disk cache |
+| `/data/wiretap-server-ui.db` | the web UI's database, on ApplianceOS |
 
-The first start logs where the admin key is, never the key. Opened from the
-ApplianceOS console, the admin UI needs no key: the console says who you are,
-and a console admin is the gateway's admin. Make keys for the desktop and the
-capture daemons in its Keys tab. Outside ApplianceOS, read the admin key with
-`docker exec <container> cat /data/secrets/admin-key`. Setting
-`WIRETAP_ADMIN_KEY` on the container uses that key instead.
+The first start logs where the admin key is, never the key. Make keys for the
+desktop and the capture daemons in the admin UI's Keys tab, on 8423 under
+`/admin/`. Read the admin key with `docker exec <container> cat
+/data/secrets/admin-key`. Setting `WIRETAP_ADMIN_KEY` on the container uses
+that key instead.
 
 The image points the gateway at both files with `WIRETAP_PG_PASSWORD_FILE` and
 `WIRETAP_ADMIN_KEY_FILE`, so either can be rotated from the admin UI's Keys tab
@@ -57,8 +60,14 @@ The image points the gateway at both files with `WIRETAP_PG_PASSWORD_FILE` and
 db-password` (or `admin-key`), which prints the new value. The gateway saves it
 in the file, and nothing needs a restart. An admin key set with
 `WIRETAP_ADMIN_KEY` is rotated for good: put the new one there too, so the env
-matches. From the console, rotating a secret, or creating, rotating or revoking
-a key, needs your password confirmed in the console in the last five minutes.
+matches.
+
+Opened from the ApplianceOS console, the app is the web UI, which needs no key:
+the console says who you are, the UI passes that on to the gateway, and a
+console admin is the gateway's admin. Through the console, rotating a secret,
+or creating, rotating or revoking a key, needs your password confirmed in the
+console in the last five minutes. The UI's gateway screens are still to come;
+until then it shows the Capture screen.
 
 ## How it runs
 
@@ -67,14 +76,16 @@ password database, so it runs under `nss_wrapper` with a throwaway entry, and
 `/etc` is never written.
 
 `entrypoint.sh` starts Postgres, then the gateway, then the daemon once the
-gateway's ingest is listening on 9323. If any of the three exits on its own,
-the others are stopped and the container exits 1, so a supervisor sees it down.
+gateway's ingest is listening on 9323, then, on ApplianceOS, the UI. If any of
+them exits on its own, the others are stopped and the container exits 1, so a
+supervisor sees it down.
 
 On `SIGTERM` it stops them in the reverse order, within ApplianceOS's 30 s
 stop timeout:
 
 | Step | Signal | Allowed | Then |
 | --- | --- | --- | --- |
+| the UI | `SIGTERM` | 5 s | `SIGKILL` |
 | the daemon | `SIGTERM` | 15 s | `SIGKILL` |
 | the gateway | `SIGTERM` | 5 s | `SIGKILL` |
 | Postgres | `SIGINT`, a fast shutdown | the rest | the container's own kill |
@@ -111,12 +122,18 @@ published, and every declared port is held for the clash check, on or off.
 | `device-push` | tcp 9324, off | nothing until turned on | the daemon's listener for devices that push frames |
 
 Postgres listens only on a Unix socket in `/run/wiretap`, never on TCP. The
-gateway also serves `/run/appliance/app.sock` under `/apps/wiretap-gateway`,
-for the console's proxy. The manifest declares `sockets.app`, so ApplianceOS
-mounts the app's socket directory there and probes
-`/apps/wiretap-gateway/healthz` over it, which answers 200 while Postgres
-does. The image sets `WIRETAP_APP_SOCKET`, `WIRETAP_APP_BASE_PATH` and
-`WIRETAP_CONSOLE_UID=0`, the uid the console has inside the container.
+manifest declares `sockets.app`, so ApplianceOS mounts the app's socket
+directory at `/run/appliance`. When it is there, the UI serves the console on
+`app.sock`, and its hooks on `hooks.sock`, under `/apps/wiretap-gateway/`, and
+ApplianceOS probes `healthz` there, which answers 200 while the UI's database
+does. The console is uid 0 inside the container
+(`WIRETAP_SERVER_UI_CONSOLE_UID`). The UI reaches the daemon on its control
+socket and the gateway on `gateway.sock`, both in `/run/wiretap-server/<uid>`:
+the entrypoint gives the gateway that socket as `WIRETAP_APP_SOCKET`, at the
+root (`WIRETAP_APP_BASE_PATH=/`), with the app's own uid as
+`WIRETAP_CONSOLE_UID`: the gateway believes `Appliance-Identity` from that uid
+alone, and the 0700 directory keeps every other uid off the socket. Without
+`/run/appliance` the UI does not run.
 
 The `HEALTHCHECK`, for plain Docker, asks the gateway's `/healthz` on 8423,
 under `WIRETAP_BASE_PATH`, which answers 200 only while Postgres does.

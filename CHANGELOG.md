@@ -18,6 +18,13 @@ All notable changes to this project are documented here. Entries go under
   with the server app. The gateway honours that key through
   `WIRETAP_INGEST_KEY` or `WIRETAP_INGEST_KEY_FILE`, an ingest key beside the
   stored ones.
+- **The gateway app serves the ApplianceOS console through `wiretap-server-ui`.**
+  Given `WIRETAP_SERVER_UI_GATEWAY_SOCKET`, the UI passes `/api/gateway/v1/…`
+  to the gateway's `/v1/…`, naming the signed-in caller in
+  `Appliance-Identity`, and About lists the gateway. The gateway app's image
+  runs the UI on `/run/appliance/app.sock`; the gateway itself now listens on a
+  private socket in the 0700 runtime directory and believes only the app's own
+  uid there. Its React admin UI stays on 8423.
 
 ### Changed
 

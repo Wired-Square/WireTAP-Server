@@ -4,9 +4,11 @@
 //! One binary, two backends, picked at start as the chassis picks: with
 //! `WIRETAP_SERVER_UI_APP_SOCKET` and `_CONSOLE_UID` set it serves behind an
 //! ApplianceOS console (`wslib-appliance-server`), and without them its own
-//! HTTPS and accounts (`wslib-appliance-https`).
+//! HTTPS and accounts (`wslib-appliance-https`). Given a gateway's socket, it
+//! also serves that gateway's API.
 
 mod daemon;
+mod gateway;
 mod routes;
 #[cfg(test)]
 mod tests;
@@ -18,13 +20,14 @@ use std::time::Duration;
 
 use clap::Parser;
 use wslib_appliance_config::{ApplianceArgs, Resolver, ServingArgs};
-use wslib_appliance_server::{AppSocket, Logs};
+use wslib_appliance_server::{AppSocket, Logs, Mount};
 use wslib_appliance_store::Store;
 use wslib_appliance_types::Branding;
 use wslib_appliance_types::branding::ThemeTokens;
 use wslib_telemetry::Telemetry;
 
 use crate::daemon::Daemon;
+use crate::gateway::Gateway;
 
 const NAME: &str = "wiretap-server-ui";
 const ENV_PREFIX: &str = "WIRETAP_SERVER_UI";
@@ -51,6 +54,10 @@ struct Args {
         default_value = daemon::DEFAULT_SOCKET
     )]
     daemon_socket: PathBuf,
+
+    /// The app socket of a gateway bundled with this UI.
+    #[arg(long, value_name = "PATH", env = "WIRETAP_SERVER_UI_GATEWAY_SOCKET")]
+    gateway_socket: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -72,13 +79,17 @@ async fn run(
         .serving(&args.serving)
         .resolve(&args.appliance)?;
     let daemon = Daemon::new(args.daemon_socket);
+    let gateway = args.gateway_socket.map(Gateway::new);
     tracing::info!(
         version = VERSION,
         config = %bootstrap.config_path.display(),
         db = %bootstrap.db.display(),
         daemon = %daemon.socket().display(),
+        gateway = ?gateway.as_ref().map(Gateway::socket),
         "starting"
     );
+    let branding = branding(gateway.is_some());
+    let mounts = api(daemon, gateway);
     let store = Store::open(&bootstrap.db, None).await?;
     let sweep = |stop| {
         wslib_appliance_server::spawn_sweeper(
@@ -94,16 +105,16 @@ async fn run(
     let (sweeping, served) = match &bootstrap.proxied {
         Some(console) => {
             let server =
-                wslib_appliance_server::Server::new(store.clone(), branding(), VERSION, logs);
+                wslib_appliance_server::Server::new(store.clone(), branding, VERSION, logs);
             let sweeping = sweep(server.shutdown());
             let mut socket = AppSocket::new(console.app_socket.clone(), console.console_uid);
             if let Some(hooks) = &console.hooks_socket {
                 socket = socket.hooks(hooks.clone());
             }
-            let served = server
-                .logo(LOGO, "image/svg+xml")
-                .ui(bootstrap.ui.clone())
-                .api(routes::routes(daemon))
+            let server = server.logo(LOGO, "image/svg+xml").ui(bootstrap.ui.clone());
+            let served = mounts
+                .into_iter()
+                .fold(server, |server, mount| server.api(mount))
                 .serve(&bootstrap, socket, stop)
                 .await;
             (sweeping, served)
@@ -117,13 +128,12 @@ async fn run(
                 };
                 tracing::warn!(socket = %bootstrap.socket.display(), "no accounts yet: {how}");
             }
-            let server =
-                wslib_appliance_https::Server::new(store.clone(), branding(), VERSION, logs);
+            let server = wslib_appliance_https::Server::new(store.clone(), branding, VERSION, logs);
             let sweeping = sweep(server.shutdown());
-            let served = server
-                .logo(LOGO, "image/svg+xml")
-                .ui(bootstrap.ui.clone())
-                .api(routes::routes(daemon))
+            let server = server.logo(LOGO, "image/svg+xml").ui(bootstrap.ui.clone());
+            let served = mounts
+                .into_iter()
+                .fold(server, |server, mount| server.api(mount))
                 .users_routes()
                 .serve(&bootstrap, stop)
                 .await;
@@ -135,13 +145,24 @@ async fn run(
     Ok(served?)
 }
 
+fn api(daemon: Daemon, gateway: Option<Gateway>) -> Vec<Mount> {
+    let mut mounts = vec![routes::routes(daemon)];
+    mounts.extend(gateway.map(gateway::routes));
+    mounts
+}
+
 fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn branding() -> Branding {
+fn branding(with_gateway: bool) -> Branding {
     let mut branding = Branding::unbranded();
-    branding.app_name = "WireTAP Capture".to_string();
+    branding.app_name = if with_gateway {
+        "WireTAP Gateway"
+    } else {
+        "WireTAP Capture"
+    }
+    .to_string();
     branding.manufacturer = "Wired Square".to_string();
     // The same accent as frontend/src/theme.css, so the page does not repaint
     // when the branding request lands.

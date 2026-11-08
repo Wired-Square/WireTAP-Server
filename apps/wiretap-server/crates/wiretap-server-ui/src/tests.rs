@@ -1,4 +1,5 @@
-//! The routes against a fake control socket, as each backend serves them.
+//! The routes against a fake daemon and a fake gateway, as each backend
+//! serves them.
 
 use std::sync::{Arc, Mutex};
 
@@ -13,8 +14,9 @@ use wslib_appliance_server::testing::{Harness, body_json, console};
 use wslib_appliance_types::Role;
 
 use crate::daemon::Daemon;
-use crate::install_crypto_provider;
+use crate::gateway::Gateway;
 use crate::routes::routes;
+use crate::{api, install_crypto_provider};
 
 /// What the fake daemon answers. An accepted change is taken up only after
 /// `applying` more status reads, as a restart would leave it.
@@ -310,4 +312,266 @@ async fn served_self_an_account_with_totp_reaches_capture_after_its_code() {
     let session = Harness::session_from(&signed_in).expect("a session");
     let read = app.get("/api/capture/status").cookie(&session);
     assert_eq!(read.send().await.status(), StatusCode::OK);
+}
+
+/// A gateway that answers every `/v1/…` with what reached it, and `/healthz`
+/// with `health`.
+struct FakeGateway {
+    dir: TempDir,
+    heard: Arc<Mutex<u32>>,
+    health: Arc<Mutex<StatusCode>>,
+}
+
+impl FakeGateway {
+    async fn start() -> Self {
+        let dir = TempDir::with_prefix("wtgw").unwrap();
+        let heard = Arc::new(Mutex::new(0));
+        let health = Arc::new(Mutex::new(StatusCode::OK));
+        let status = Arc::clone(&health);
+        let counted = Arc::clone(&heard);
+        let router = Router::new()
+            .route(
+                "/healthz",
+                get(move || async move { *status.lock().unwrap() }),
+            )
+            .fallback(move |request: axum::extract::Request| async move {
+                *counted.lock().unwrap() += 1;
+                fake_gateway_echo(request).await
+            });
+        let listener = UnixListener::bind(dir.path().join("gateway.sock")).unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        Self { dir, heard, health }
+    }
+
+    fn gateway(&self) -> Gateway {
+        Gateway::new(self.dir.path().join("gateway.sock"))
+    }
+
+    fn heard(&self) -> u32 {
+        *self.heard.lock().unwrap()
+    }
+}
+
+async fn fake_gateway_echo(request: axum::extract::Request) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let (parts, body) = request.into_parts();
+    let header = |name: &str| {
+        parts
+            .headers
+            .get(name)
+            .map(|v| v.to_str().unwrap().to_string())
+    };
+    let body = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+    let status = match parts.uri.path() {
+        "/v1/refused" => StatusCode::FORBIDDEN,
+        _ => StatusCode::OK,
+    };
+    let heard = json!({
+        "method": parts.method.as_str(),
+        "uri": parts.uri.to_string(),
+        "identity": header("appliance-identity"),
+        "authorization": header("authorization"),
+        "cookie": header("cookie"),
+        "content_type": header("content-type"),
+        "body": String::from_utf8(body.to_vec()).unwrap(),
+    });
+    (
+        status,
+        [
+            ("content-disposition", "attachment; filename=\"a.wtar\""),
+            ("set-cookie", "appliance_session=forged"),
+            ("x-gateway", "internal"),
+        ],
+        Json(heard),
+    )
+        .into_response()
+}
+
+async fn with_gateway(gateway: Option<Gateway>) -> Harness {
+    let fake = Fake::start().await;
+    install_crypto_provider();
+    api(fake.daemon(), gateway)
+        .into_iter()
+        .fold(Harness::builder(), |harness, mount| harness.api(mount))
+        .build()
+        .await
+}
+
+#[tokio::test]
+async fn the_gateway_hears_the_signed_in_caller_and_nothing_of_the_browsers() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use wslib_appliance_types::console::ConsoleIdentity;
+
+    let fake = FakeGateway::start().await;
+    let app = with_gateway(Some(fake.gateway())).await;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let admin: ConsoleIdentity = format!(
+        "v1; id=z; user=Zo%C3%AB; role=admin; reauth={}",
+        now.as_secs()
+    )
+    .parse()
+    .unwrap();
+    let post = app
+        .post("/api/gateway/v1/admin/keys?database=site")
+        .from_console(&admin)
+        .header("authorization", "Bearer from-the-browser")
+        .header("cookie", "appliance_session=abc")
+        .body("application/json", br#"{"name":"bench"}"#.to_vec())
+        .send()
+        .await;
+    assert_eq!(post.status(), StatusCode::OK);
+    let headers = post.headers().clone();
+    assert_eq!(
+        headers["content-disposition"],
+        "attachment; filename=\"a.wtar\""
+    );
+    assert!(headers.get("set-cookie").is_none());
+    assert!(headers.get("x-gateway").is_none());
+
+    let heard = body_json(post).await;
+    assert_eq!(heard["method"], "POST");
+    assert_eq!(heard["uri"], "/v1/admin/keys?database=site");
+    assert_eq!(heard["body"], r#"{"name":"bench"}"#);
+    assert_eq!(heard["content_type"], "application/json");
+    assert_eq!(heard["authorization"], Value::Null);
+    assert_eq!(heard["cookie"], Value::Null);
+    let identity: ConsoleIdentity = heard["identity"].as_str().unwrap().parse().unwrap();
+    assert_eq!(identity.username, "Zoë");
+    assert_eq!(identity.role, Role::Admin);
+    assert_eq!(identity.reauthenticated_at, admin.reauthenticated_at);
+    assert!(admin.reauthenticated_at.is_some());
+
+    let read = app
+        .get("/api/gateway/v1/whoami")
+        .from_console(&console("v", Role::Viewer));
+    let heard = body_json(read.send().await).await;
+    let identity: ConsoleIdentity = heard["identity"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        (identity.username.as_str(), identity.role),
+        ("v", Role::Viewer)
+    );
+    assert_eq!(identity.reauthenticated_at, None);
+}
+
+#[tokio::test]
+async fn only_an_account_reaches_the_gateway() {
+    let fake = FakeGateway::start().await;
+    let app = with_gateway(Some(fake.gateway())).await;
+    let path = "/api/gateway/v1/whoami";
+
+    assert_eq!(
+        app.get(path).send().await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let local = app.get(path).local().send().await;
+    assert_eq!(local.status(), StatusCode::FORBIDDEN);
+    assert_eq!(fake.heard(), 0);
+}
+
+#[tokio::test]
+async fn the_gateways_refusals_and_only_its_api_come_through() {
+    let fake = FakeGateway::start().await;
+    let app = with_gateway(Some(fake.gateway())).await;
+    let viewer = console("v", Role::Viewer);
+
+    let refused = app.delete("/api/gateway/v1/refused").from_console(&viewer);
+    let refused = refused.send().await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(refused).await["method"], "DELETE");
+
+    for outside in ["/api/gateway/healthz", "/api/gateway/admin/"] {
+        let outside = app.get(outside).from_console(&viewer).send().await;
+        assert_eq!(outside.status(), StatusCode::NOT_FOUND);
+    }
+    assert_eq!(fake.heard(), 1);
+}
+
+#[tokio::test]
+async fn without_a_gateway_there_is_no_gateway_surface() {
+    let app = with_gateway(None).await;
+    let admin = console("a", Role::Admin);
+
+    let whoami = app.get("/api/gateway/v1/whoami").from_console(&admin);
+    assert_eq!(whoami.send().await.status(), StatusCode::NOT_FOUND);
+    let about = app.get("/api/about").from_console(&admin).send().await;
+    let subsystems = body_json(about).await["subsystems"].to_string();
+    assert!(!subsystems.contains("Gateway"), "{subsystems}");
+}
+
+#[tokio::test]
+async fn about_lists_the_gateway_and_whether_its_database_answers() {
+    let fake = FakeGateway::start().await;
+    let absent = Gateway::new(fake.dir.path().join("absent.sock"));
+    let admin = console("a", Role::Admin);
+
+    for (gateway, health, state, said) in [
+        (fake.gateway(), StatusCode::OK, "ready", "gateway.sock"),
+        (
+            fake.gateway(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unsupported",
+            "its database is not answering",
+        ),
+        (absent, StatusCode::OK, "unsupported", "there is no socket"),
+    ] {
+        *fake.health.lock().unwrap() = health;
+        let app = with_gateway(Some(gateway)).await;
+        let about = app.get("/api/about").from_console(&admin).send().await;
+        let subsystems = body_json(about).await["subsystems"].clone();
+        let gateway = &subsystems[1];
+        assert_eq!(gateway["name"], "Gateway", "{subsystems}");
+        assert_eq!(gateway["availability"]["state"], state, "{subsystems}");
+        assert!(gateway.to_string().contains(said), "{subsystems}");
+    }
+}
+
+#[tokio::test]
+async fn a_gateway_that_is_not_running_is_a_503_saying_so() {
+    let dir = TempDir::with_prefix("wtgw-down").unwrap();
+    let stale = dir.path().join("stale.sock");
+    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+
+    for (socket, said) in [
+        (dir.path().join("absent.sock"), "there is no socket"),
+        (stale, "nothing is listening"),
+    ] {
+        let app = with_gateway(Some(Gateway::new(socket))).await;
+        let read = app
+            .get("/api/gateway/v1/databases")
+            .from_console(&console("v", Role::Viewer));
+        let read = read.send().await;
+        assert_eq!(read.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = body_json(read).await["error"].as_str().unwrap().to_string();
+        assert!(error.starts_with("the gateway is not answering"), "{error}");
+        assert!(error.contains(said), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn served_self_the_gateway_hears_the_account_not_a_forged_header() {
+    use wslib_appliance_https::testing::{Harness, body_json};
+    use wslib_appliance_types::console::ConsoleIdentity;
+
+    let fake = FakeGateway::start().await;
+    let daemon = Fake::start().await;
+    install_crypto_provider();
+    let app = api(daemon.daemon(), Some(fake.gateway()))
+        .into_iter()
+        .fold(Harness::builder(), |harness, mount| harness.api(mount))
+        .build()
+        .await;
+    let operator = app.signed_in("operator", Role::Operator).await;
+    let read = app
+        .get("/api/gateway/v1/whoami")
+        .cookie(&operator)
+        .header("appliance-identity", "v1; id=x; user=root; role=admin")
+        .send()
+        .await;
+    let heard = body_json(read).await;
+    let identity: ConsoleIdentity = heard["identity"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        (identity.username.as_str(), identity.role),
+        ("operator", Role::Operator)
+    );
 }

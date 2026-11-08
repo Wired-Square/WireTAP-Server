@@ -1,6 +1,6 @@
 # The wiretap-gateway ApplianceOS app: wiretap-backend, its own Postgres and
-# TimescaleDB, and the capture daemon forwarding to it, in one image. Built by
-# make-image.sh from the context it stages.
+# TimescaleDB, the capture daemon forwarding to it, and its web UI, in one
+# image. Built by make-image.sh from the context it stages.
 
 # Pinned like the compose files; the schema needs 2.28.1 or later.
 ARG TIMESCALEDB_VERSION=2.29.2
@@ -43,24 +43,22 @@ FROM alpine:3.23.5
 # a per-uid socket directory.
 RUN --mount=type=bind,from=postgres,source=/rundeps,target=/rundeps \
     apk add --no-cache $(cat /rundeps) icu-data-full nss_wrapper tzdata \
-    && install -d -o 10001 -g 0 -m 0770 /data /run/wiretap /run/appliance \
+    && install -d -o 10001 -g 0 -m 0770 /data /run/wiretap \
     && install -d -m 1770 /run/wiretap-server
 COPY --from=postgres /usr/local /usr/local
 COPY --from=admin-ui /ui/dist /usr/share/wiretap-admin
 COPY --from=capabilities /usr/bin/wiretap-server /usr/bin/
+COPY --chmod=0755 wiretap-server-ui /usr/bin/
 COPY wiretap-backend entrypoint.sh /usr/local/bin/
+COPY ui/ /usr/share/wiretap-server-ui/ui/
 COPY wiretap-server.toml /etc/wiretap-server/
 
-# The console mounts the app's socket directory at /run/appliance.
 ENV LANG=en_US.utf8 \
     WIRETAP_PG_HOST=/run/wiretap \
     WIRETAP_PG_USER=postgres \
     WIRETAP_PG_PASSWORD_FILE=/data/secrets/postgres-password \
     WIRETAP_ADMIN_KEY_FILE=/data/secrets/admin-key \
-    WIRETAP_INGEST_KEY_FILE=/data/secrets/ingest-key \
-    WIRETAP_APP_SOCKET=/run/appliance/app.sock \
-    WIRETAP_APP_BASE_PATH=/apps/wiretap-gateway \
-    WIRETAP_CONSOLE_UID=0
+    WIRETAP_INGEST_KEY_FILE=/data/secrets/ingest-key
 
 ARG VERSION
 ARG MANIFEST

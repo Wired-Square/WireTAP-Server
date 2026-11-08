@@ -38,7 +38,12 @@ One binary, chosen at start the chassis's way:
 
 Either way the daemon is `--daemon-socket` or `WIRETAP_SERVER_UI_DAEMON_SOCKET`,
 by default `/run/wiretap-server/control.sock`, and this process must be in the
-daemon's group to open it. Every other setting is the chassis's, under the
+daemon's group to open it. In the [gateway app](../wiretap-gateway/README.md)
+it is also given the gateway's app socket, `--gateway-socket` or
+`WIRETAP_SERVER_UI_GATEWAY_SOCKET`. Then it passes `/api/gateway/v1/…` to the
+gateway's `/v1/…` for anyone signed in, naming them in `Appliance-Identity`,
+and the gateway decides what they may do; About lists the gateway, and the
+shell is named WireTAP Gateway. Without it there is no `/api/gateway`. Every other setting is the chassis's, under the
 `WIRETAP_SERVER_UI_` prefix; `--help` lists the flags.
 
 Anyone signed in reads the status and the settings. Only an admin changes them

@@ -1,8 +1,9 @@
 # shellcheck shell=sh
 # Sourced by apps/<name>/make-image.sh, once it has set PACKAGE and defined
 # stage (the shared build context) and stage_arch (one architecture's
-# binaries, given its Rust target). Writes a `docker load` tarball per
-# architecture: target/apps/<name>-<version>-<arch>.tar.
+# binaries, given its Rust target), which may call the stage_server_ui
+# functions below. Writes a `docker load` tarball per architecture:
+# target/apps/<name>-<version>-<arch>.tar.
 #
 # The label is manifest.json with PACKAGE's version stamped in, so the label,
 # the tag and the OCI version label cannot disagree.
@@ -10,6 +11,35 @@
 die() {
 	echo "make-image: $1" >&2
 	exit 1
+}
+
+# The server app's browser half, built into the context's ui/.
+stage_server_ui() {
+	ui=apps/wiretap-server/frontend
+	[ -d "$ui/node_modules" ] || die "run npm ci in $ui first"
+	npm --prefix "$ui" run build >/dev/null
+	cp -R "$ui/dist" "$CONTEXT/ui"
+}
+
+# wiretap-server-ui for the Rust target $1, linked as its package is, through
+# the rendered build-binary.sh, which also refuses a binary with no build id or
+# an unpatched Cortex-A53 site.
+stage_server_ui_binary() {
+	(
+		cd apps/wiretap-server || exit
+		unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+		lld="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/rust-lld"
+		export CARGO_BUILD_TARGET="$1"
+		export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER:-$lld}"
+		export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-$lld}"
+		export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=--fix-cortex-a53-843419"
+		BINARY=wiretap-server-ui
+		TARGET_DIR=target
+		. scaffold/packaging/build-binary.sh
+		binary_arch
+		build_binary
+		cp "$BIN" "$CONTEXT/"
+	)
 }
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
