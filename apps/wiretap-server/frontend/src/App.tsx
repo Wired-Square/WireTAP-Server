@@ -19,6 +19,7 @@ import {
 import type { Role } from "@wired-square/appliance-types";
 import { Loaded, TabPanel, Tabs } from "@wired-square/kit";
 
+import { BrandedTitle } from "./BrandedTitle";
 import { Capture } from "./Capture";
 import { Gateway } from "./gateway/Gateway";
 import type { Caller } from "./gateway/wire";
@@ -78,6 +79,7 @@ export function App() {
         return (
           <Chrome
             nav={<Tabs aria-label="Sections" tabs={offered()} selected={shown()} onChange={choose} />}
+            controls={<BrandedTitle />}
           >
             <TabPanel id="capture" selected={shown()}>
               <Capture me={who()} />

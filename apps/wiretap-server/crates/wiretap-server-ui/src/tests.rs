@@ -222,11 +222,15 @@ async fn about_lists_the_capture_daemon_and_whether_it_answers() {
     let fake = Fake::start().await;
     let absent = fake.dir.path().join("absent.sock");
     for (daemon, state, said) in [
-        (fake.daemon(), "ready", "control.sock"),
+        (
+            fake.daemon(),
+            "ready",
+            format!("running, on {}", fake.daemon().socket().display()),
+        ),
         (
             Daemon::new(absent),
             "unsupported",
-            "there is no control socket",
+            "there is no control socket".to_string(),
         ),
     ] {
         let app = behind_a_console(daemon).await;
@@ -239,7 +243,7 @@ async fn about_lists_the_capture_daemon_and_whether_it_answers() {
             subsystems[0]["availability"]["state"], state,
             "{subsystems}"
         );
-        assert!(subsystems.to_string().contains(said), "{subsystems}");
+        assert!(subsystems.to_string().contains(&said), "{subsystems}");
     }
 }
 
@@ -538,14 +542,24 @@ async fn about_lists_the_gateway_and_whether_its_database_answers() {
     let admin = console("a", Role::Admin);
 
     for (gateway, health, state, said) in [
-        (fake.gateway(), StatusCode::OK, "ready", "gateway.sock"),
+        (
+            fake.gateway(),
+            StatusCode::OK,
+            "ready",
+            format!("running, on {}", fake.gateway().socket().display()),
+        ),
         (
             fake.gateway(),
             StatusCode::SERVICE_UNAVAILABLE,
             "unsupported",
-            "its database is not answering",
+            "its database is not answering".to_string(),
         ),
-        (absent, StatusCode::OK, "unsupported", "there is no socket"),
+        (
+            absent,
+            StatusCode::OK,
+            "unsupported",
+            "there is no socket".to_string(),
+        ),
     ] {
         *fake.health.lock().unwrap() = health;
         let app = with_gateway(Some(gateway)).await;
@@ -554,7 +568,7 @@ async fn about_lists_the_gateway_and_whether_its_database_answers() {
         let gateway = &subsystems[1];
         assert_eq!(gateway["name"], "Gateway", "{subsystems}");
         assert_eq!(gateway["availability"]["state"], state, "{subsystems}");
-        assert!(gateway.to_string().contains(said), "{subsystems}");
+        assert!(gateway.to_string().contains(&said), "{subsystems}");
     }
 }
 

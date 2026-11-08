@@ -92,6 +92,15 @@ All notable changes to this project are documented here. Entries go under
   `:8423`.
 - **The server UI's About lists the capture daemon under Subsystems**, with
   the control socket it answers on or why it does not; the card was empty.
+- **The gateway app's browser tab says "WireTAP Gateway"**, following the
+  branding, where it said "WireTAP Capture".
+- **About shows the product's version**, the root workspace's that the
+  release tags and the images carry, in place of the UI crate's own 0.1.0.
+- **About's Subsystems say the capture daemon and the gateway are running**,
+  beside the socket each answers on; one that does not answer still reads
+  "Not running" with why.
+- **The gateway logs its app socket at the root as "under /"**, where the
+  base path was left blank.
 
 ## [0.1.14] — 2026-10-31
 

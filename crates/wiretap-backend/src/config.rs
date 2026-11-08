@@ -50,6 +50,17 @@ pub struct AppSocket {
     pub base_path: String,
 }
 
+impl AppSocket {
+    /// The base path as a log line names it: `/` for the root.
+    pub fn served_under(&self) -> &str {
+        if self.base_path.is_empty() {
+            "/"
+        } else {
+            &self.base_path
+        }
+    }
+}
+
 /// The uid every unmapped uid appears as under userns-remap, so it cannot tell
 /// the console apart.
 const OVERFLOW_UID: u32 = 65534;
@@ -176,7 +187,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalise_base_path, secret_var};
+    use super::{normalise_base_path, secret_var, AppSocket};
 
     /// Each test owns its variable names: the environment is the process's.
     #[test]
@@ -211,6 +222,21 @@ mod tests {
             ("/v1.2_x~y/", "/v1.2_x~y"),
         ] {
             assert_eq!(normalise_base_path(raw).as_deref(), Some(want), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_app_socket_at_the_root_is_logged_as_under_slash() {
+        for (base_path, want) in [
+            ("", "/"),
+            ("/apps/wiretap-gateway", "/apps/wiretap-gateway"),
+        ] {
+            let socket = AppSocket {
+                path: "app.sock".into(),
+                console_uid: 0,
+                base_path: base_path.into(),
+            };
+            assert_eq!(socket.served_under(), want);
         }
     }
 

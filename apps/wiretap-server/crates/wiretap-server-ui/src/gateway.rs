@@ -29,6 +29,8 @@ use wslib_appliance_types::Availability;
 use wslib_appliance_types::about::Subsystem;
 use wslib_appliance_types::console::{ConsoleIdentity, IDENTITY_HEADER};
 
+use crate::routes::running_on;
+
 const PASSED_ON: [HeaderName; 3] = [ACCEPT, CONTENT_LENGTH, CONTENT_TYPE];
 const PASSED_BACK: [HeaderName; 5] = [
     CACHE_CONTROL,
@@ -96,9 +98,7 @@ impl Gateway {
             .body(Body::empty())
             .expect("a static request");
         match tokio::time::timeout(HEALTH_WAIT, self.send(request)).await {
-            Ok(Ok(answer)) if answer.status() == StatusCode::OK => {
-                Availability::ready(self.socket.display().to_string())
-            }
+            Ok(Ok(answer)) if answer.status() == StatusCode::OK => running_on(&self.socket),
             Ok(Ok(answer)) => Availability::unsupported(format!(
                 "it answers {}: its database is not answering",
                 answer.status()

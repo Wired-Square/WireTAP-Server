@@ -6,6 +6,8 @@
 //! daemon is not answering. A refusal from the daemon keeps its status and
 //! body, so the screen shows the daemon's own sentence and `where`.
 
+use std::path::Path;
+
 use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -39,14 +41,17 @@ impl About for Daemon {
         let availability = self
             .get("/v1/status")
             .await
-            .map_or_else(Availability::unsupported, |_| {
-                Availability::ready(self.socket().display().to_string())
-            });
+            .map_or_else(Availability::unsupported, |_| running_on(self.socket()));
         ProductAbout::new(
             Vec::new(),
             vec![Subsystem::new("Capture daemon", availability)],
         )
     }
+}
+
+/// A subsystem that answered, saying so: About shows a ready one's `via` alone.
+pub fn running_on(socket: &Path) -> Availability {
+    Availability::ready(format!("running, on {}", socket.display()))
 }
 
 async fn status(Viewer(_): Viewer, State(daemon): State<Daemon>) -> Response {

@@ -9,6 +9,7 @@ import { render } from "solid-js/web";
 import { FirstAccount, Shell, SignIn, useSession } from "@wired-square/appliance-ui";
 
 import { App } from "./App";
+import { BrandedTitle } from "./BrandedTitle";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("index.html has no #root to render into");
@@ -21,6 +22,7 @@ function FirstAdmin() {
 render(
   () => (
     <Shell
+      controls={<BrandedTitle />}
       signIn={
         <SignIn
           help={

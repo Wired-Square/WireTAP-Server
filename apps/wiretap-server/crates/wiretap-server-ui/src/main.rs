@@ -31,7 +31,7 @@ use crate::gateway::Gateway;
 
 const NAME: &str = "wiretap-server-ui";
 const ENV_PREFIX: &str = "WIRETAP_SERVER_UI";
-const VERSION: &str = wslib_build_id::build_version!();
+const VERSION: &str = concat!(env!("WIRETAP_VERSION"), " (", env!("WSLIB_BUILD_ID"), ")");
 const KEEP_AUDIT: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const LOGO: &[u8] =
     include_bytes!("../../../../../crates/wiretap-backend/admin-ui/public/logo.svg");

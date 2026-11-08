@@ -157,7 +157,7 @@ async fn run(config: Arc<Config>, logs: Logs) -> Result<(), String> {
         tracing::info!(
             "app socket listening on {}, under {}, for console uid {}",
             socket.path.display(),
-            socket.base_path,
+            socket.served_under(),
             socket.console_uid
         );
         let app = http::app_socket_router(app_state.clone(), &config, socket)
