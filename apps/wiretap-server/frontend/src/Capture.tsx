@@ -326,13 +326,15 @@ function Fields(props: { state: FormState }) {
       <For each={GROUPS}>
         {(group) => (
           <Section title={group.title} blurb={group.blurb} level={3}>
-            <For each={group.fields}>
-              {(field) => (
-                <Show when={setting(props.state.settings, field.key)}>
-                  {(now) => <Input field={field} now={now()} state={props.state} />}
-                </Show>
-              )}
-            </For>
+            <div class="capture-fields">
+              <For each={group.fields}>
+                {(field) => (
+                  <Show when={setting(props.state.settings, field.key)}>
+                    {(now) => <Input field={field} now={now()} state={props.state} />}
+                  </Show>
+                )}
+              </For>
+            </div>
           </Section>
         )}
       </For>
@@ -365,13 +367,15 @@ function Input(props: { field: SettingField; now: Setting; state: FormState }) {
   switch (props.field.kind) {
     case "flag":
       return (
-        <Tick
-          label={props.field.label}
-          hint={props.now.pinned ? provenance(props.now) : undefined}
-          checked={typed() === true}
-          disabled={locked()}
-          onChange={set}
-        />
+        <p>
+          <Tick
+            label={props.field.label}
+            hint={props.now.pinned ? provenance(props.now) : undefined}
+            checked={typed() === true}
+            disabled={locked()}
+            onChange={set}
+          />
+        </p>
       );
     case "level":
       return (
@@ -400,11 +404,13 @@ function Input(props: { field: SettingField; now: Setting; state: FormState }) {
             onInput={(e) => set(e.currentTarget.value)}
           />
           <Show when={!locked() && props.now.source === "ui" && props.now.set}>
-            <Tick
-              label={`Remove the ${props.field.label.toLowerCase()} set here`}
-              checked={props.state.removing.includes(props.field.key)}
-              onChange={(on) => props.state.setRemoving(props.field.key, on)}
-            />
+            <p>
+              <Tick
+                label={`Remove the ${props.field.label.toLowerCase()} set here`}
+                checked={props.state.removing.includes(props.field.key)}
+                onChange={(on) => props.state.setRemoving(props.field.key, on)}
+              />
+            </p>
           </Show>
         </>
       );

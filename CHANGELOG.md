@@ -37,6 +37,15 @@ All notable changes to this project are documented here. Entries go under
   limit, and a right one clears its address's count, so clients behind one NAT
   address can lock each other out for up to 15 minutes.
 - **CI and the release build pin `wslib-appliance-xtask` 0.2.5.**
+- **The server app is on `wslib-appliance-https` and `-server` 0.1.4,
+  `-types` 0.1.7 and `-store` 0.1.3, and in the browser on `appliance-ui`
+  0.10.1 and `kit` 0.4.1.** Disabling, enabling or deleting an account on the
+  Users screen now asks for the administrator's own password, or a code or a
+  passkey while their TOTP is on; a page loaded from an older UI has those
+  refused until it reloads. **Upgrading migrates the UI's database one way**:
+  an older image refuses it afterwards, so going back needs a copy of `/data`
+  (or `/var/lib/wiretap-server-ui`) taken before the upgrade, as ApplianceOS's
+  upgrade snapshot is.
 
 ## [0.1.14] — 2026-10-31
 

@@ -12,9 +12,9 @@
     "ci": "npm run check && npm test && npm run build"
   },
   "dependencies": {
-    "@wired-square/appliance-types": "^0.1.0",
-    "@wired-square/appliance-ui": "^0.1.0",
-    "@wired-square/kit": "^0.3.1",
+    "@wired-square/appliance-types": "^0.1.5",
+    "@wired-square/appliance-ui": "^0.10.1",
+    "@wired-square/kit": "^0.4.1",
     "solid-js": "^1.9.17"
   },
   "devDependencies": {
