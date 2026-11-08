@@ -95,6 +95,9 @@ All notable changes to this project are documented here. Entries go under
   hidden, and reads once when it is shown again.
 - **The web UI is set in Ubuntu**, served from the UI itself (regular,
   italic, medium and bold, Latin only) with the Ubuntu Font Licence beside the
+- **The server app's browser half is on `appliance-ui` 0.13.0.** An action
+  that needs the administrator's password, a code or a passkey asks for it in
+  a dialog.
   files; monospace is unchanged.
 
 ### Fixed
