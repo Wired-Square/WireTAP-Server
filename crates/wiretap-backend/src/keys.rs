@@ -201,6 +201,7 @@ struct Bootstrap {
 pub struct KeyStore {
     dbs: Databases,
     bootstrap: Arc<std::sync::RwLock<Bootstrap>>,
+    configured_ingest: Option<String>,
     /// key_hash -> KeyInfo for enabled keys.
     cache: Arc<RwLock<HashMap<String, KeyInfo>>>,
     /// Shared by the HTTP API and ingest, so a guesser gains nothing by
@@ -217,9 +218,15 @@ impl KeyStore {
                 current: configured.clone(),
                 configured,
             })),
+            configured_ingest: None,
             cache: Arc::new(RwLock::new(HashMap::new())),
             wrong_keys: Attempts::default(),
         }
+    }
+
+    pub fn with_ingest_key(mut self, key: Option<&str>) -> Self {
+        self.configured_ingest = key.map(hash_key);
+        self
     }
 
     /// The configured admin key was rotated away, so the deployment should be
@@ -347,6 +354,15 @@ impl KeyStore {
                 id: 0,
                 name: "bootstrap-admin".into(),
                 role: Role::Admin,
+                database_pin: None,
+                console: None,
+            });
+        }
+        if self.configured_ingest.as_deref() == Some(h.as_str()) {
+            return Some(KeyInfo {
+                id: 0,
+                name: "configured-ingest".into(),
+                role: Role::Ingest,
                 database_pin: None,
                 console: None,
             });
@@ -565,6 +581,16 @@ pub(crate) mod tests {
             "the right key cleared the count"
         );
         assert_eq!(validated(other, "wrong").await, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn the_configured_ingest_key_ingests_into_any_database_and_nothing_more() {
+        let store = KeyStore::new(crate::db::tests::unreachable_databases(false), None)
+            .with_ingest_key(Some("local"));
+        let info = store.validate("local").await.expect("honoured");
+        assert_eq!(info.role, Role::Ingest);
+        assert_eq!(info.database_pin, None);
+        assert!(store.validate("other").await.is_none());
     }
 
     #[tokio::test]

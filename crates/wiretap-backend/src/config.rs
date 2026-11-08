@@ -23,6 +23,8 @@ pub struct Config {
     /// Break-glass admin API key, honoured until rotated (cannot be revoked
     /// from the admin UI). Optional — without it, keys must be seeded in SQL.
     pub bootstrap_admin_key: Option<Secret>,
+    /// An ingest key honoured beside the stored ones; never listed or rotated.
+    pub ingest_key: Option<Secret>,
     pub secret_files: SecretFiles,
     /// Allow ingest clients / imports to auto-create unknown databases.
     pub auto_create_databases: bool,
@@ -144,6 +146,7 @@ impl Config {
             pg_password,
             default_database: var_or("WIRETAP_DEFAULT_DB", "wiretap"),
             bootstrap_admin_key,
+            ingest_key: secret_var("WIRETAP_INGEST_KEY", "WIRETAP_INGEST_KEY_FILE")?.0,
             secret_files: SecretFiles {
                 pg_password: pg_password_file,
                 admin_key: admin_key_file,

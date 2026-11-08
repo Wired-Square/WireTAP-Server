@@ -350,6 +350,8 @@ for, and `auto_migrate`.
 | `WIRETAP_ADMIN_KEY` | — | Break-glass admin key |
 | `WIRETAP_PG_PASSWORD_FILE` | — | Read the Postgres password from this file, where a rotation saves the new one. `POSTGRES_PASSWORD` wins over it |
 | `WIRETAP_ADMIN_KEY_FILE` | — | The same for the admin key. `WIRETAP_ADMIN_KEY` wins over it |
+| `WIRETAP_INGEST_KEY` | — | An ingest key, for any database, beside the ones in the Keys tab; for a capture daemon deployed with the gateway. Not listed or rotated there |
+| `WIRETAP_INGEST_KEY_FILE` | — | The same, read from this file. `WIRETAP_INGEST_KEY` wins over it |
 | `WIRETAP_DEFAULT_DB` | `wiretap` | The [gateway's own database](#the-gateways-own-database): keys and catalogues, never captures |
 | `WIRETAP_AUTO_CREATE` | `true` | Allow ingest/import to auto-create databases |
 | `WIRETAP_AUTO_MIGRATE` | `false` | Off, a capture database behind the schema waits for **Migrate now**, refusing reads and buffering ingest; on, every one is migrated on start. A new database is initialised either way |
