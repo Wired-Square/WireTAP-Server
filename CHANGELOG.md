@@ -80,7 +80,7 @@ All notable changes to this project are documented here. Entries go under
   upgrade snapshot is.
 
 - **The server app's browser half is on `appliance-ui` 0.11.0 and `kit`
-  0.4.2.** A screen that re-reads itself on a timer stops while its tab is
+  0.4.3.** A screen that re-reads itself on a timer stops while its tab is
   hidden, and reads once when it is shown again.
 
 ### Fixed
