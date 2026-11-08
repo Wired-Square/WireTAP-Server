@@ -20,11 +20,24 @@ function FirstAdmin() {
   return <FirstAccount appName={branding()?.app_name ?? ""} onDone={refresh} />;
 }
 
+function tapWordmark(name: string) {
+  const at = name.indexOf("TAP");
+  if (at < 0) return name;
+  return (
+    <>
+      {name.slice(0, at)}
+      <span class="tap-wordmark">TAP</span>
+      {name.slice(at + 3)}
+    </>
+  );
+}
+
 applyScheme();
 
 render(
   () => (
     <Shell
+      wordmark={tapWordmark}
       controls={
         <>
           <SchemePicker />

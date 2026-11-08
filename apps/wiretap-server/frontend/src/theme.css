@@ -45,6 +45,10 @@
   color: var(--app-text-muted);
 }
 
+.tap-wordmark {
+  color: var(--app-accent);
+}
+
 .capture-device {
   display: flex;
   flex-wrap: wrap;

@@ -7,6 +7,8 @@ All notable changes to this project are documented here. Entries go under
 
 ### Added
 
+- **The app's name is drawn with "TAP" in the accent orange**, in the
+  masthead and on the sign-in page, light and dark.
 - **The app build scripts read `.env.local` and `.env`** at the repository
   root, bare `KEY=value` lines that never override the environment;
   `.env.example` lists the names.
@@ -93,11 +95,11 @@ All notable changes to this project are documented here. Entries go under
 - **The server app's browser half is on `appliance-ui` 0.11.0 and `kit`
   0.4.3.** A screen that re-reads itself on a timer stops while its tab is
   hidden, and reads once when it is shown again.
-- **The web UI is set in Ubuntu**, served from the UI itself (regular,
-  italic, medium and bold, Latin only) with the Ubuntu Font Licence beside the
 - **The server app's browser half is on `appliance-ui` 0.13.0.** An action
   that needs the administrator's password, a code or a passkey asks for it in
   a dialog.
+- **The web UI is set in Ubuntu**, served from the UI itself (regular,
+  italic, medium and bold, Latin only) with the Ubuntu Font Licence beside the
   files; monospace is unchanged.
 
 ### Fixed
