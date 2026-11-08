@@ -30,6 +30,7 @@ All notable changes to this project are documented here. Entries go under
   forgets them. The daemon's ingest refuses even the right token past the
   limit, and a right one clears its address's count, so clients behind one NAT
   address can lock each other out for up to 15 minutes.
+- **CI and the release build pin `wslib-appliance-xtask` 0.2.5.**
 
 ## [0.1.14] — 2026-10-31
 
