@@ -38,7 +38,7 @@ export function screensFor(role: GatewayRole) {
 /** The gateway's refusal, saying where a stale proof is renewed. */
 export function reworded(status: number, message: string): string {
   return status === 403 && message.startsWith(STALE_PROOF)
-    ? `${message}. Re-authenticate in the console, then try again.`
+    ? `${message[0]!.toUpperCase()}${message.slice(1)}. Re-authenticate in the console, then try again.`
     : message;
 }
 

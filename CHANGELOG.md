@@ -35,6 +35,12 @@ All notable changes to this project are documented here. Entries go under
 
 ### Changed
 
+- **The Capture and Gateway screens share one layout.** A field or an empty
+  list standing alone in a section keeps the same space below it as one in a
+  form, a note under a table is as wide as a section's blurb, and a Capture
+  device's fields, CAN FD tick and Remove line up along the row, its database
+  saying "the gateway's" when empty. A catalogue the gateway refuses keeps its
+  lines, so a TOML error's caret points at the fault.
 - **The server and gateway take the latest wslib patch releases**, among them
   `wslib-wiretap-protocol` 0.2.2, `wslib-wiretap-gateway` 0.2.1,
   `wslib-appliance-types` 0.1.7, `wslib-can` 0.1.2 and `wslib-serial` 0.1.3.

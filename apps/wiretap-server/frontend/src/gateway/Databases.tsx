@@ -51,7 +51,10 @@ import type { ArchiveEstimate, ArchiveWindow, ArchiveManifest, Chosen, DatabaseE
 
 type Question = Omit<ConfirmProps, "onClose">;
 
-const NAME_PATTERN = "[a-z][a-z0-9_]*";
+const DATABASE_NAME = {
+  pattern: "[a-z][a-z0-9_]*",
+  hint: "Lower case letters, digits and underscores, starting with a letter.",
+};
 
 export function Databases(props: { listed: Listed; admin: boolean }) {
   const rows = keyedRows(() => props.listed.list()?.databases, "name");
@@ -244,8 +247,7 @@ export function Databases(props: { listed: Listed; admin: boolean }) {
           >
             <Field
               label="Name"
-              hint="Lower case letters, digits and underscores, starting with a letter."
-              pattern={NAME_PATTERN}
+              {...DATABASE_NAME}
               value={name()}
               onValue={(v) => setName(v.toLowerCase())}
             />
@@ -562,7 +564,7 @@ function ImportForm(props: { replacing?: string | undefined; handle: (submit: ()
         fallback={
           <Field
             label="New database"
-            pattern={NAME_PATTERN}
+            {...DATABASE_NAME}
             value={name()}
             onValue={(v) => setName(v.toLowerCase())}
           />

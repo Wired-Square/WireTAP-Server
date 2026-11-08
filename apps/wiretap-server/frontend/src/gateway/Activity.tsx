@@ -46,7 +46,7 @@ export function Activity(props: { listed: Listed }) {
         <For each={rows}>
           {(r) => (
             <Tr>
-              <Td right numeric>
+              <Td right numeric strong>
                 {r.pid}
               </Td>
               <Td>{r.client_addr ?? "local"}</Td>

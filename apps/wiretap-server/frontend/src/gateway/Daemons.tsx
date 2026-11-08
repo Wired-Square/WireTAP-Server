@@ -78,7 +78,11 @@ export function Daemons() {
       title="Capture daemons"
       blurb="Daemons that have named themselves to this gateway, and the catalogue each device frames with."
     >
-      <Notice tone="bad">{reading.failed() ?? acting.failed()}</Notice>
+      <Notice tone="bad">
+        <Show when={reading.failed() ?? acting.failed()}>
+          {(why) => (why().includes("\n") ? <pre>{why().trimEnd()}</pre> : why())}
+        </Show>
+      </Notice>
       <Notice tone="good">{acting.succeeded()}</Notice>
       <Show when={daemons().length > 0} fallback={<NothingYet label="No capture daemon has named itself yet" />}>
         <For each={daemons()}>

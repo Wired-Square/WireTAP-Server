@@ -33,9 +33,12 @@ test("a read role is offered only the screens the gateway lets it read", () => {
   );
 });
 
-test("a stale proof says where to renew it, and any other refusal is left as it was", () => {
+test("a stale proof says where to renew it, as a sentence, and any other refusal is left as it was", () => {
   const stale = "this needs the password confirmed in the last 5 minutes";
-  assert.equal(reworded(403, stale), `${stale}. Re-authenticate in the console, then try again.`);
+  assert.equal(
+    reworded(403, stale),
+    "This needs the password confirmed in the last 5 minutes. Re-authenticate in the console, then try again.",
+  );
   assert.equal(reworded(403, "admin role required"), "admin role required");
   assert.equal(reworded(400, stale), stale);
 });

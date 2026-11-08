@@ -6,6 +6,16 @@
   --app-accent-contrast: #ffffff;
 }
 
+.app-notice > pre {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* ShownOnce's Copy, otherwise squeezed to a letter a line by the Done beside it. */
+.app-dialog__actions .app-copy {
+  white-space: nowrap;
+}
+
 .locked-out {
   margin: 1rem 0 0;
   font-size: 0.8125rem;
@@ -20,6 +30,16 @@
   margin-block-end: 1rem;
 }
 
-.capture-fields > .app-field {
+.app-section > :is(.app-field, .app-nothing-yet):not(:last-child) {
   margin-block-end: 1rem;
+}
+
+.app-section > .app-muted {
+  max-width: 60ch;
+}
+
+/* As tall as the inputs and buttons beside it, so their text lines up along the row's foot. */
+.capture-device > .app-tick__label {
+  padding-block: calc(var(--app-control-pad-y) + 1px);
+  line-height: var(--app-control-line-height);
 }

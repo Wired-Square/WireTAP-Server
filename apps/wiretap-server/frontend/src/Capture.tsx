@@ -326,15 +326,13 @@ function Fields(props: { state: FormState }) {
       <For each={GROUPS}>
         {(group) => (
           <Section title={group.title} blurb={group.blurb} level={3}>
-            <div class="capture-fields">
-              <For each={group.fields}>
-                {(field) => (
-                  <Show when={setting(props.state.settings, field.key)}>
-                    {(now) => <Input field={field} now={now()} state={props.state} />}
-                  </Show>
-                )}
-              </For>
-            </div>
+            <For each={group.fields}>
+              {(field) => (
+                <Show when={setting(props.state.settings, field.key)}>
+                  {(now) => <Input field={field} now={now()} state={props.state} />}
+                </Show>
+              )}
+            </For>
           </Section>
         )}
       </For>
@@ -454,7 +452,7 @@ function Devices(props: { state: FormState }) {
               />
               <Field
                 label="Database"
-                hint="Empty is the gateway's database."
+                placeholder="the gateway's"
                 value={device().database}
                 onInput={(e) => edit(i, { database: e.currentTarget.value })}
               />
