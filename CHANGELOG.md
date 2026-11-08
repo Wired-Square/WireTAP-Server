@@ -5,6 +5,12 @@ All notable changes to this project are documented here. Entries go under
 
 ## [Unreleased]
 
+### Added
+
+- **The app build scripts read `.env.local` and `.env`** at the repository
+  root, bare `KEY=value` lines that never override the environment;
+  `.env.example` lists the names.
+
 ### Changed
 
 - **The server and gateway take the latest wslib patch releases**, among them

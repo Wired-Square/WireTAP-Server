@@ -14,6 +14,9 @@ die() {
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 cd -- "$HERE/../.." || die "cannot enter the repository root"
+# shellcheck source=scripts/env.sh
+. scripts/env.sh
+load_env .
 
 for tool in cargo cargo-zigbuild docker jq; do
 	command -v "$tool" >/dev/null || die "$tool is not on PATH"
