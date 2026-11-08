@@ -20,7 +20,9 @@ alive() {
 	for pid; do kill -0 "$pid" 2>/dev/null || return 1; done
 }
 
+# busybox's kill takes an empty pid for 0, the whole process group.
 halt() {
+	[ -n "$2" ] || return 0
 	kill -TERM "$2" 2>/dev/null || return 0
 	n=$(($3 * 10))
 	while alive "$2" && [ "$n" -gt 0 ]; do
@@ -37,7 +39,7 @@ halt() {
 stop() {
 	halt daemon "${daemon:-}" 15
 	halt gateway "${gw:-}" 5
-	kill -INT "${pg:-}" 2>/dev/null && wait "$pg" || :
+	[ -z "${pg:-}" ] || { kill -INT "$pg" 2>/dev/null && wait "$pg"; } || :
 }
 trap 'stop; exit 0' TERM INT
 
