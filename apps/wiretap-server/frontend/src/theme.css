@@ -4,6 +4,39 @@
   --app-accent: #c2410c;
   --app-accent-sunken: #9a3412;
   --app-accent-contrast: #ffffff;
+  --app-font: "Ubuntu", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@font-face {
+  font-family: "Ubuntu";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/ubuntu-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Ubuntu";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/ubuntu-400-italic.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Ubuntu";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/ubuntu-500-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Ubuntu";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/ubuntu-700-normal.woff2") format("woff2");
 }
 
 .locked-out {
@@ -25,3 +58,4 @@
   padding-block: calc(var(--app-control-pad-y) + 1px);
   line-height: var(--app-control-line-height);
 }
+

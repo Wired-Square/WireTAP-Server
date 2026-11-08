@@ -82,6 +82,9 @@ All notable changes to this project are documented here. Entries go under
 - **The server app's browser half is on `appliance-ui` 0.11.0 and `kit`
   0.4.3.** A screen that re-reads itself on a timer stops while its tab is
   hidden, and reads once when it is shown again.
+- **The web UI is set in Ubuntu**, served from the UI itself (regular,
+  italic, medium and bold, Latin only) with the Ubuntu Font Licence beside the
+  files; monospace is unchanged.
 
 ### Fixed
 
