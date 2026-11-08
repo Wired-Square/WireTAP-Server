@@ -47,6 +47,14 @@ All notable changes to this project are documented here. Entries go under
   (or `/var/lib/wiretap-server-ui`) taken before the upgrade, as ApplianceOS's
   upgrade snapshot is.
 
+### Fixed
+
+- **Opening the gateway app from the ApplianceOS console shows its admin
+  pages.** The console opens `/apps/wiretap-gateway/`, which answered an
+  empty 404 that Chrome showed as its own error page; the gateway's base, with
+  or without the slash, now redirects to `admin/` under it, as `/` does on
+  `:8423`.
+
 ## [0.1.14] — 2026-10-31
 
 ### Changed
