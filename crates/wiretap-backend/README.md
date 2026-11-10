@@ -178,6 +178,12 @@ columns.
 12-byte FD frame is 9. The payload length in bytes is served beside it, as
 `len` on each of `frames` and as `max_len` beside `max_dlc` in `inventory`.
 
+**A read can ask for one bus.** `inventory` takes `?bus=`, and `payloads` and
+every `/query/*` body take `"bus"`; only that bus's frames are read. `inventory`
+and `payloads` echo the `bus` they filtered on, as does each inventory entry, so
+a client can tell a gateway that predates the filter, which answers every bus
+merged and echoes nothing.
+
 **Each database carries its own events** — a user's annotations, a moment or a
 span with a note, kept beside the frames they describe and independent of
 protocol. `GET /v1/db/{db}/events?start=&end=&limit=` lists them oldest first

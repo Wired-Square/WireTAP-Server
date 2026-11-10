@@ -7,6 +7,9 @@ All notable changes to this project are documented here. Entries go under
 
 ### Added
 
+- **Reads take a bus.** `inventory` takes `?bus=`, and `payloads` and every
+  `/query/*` body take `"bus"`, reading only that bus's frames; `inventory` and
+  `payloads` echo the bus back. Without it every answer is unchanged.
 - **The app's name is drawn with "TAP" in the accent orange**, in the
   masthead and on the sign-in page, light and dark.
 - **The app build scripts read `.env.local` and `.env`** at the repository
