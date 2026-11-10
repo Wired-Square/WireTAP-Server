@@ -95,7 +95,7 @@ All notable changes to this project are documented here. Entries go under
 - **The server app's browser half is on `appliance-ui` 0.11.0 and `kit`
   0.4.3.** A screen that re-reads itself on a timer stops while its tab is
   hidden, and reads once when it is shown again.
-- **The server app's browser half is on `appliance-ui` 0.13.0.** An action
+- **The server app's browser half is on `appliance-ui` 0.14.0.** An action
   that needs the administrator's password, a code or a passkey asks for it in
   a dialog.
 - **The web UI is set in Ubuntu**, served from the UI itself (regular,

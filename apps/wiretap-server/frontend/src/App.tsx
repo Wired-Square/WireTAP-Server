@@ -12,6 +12,7 @@ import {
   AuditLog,
   Chrome,
   Logs,
+  accountView,
   allows,
   api,
   useSession,
@@ -35,11 +36,6 @@ const TABS = [
 ] as const satisfies readonly { id: string; label: string; needs: Role }[];
 
 type TabId = (typeof TABS)[number]["id"];
-
-// AccountSettings keeps its views to itself: an admin opens on Accounts, as does any id not among the caller's own three.
-const OWN_VIEWS = ["passkeys", "password", "two-step"];
-const usersView = (admin: boolean, view: string | undefined) =>
-  OWN_VIEWS.find((own) => own === view) ?? (admin ? "accounts" : "passkeys");
 
 /** The gateway bundled with this UI, if there is one: it 404s where there is none. */
 async function bundledGateway(): Promise<Caller | undefined> {
@@ -78,7 +74,7 @@ export function App() {
         /** `tab` at the view it shows for `view`, unless it cannot say yet. */
         const resolved = (tab: TabId, view: string | undefined): Route | undefined => {
           if (tab === "capture") return { tab, view: viewOf(CAPTURE_VIEWS, view) };
-          if (tab === "users") return { tab, view: usersView(allows(who().role, "admin"), view) };
+          if (tab === "users") return { tab, view: accountView(who().role, view) };
           if (tab !== "gateway") return { tab, view: undefined };
           const caller = gateway.state === "ready" ? gateway() : undefined;
           return caller && { tab, view: viewOf(screensFor(caller.role), view) };
