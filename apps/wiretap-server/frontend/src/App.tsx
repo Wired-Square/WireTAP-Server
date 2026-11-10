@@ -3,7 +3,7 @@
  * chassis's screens. Tabs are offered by role so nobody is handed one that
  * would 403; every route is gated in the daemon regardless.
  */
-import { Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
+import { Show, createEffect, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 
 import {
   About,
@@ -17,13 +17,13 @@ import {
   useSession,
 } from "@wired-square/appliance-ui";
 import type { Role } from "@wired-square/appliance-types";
-import { Loaded, SchemePicker, TabPanel, Tabs } from "@wired-square/kit";
+import { Loaded, SchemePicker, TabPanel, Tabs, viewOf } from "@wired-square/kit";
 
 import { BrandedTitle } from "./BrandedTitle";
-import { Capture } from "./Capture";
+import { CAPTURE_VIEWS, Capture } from "./Capture";
 import { Gateway } from "./gateway/Gateway";
-import type { Caller } from "./gateway/wire";
-import { type Route, followHash, pushRoute, routeOf } from "./route";
+import { type Caller, screensFor } from "./gateway/wire";
+import { type Route, followHash, pushRoute, replaceRoute, routeOf } from "./route";
 
 const TABS = [
   { id: "capture", label: "Capture", needs: "viewer" },
@@ -35,6 +35,11 @@ const TABS = [
 ] as const satisfies readonly { id: string; label: string; needs: Role }[];
 
 type TabId = (typeof TABS)[number]["id"];
+
+// AccountSettings keeps its views to itself: an admin opens on Accounts, as does any id not among the caller's own three.
+const OWN_VIEWS = ["passkeys", "password", "two-step"];
+const usersView = (admin: boolean, view: string | undefined) =>
+  OWN_VIEWS.find((own) => own === view) ?? (admin ? "accounts" : "passkeys");
 
 /** The gateway bundled with this UI, if there is one: it 404s where there is none. */
 async function bundledGateway(): Promise<Caller | undefined> {
@@ -54,11 +59,6 @@ export function App() {
   const view = () => route().view;
   const [gateway, { refetch }] = createResource(bundledGateway);
   const hasGateway = () => gateway.state === "errored" || (gateway.state === "ready" && gateway() !== undefined);
-  const choose = (id: TabId, to?: string) => {
-    const chosen = { tab: id, view: to };
-    pushRoute(window, chosen);
-    setRoute(chosen);
-  };
 
   return (
     <Show when={me()}>
@@ -75,6 +75,23 @@ export function App() {
           ),
         );
         const shown = createMemo(() => (offered().some((t) => t.id === tab()) ? tab() : "capture"));
+        /** `tab` at the view it shows for `view`, unless it cannot say yet. */
+        const resolved = (tab: TabId, view: string | undefined): Route | undefined => {
+          if (tab === "capture") return { tab, view: viewOf(CAPTURE_VIEWS, view) };
+          if (tab === "users") return { tab, view: usersView(allows(who().role, "admin"), view) };
+          if (tab !== "gateway") return { tab, view: undefined };
+          const caller = gateway.state === "ready" ? gateway() : undefined;
+          return caller && { tab, view: viewOf(screensFor(caller.role), view) };
+        };
+        const choose = (id: TabId, to?: string) => {
+          const chosen = resolved(id, to) ?? { tab: id, view: to };
+          pushRoute(window, chosen);
+          setRoute(chosen);
+        };
+        createEffect(() => {
+          const now = gateway.loading ? undefined : resolved(shown(), view());
+          if (now && replaceRoute(window, now)) setRoute(now);
+        });
 
         return (
           <Chrome

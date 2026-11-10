@@ -122,7 +122,10 @@ All notable changes to this project are documented here. Entries go under
   base path was left blank.
 - **The web UI's tab and view follow the address's `#<tab>/<view>`** for the
   page's whole life: a typed hash, a link or Back and Forward switch them, and
-  choosing one adds a history entry. Only the hash on first load was read.
+  choosing one adds a history entry. Only the hash on first load was read. The
+  hash always names the view shown: a tab alone, an unknown tab or view, or a
+  tab the role is not offered is rewritten in place, so Back never steps
+  between two addresses for one screen.
 
 ## [0.1.14] — 2026-10-31
 

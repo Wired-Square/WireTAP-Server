@@ -66,9 +66,36 @@ function createPolled(): Polled {
   return { reading, running, failed: action.failed, now };
 }
 
+export const CAPTURE_VIEWS = [
+  { id: "overview", label: "Overview" },
+  { id: "devices", label: "Devices" },
+  { id: "forwarding", label: "Forwarding" },
+  { id: "settings", label: "Settings" },
+] as const;
+
+type CaptureView = (typeof CAPTURE_VIEWS)[number]["id"];
+
 export function Capture(props: Routed & { me: Me }) {
   const polled = createPolled();
   const route = routed(props);
+  const panels: Record<CaptureView, () => JSX.Element> = {
+    overview: () => (
+      <Section title="Overview" blurb="What the capture daemon is doing now.">
+        <Live polled={polled}>{(s) => <Overview status={s()} onView={route.onChange} />}</Live>
+      </Section>
+    ),
+    devices: () => (
+      <Section title="Devices" blurb="The interfaces this daemon captures, and the frames each has read.">
+        <Live polled={polled}>{(s) => <DeviceStates devices={s().devices} />}</Live>
+      </Section>
+    ),
+    forwarding: () => (
+      <Section title="Forwarding" blurb="Where captured frames are sent, and how each database's link is doing.">
+        <Live polled={polled}>{(s) => <Forwarding forward={s().forward} now={polled.now()} />}</Live>
+      </Section>
+    ),
+    settings: () => <DaemonSettings editable={allows(props.me.role, "admin")} />,
+  };
 
   return (
     <>
@@ -79,40 +106,7 @@ export function Capture(props: Routed & { me: Me }) {
       <Views
         aria-label="Capture"
         group="capture"
-        views={[
-          {
-            id: "overview",
-            label: "Overview",
-            panel: () => (
-              <Section title="Overview" blurb="What the capture daemon is doing now.">
-                <Live polled={polled}>{(s) => <Overview status={s()} onView={route.onChange} />}</Live>
-              </Section>
-            ),
-          },
-          {
-            id: "devices",
-            label: "Devices",
-            panel: () => (
-              <Section title="Devices" blurb="The interfaces this daemon captures, and the frames each has read.">
-                <Live polled={polled}>{(s) => <DeviceStates devices={s().devices} />}</Live>
-              </Section>
-            ),
-          },
-          {
-            id: "forwarding",
-            label: "Forwarding",
-            panel: () => (
-              <Section title="Forwarding" blurb="Where captured frames are sent, and how each database's link is doing.">
-                <Live polled={polled}>{(s) => <Forwarding forward={s().forward} now={polled.now()} />}</Live>
-              </Section>
-            ),
-          },
-          {
-            id: "settings",
-            label: "Settings",
-            panel: () => <DaemonSettings editable={allows(props.me.role, "admin")} />,
-          },
-        ]}
+        views={CAPTURE_VIEWS.map((v) => ({ ...v, panel: panels[v.id] }))}
         {...route}
       />
     </>

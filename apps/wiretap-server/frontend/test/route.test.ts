@@ -1,22 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { followHash, pushRoute, routeOf } from "../src/route.ts";
+import { followHash, pushRoute, replaceRoute, routeOf } from "../src/route.ts";
 import type { Route } from "../src/route.ts";
 
+/** A page whose `entries` are its history, the current one last. */
 function page(hash: string) {
-  const pushed: string[] = [];
+  const entries = [hash];
   const location = { hash };
   const at = Object.assign(new EventTarget(), {
     location,
     history: {
       pushState: (_: unknown, __: string, url: string) => {
-        pushed.push(url);
+        entries.push(url);
+        location.hash = url;
+      },
+      replaceState: (_: unknown, __: string, url: string) => {
+        entries[entries.length - 1] = url;
         location.hash = url;
       },
     },
   });
-  return { at, pushed };
+  return { at, entries };
 }
 
 test("the hash names the tab and, after a slash, the view", () => {
@@ -39,10 +44,17 @@ test("a hash change from any source moves the route, until the page stops follow
 });
 
 test("choosing a tab or view pushes a history entry, but not one for where the page already is", () => {
-  const { at, pushed } = page("#capture");
+  const { at, entries } = page("#capture");
   pushRoute(at, { tab: "capture", view: undefined });
   pushRoute(at, { tab: "capture", view: "devices" });
   pushRoute(at, { tab: "capture", view: "devices" });
   pushRoute(at, { tab: "about", view: undefined });
-  assert.deepEqual(pushed, ["#capture/devices", "#about"]);
+  assert.deepEqual(entries, ["#capture", "#capture/devices", "#about"]);
+});
+
+test("a hash naming other than what is shown is rewritten in place, adding no entry", () => {
+  const { at, entries } = page("#zzz");
+  assert.equal(replaceRoute(at, { tab: "capture", view: "overview" }), true);
+  assert.equal(replaceRoute(at, { tab: "capture", view: "overview" }), false);
+  assert.deepEqual(entries, ["#capture/overview"]);
 });

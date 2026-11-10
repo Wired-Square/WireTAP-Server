@@ -6,7 +6,7 @@ export interface Route {
 
 interface Page extends EventTarget {
   location: { hash: string };
-  history: Pick<History, "pushState">;
+  history: Pick<History, "pushState" | "replaceState">;
 }
 
 export function routeOf(hash: string): Route {
@@ -21,8 +21,17 @@ export function followHash(page: Page, onRoute: (route: Route) => void) {
   return () => page.removeEventListener("hashchange", follow);
 }
 
+const hashOf = ({ tab, view }: Route) => (view ? `#${tab}/${view}` : `#${tab}`);
+
+const moveWith = (entry: "pushState" | "replaceState") => (page: Page, route: Route) => {
+  const hash = hashOf(route);
+  const moves = page.location.hash !== hash;
+  if (moves) page.history[entry](null, "", hash);
+  return moves;
+};
+
 /** Adds a history entry for `route`, unless the page is already there. */
-export function pushRoute(page: Page, { tab, view }: Route) {
-  const hash = view ? `#${tab}/${view}` : `#${tab}`;
-  if (page.location.hash !== hash) page.history.pushState(null, "", hash);
-}
+export const pushRoute = moveWith("pushState");
+
+/** Makes the current entry name `route`, where its hash names something else; says whether it did. */
+export const replaceRoute = moveWith("replaceState");
