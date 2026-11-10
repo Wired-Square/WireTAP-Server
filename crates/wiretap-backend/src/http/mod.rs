@@ -781,10 +781,11 @@ async fn inventory(
 ) -> Result<Json<InventoryResponse>, ApiError> {
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
-    let entries = sql::inventory(&client, range.start, range.end, range.protocol).await?;
+    let entries = sql::inventory(&client, &range).await?;
     Ok(Json(InventoryResponse {
         entries,
         truncated: false,
+        bus: range.bus,
     }))
 }
 
@@ -819,7 +820,10 @@ async fn payloads(
     check_read(&key, &db)?;
     let client = client_for(&state, &db).await?;
     let payloads = sql::payloads(&client, &p).await?;
-    Ok(Json(PayloadsResponse { payloads }))
+    Ok(Json(PayloadsResponse {
+        payloads,
+        bus: p.filter.bus,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -892,7 +896,7 @@ async fn events_delete(
 
 /// Run a query with cancellation registered under its query_id.
 macro_rules! query_handler {
-    ($name:ident, $params:ty, $result:ty, $sql_fn:path) => {
+    ($name:ident, $params:ty, $result:ty, $sql_fn:path, $($bus:ident).+) => {
         async fn $name(
             State(state): State<St>,
             Extension(key): Extension<KeyInfo>,
@@ -909,7 +913,8 @@ macro_rules! query_handler {
                 format!("{}_{}", stringify!($name), nanos)
             });
             let _guard = running::QueryGuard::new(query_id, client.cancel_token()).await;
-            let result = $sql_fn(&client, &p).await?;
+            let mut result = $sql_fn(&client, &p).await?;
+            result.stats.bus = p.$($bus).+;
             Ok(Json(result))
         }
     };
@@ -919,55 +924,64 @@ query_handler!(
     q_byte_changes,
     crate::types::ByteChangesParams,
     crate::types::ByteChangeQueryResult,
-    sql::byte_changes
+    sql::byte_changes,
+    filter.bus
 );
 query_handler!(
     q_frame_changes,
     crate::types::FrameChangesParams,
     crate::types::FrameChangeQueryResult,
-    sql::frame_changes
+    sql::frame_changes,
+    filter.bus
 );
 query_handler!(
     q_mirror_validation,
     crate::types::MirrorValidationParams,
     crate::types::MirrorValidationQueryResult,
-    sql::mirror_validation
+    sql::mirror_validation,
+    bus
 );
 query_handler!(
     q_mux_statistics,
     crate::types::MuxStatisticsParams,
     crate::types::MuxStatisticsQueryResult,
-    sql::mux_statistics
+    sql::mux_statistics,
+    filter.bus
 );
 query_handler!(
     q_first_last,
     crate::types::FirstLastParams,
     crate::types::FirstLastQueryResult,
-    sql::first_last
+    sql::first_last,
+    filter.bus
 );
 query_handler!(
     q_frequency,
     crate::types::FrequencyParams,
     crate::types::FrequencyQueryResult,
-    sql::frequency
+    sql::frequency,
+    filter.bus
 );
 query_handler!(
     q_distribution,
     crate::types::DistributionParams,
     crate::types::DistributionQueryResult,
-    sql::distribution
+    sql::distribution,
+    filter.bus
 );
 query_handler!(
     q_gap_analysis,
     crate::types::GapAnalysisParams,
     crate::types::GapAnalysisQueryResult,
-    sql::gap_analysis
+    sql::gap_analysis,
+    filter.bus
 );
 query_handler!(
     q_pattern_search,
     crate::types::PatternSearchParams,
     crate::types::PatternSearchQueryResult,
-    sql::pattern_search
+    sql::pattern_search,
+    bus
 );
 
 async fn cancel_query(
@@ -2401,6 +2415,80 @@ mod tests {
         ] {
             assert!(listed.get(field).is_some(), "no {field}: {listed}");
         }
+        dbs.delete_database(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TimescaleDB; see db::tests::live_databases"]
+    async fn a_read_for_one_bus_sees_only_its_frames_and_says_so() {
+        let name = db::tests::fresh_database(
+            "inventory_bus",
+            "INSERT INTO public.capture_frame (ts, protocol, id, flags, dlc, data_bytes, bus)
+               SELECT to_timestamp(1700000000 + s), 'can', id, 0, 8, '\\x01', bus
+                 FROM (VALUES (1, 256, 0), (2, 256, 0), (3, 256, 1), (4, 512, 1)) f(s, id, bus)",
+        )
+        .await;
+        let dbs = db::tests::live_databases(false);
+        dbs.migrate_one(&name).await.unwrap();
+        dbs.refresh_rollup(&name).await.unwrap();
+        let at = gateway(dbs.clone()).await;
+        let inventory = |query: &str| {
+            let path = format!("/v1/db/{name}/inventory?{query}");
+            async move {
+                let (status, body) = request_to(at, "GET", &path, Some("bootstrap"), None).await;
+                assert_eq!(status, 200, "{body}");
+                let bus = body["bus"].as_i64();
+                let entries = body["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| {
+                        assert_eq!(e["bus"].as_i64(), bus, "{body}");
+                        (
+                            e["frame_id"].as_i64().unwrap(),
+                            e["count"].as_i64().unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (entries, bus)
+            }
+        };
+        let post = |what: &str, body: serde_json::Value| {
+            let path = format!("/v1/db/{name}/{what}");
+            async move {
+                let (status, body) =
+                    request_to(at, "POST", &path, Some("bootstrap"), Some(body)).await;
+                assert_eq!(status, 200, "{body}");
+                body
+            }
+        };
+
+        assert_eq!(inventory("").await, (vec![(256, 3), (512, 1)], None));
+        assert_eq!(
+            inventory("bus=1").await,
+            (vec![(256, 1), (512, 1)], Some(1))
+        );
+        assert_eq!(
+            inventory("start=2023-01-01T00:00:00Z&bus=0").await,
+            (vec![(256, 2)], Some(0))
+        );
+
+        let every = post("payloads", serde_json::json!({ "frame_id": 256 })).await;
+        assert_eq!(every["payloads"].as_array().unwrap().len(), 3, "{every}");
+        assert!(every.get("bus").is_none(), "{every}");
+        let one = post("payloads", serde_json::json!({ "frame_id": 256, "bus": 1 })).await;
+        assert_eq!(one["payloads"].as_array().unwrap().len(), 1, "{one}");
+        assert_eq!(one["bus"], 1, "{one}");
+
+        let found = post(
+            "query/pattern-search",
+            serde_json::json!({ "pattern": [1], "pattern_mask": [255], "bus": 0 }),
+        )
+        .await;
+        assert_eq!(found["results"].as_array().unwrap().len(), 2, "{found}");
+        assert_eq!(found["stats"]["bus"], 0, "{found}");
+        let unfiltered = post("query/first-last", serde_json::json!({ "frame_id": 256 })).await;
+        assert!(unfiltered["stats"].get("bus").is_none(), "{unfiltered}");
         dbs.delete_database(&name).await.unwrap();
     }
 

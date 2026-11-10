@@ -111,7 +111,7 @@ impl WhereClause for FrameFilter {
         // Modbus unit-and-function word share the column.
         let mut sql = format!(
             "{} AND id = ${}::int4",
-            protocol_clause(args, self.protocol),
+            scope_clause(args, self.protocol, self.bus),
             args.add(self.frame_id as i32)
         );
         sql += &extended_clause(args, self.is_extended);
@@ -133,6 +133,13 @@ fn extended_clause(args: &mut Args, is_extended: Option<bool>) -> String {
     })
 }
 
+fn scope_clause(args: &mut Args, protocol: Option<Protocol>, bus: Option<u8>) -> String {
+    protocol_clause(args, protocol)
+        + &bus.map_or_else(String::new, |bus| {
+            format!(" AND bus = ${}::int4", args.add(i32::from(bus)))
+        })
+}
+
 fn time_clause(args: &mut Args, start: &Option<String>, end: &Option<String>) -> String {
     let mut sql = String::new();
     if let Some(s) = start {
@@ -149,6 +156,7 @@ fn stats(start: Instant, rows_scanned: usize, results_count: usize) -> QueryStat
         rows_scanned: rows_scanned as u64,
         results_count: results_count as u64,
         execution_time_ms: start.elapsed().as_millis() as u64,
+        bus: None,
     }
 }
 
@@ -260,8 +268,8 @@ pub async fn mirror_validation(
     let mirror_id = args.add(p.mirror_frame_id as i32);
     let source_id = args.add(p.source_frame_id as i32);
     let tolerance = args.add(p.tolerance_ms as i32);
-    // Anchors both subqueries, so the protocol placeholder is added once.
-    let where_protocol = protocol_clause(&mut args, p.protocol);
+    // Anchors both subqueries, so its placeholders are added once.
+    let where_protocol = scope_clause(&mut args, p.protocol, p.bus);
     let mut extra = extended_clause(&mut args, p.is_extended);
     extra += &time_clause(&mut args, &p.start_time, &p.end_time);
     let query = format!(
@@ -619,7 +627,7 @@ pub async fn pattern_search(
     }
     let result_limit = p.limit.unwrap_or(10000) as usize;
     let mut args = Args::default();
-    let proto = protocol_clause(&mut args, p.protocol);
+    let proto = scope_clause(&mut args, p.protocol, p.bus);
     let w = time_clause(&mut args, &p.start_time, &p.end_time);
     let query = format!(
         "SELECT (EXTRACT(EPOCH FROM ts) * 1000000)::float8 AS timestamp_us, \
@@ -704,9 +712,7 @@ fn payload_len(protocol: Protocol, dlc: u16) -> u16 {
 
 pub async fn inventory(
     client: &Client,
-    start_time: Option<String>,
-    end_time: Option<String>,
-    protocol: Option<Protocol>,
+    range: &TimeRangeQuery,
 ) -> Result<Vec<InventoryEntry>, QueryError> {
     let map = |row: &tokio_postgres::Row| {
         let max_dlc = row.get::<_, i32>("max_dlc") as u16;
@@ -717,14 +723,18 @@ pub async fn inventory(
             first_us: row.get::<_, f64>("first_us") as i64,
             last_us: row.get::<_, f64>("last_us") as i64,
             max_dlc,
-            max_len: Some(payload_len(protocol.unwrap_or(DEFAULT_PROTOCOL), max_dlc)),
+            max_len: Some(payload_len(
+                range.protocol.unwrap_or(DEFAULT_PROTOCOL),
+                max_dlc,
+            )),
+            bus: range.bus,
         }
     };
 
     // Full-archive inventory reads the hourly rollup when present
-    if start_time.is_none() && end_time.is_none() && rollup_available(client).await {
+    if range.start.is_none() && range.end.is_none() && rollup_available(client).await {
         let mut args = Args::default();
-        let proto = protocol_clause(&mut args, protocol);
+        let proto = scope_clause(&mut args, range.protocol, range.bus);
         let rows = client
             .query(
                 &format!(
@@ -743,8 +753,8 @@ pub async fn inventory(
     }
 
     let mut args = Args::default();
-    let proto = protocol_clause(&mut args, protocol);
-    let w = time_clause(&mut args, &start_time, &end_time);
+    let proto = scope_clause(&mut args, range.protocol, range.bus);
+    let w = time_clause(&mut args, &range.start, &range.end);
     let query = format!(
         "SELECT id, {EXTENDED} AS extended, COUNT(*)::int8 AS cnt, \
          (EXTRACT(EPOCH FROM MIN(ts)) * 1000000)::float8 AS first_us, \
