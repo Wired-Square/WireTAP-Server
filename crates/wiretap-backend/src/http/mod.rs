@@ -1915,7 +1915,7 @@ mod tests {
     /// A gateway under `base_path` with an admin bundle of one `index.html`
     /// and one asset, and an unreachable database.
     async fn gateway_under(base_path: &str) -> std::net::SocketAddr {
-        let mut config = config_with_admin_bundle(&base_path.replace('/', "_"));
+        let mut config = config_with_admin_bundle();
         config.base_path = base_path.into();
         gateway_with(db::tests::unreachable_databases(false), &config).await
     }
@@ -1926,8 +1926,12 @@ mod tests {
         dir
     }
 
-    fn config_with_admin_bundle(tag: &str) -> Config {
-        let admin_dir = scratch_dir(&format!("admin-{tag}"));
+    /// Each bundle gets its own directory: `fs::write` truncates first, so a
+    /// test reading a bundle another test is rewriting serves it empty.
+    fn config_with_admin_bundle() -> Config {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let admin_dir = scratch_dir(&format!("admin-{n}"));
         std::fs::create_dir_all(admin_dir.join("assets")).unwrap();
         std::fs::write(admin_dir.join("index.html"), "the admin index").unwrap();
         std::fs::write(admin_dir.join("assets/app.js"), "the admin script").unwrap();
@@ -1945,7 +1949,7 @@ mod tests {
     ) -> (std::path::PathBuf, std::net::SocketAddr) {
         use std::os::unix::fs::MetadataExt;
         let dir = scratch_dir(&format!("socket-{tag}"));
-        let config = config_with_admin_bundle(tag);
+        let config = config_with_admin_bundle();
         let socket = AppSocket {
             path: dir.join("app.sock"),
             console_uid: std::fs::metadata(&dir).unwrap().uid() + console_offset,
