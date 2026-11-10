@@ -7,15 +7,60 @@ All notable changes to this project are documented here. Entries go under
 
 ### Added
 
+- **The app's name is drawn with "TAP" in the accent orange**, in the
+  masthead and on the sign-in page, light and dark.
 - **The app build scripts read `.env.local` and `.env`** at the repository
   root, bare `KEY=value` lines that never override the environment;
   `.env.example` lists the names.
+- **The gateway app captures.** Its image runs the capture daemon beside the
+  gateway and Postgres, forwarding over loopback into the `capture` database
+  with an ingest key generated in `/data/secrets/ingest-key`. The app now asks
+  for host networking, `NET_RAW` and `NET_BIND_SERVICE`, so it installs only
+  from a signed source, and declares GVRET on tcp 23: it cannot share a box
+  with the server app. The gateway honours that key through
+  `WIRETAP_INGEST_KEY` or `WIRETAP_INGEST_KEY_FILE`, an ingest key beside the
+  stored ones.
+- **The gateway app serves the ApplianceOS console through `wiretap-server-ui`.**
+  Given `WIRETAP_SERVER_UI_GATEWAY_SOCKET`, the UI passes `/api/gateway/v1/…`
+  to the gateway's `/v1/…`, naming the signed-in caller in
+  `Appliance-Identity`, and About lists the gateway. The gateway app's image
+  runs the UI on `/run/appliance/app.sock`; the gateway itself now listens on a
+  private socket in the 0700 runtime directory and believes only the app's own
+  uid there. Its React admin UI stays on 8423.
+- **The gateway app's console has the gateway's screens.** Where the UI is
+  bundled with a gateway, a Gateway tab holds Databases, Keys, Ingest,
+  Daemons, Activity, Log and Health, ported from the React admin UI onto the
+  appliance-ui kit; the console signs the caller in. Someone the gateway gives
+  only read sees Databases and Health, without their actions. An export streams
+  to disk from its one-time link, an import shows its upload's progress, and
+  the Log is the gateway's in-memory log, read every 3 s.
+- **The web UI offers a light, dark or system colour scheme** beside the
+  account in the header and on the sign-in screen, kept per browser. The dark
+  scheme's accent is `#fb923c`.
+- **Both app images carry a shell's tools**: `bash`, `can-utils` (`candump`,
+  `cansend`…), `curl`, `iproute2`, `less`, `procps` and `strace`, for checking
+  a bus or a process from a shell in the container.
 
 ### Changed
 
+- **The Capture and Gateway screens share one layout.** A field or an empty
+  list standing alone in a section keeps the same space below it as one in a
+  form, a note under a table is as wide as a section's blurb, and a Capture
+  device's fields, CAN FD tick and Remove line up along the row, its database
+  saying "the gateway's" when empty. A catalogue the gateway refuses keeps its
+  lines, so a TOML error's caret points at the fault.
+- **The Capture screen is split into views**, a pill strip like the Gateway
+  tab's (`#capture/<view>`): Overview (the daemon, a line each on devices and
+  forwarding linking to their views, and the listeners' clients), Devices,
+  Forwarding and Settings. The settings stay one form, saved with one restart;
+  the applying notice and the daemon's warnings show above every view.
 - **The server and gateway take the latest wslib patch releases**, among them
   `wslib-wiretap-protocol` 0.2.2, `wslib-wiretap-gateway` 0.2.1,
   `wslib-appliance-types` 0.1.7, `wslib-can` 0.1.2 and `wslib-serial` 0.1.3.
+- **The server app takes the latest wslib patch releases**,
+  `wslib-appliance-server` and `wslib-appliance-https` 0.1.6 and
+  `wslib-appliance-xtask` 0.2.7. A gateway export now comes through the
+  console plain, holding none of the chassis's encoders while it streams.
 - **The registry mirror needs no token.** The gateway image builds without a
   BuildKit secret, `docker compose up --build` without exporting one, and the
   server app's `npm ci` without an `~/.npmrc` entry for the mirror; the
@@ -47,6 +92,16 @@ All notable changes to this project are documented here. Entries go under
   (or `/var/lib/wiretap-server-ui`) taken before the upgrade, as ApplianceOS's
   upgrade snapshot is.
 
+- **The server app's browser half is on `appliance-ui` 0.11.0 and `kit`
+  0.4.3.** A screen that re-reads itself on a timer stops while its tab is
+  hidden, and reads once when it is shown again.
+- **The server app's browser half is on `appliance-ui` 0.14.0.** An action
+  that needs the administrator's password, a code or a passkey asks for it in
+  a dialog.
+- **The web UI is set in Ubuntu**, served from the UI itself (regular,
+  italic, medium and bold, Latin only) with the Ubuntu Font Licence beside the
+  files; monospace is unchanged.
+
 ### Fixed
 
 - **Opening the gateway app from the ApplianceOS console shows its admin
@@ -56,6 +111,21 @@ All notable changes to this project are documented here. Entries go under
   `:8423`.
 - **The server UI's About lists the capture daemon under Subsystems**, with
   the control socket it answers on or why it does not; the card was empty.
+- **The gateway app's browser tab says "WireTAP Gateway"**, following the
+  branding, where it said "WireTAP Capture".
+- **About shows the product's version**, the root workspace's that the
+  release tags and the images carry, in place of the UI crate's own 0.1.0.
+- **About's Subsystems say the capture daemon and the gateway are running**,
+  beside the socket each answers on; one that does not answer still reads
+  "Not running" with why.
+- **The gateway logs its app socket at the root as "under /"**, where the
+  base path was left blank.
+- **The web UI's tab and view follow the address's `#<tab>/<view>`** for the
+  page's whole life: a typed hash, a link or Back and Forward switch them, and
+  choosing one adds a history entry. Only the hash on first load was read. The
+  hash always names the view shown: a tab alone, an unknown tab or view, or a
+  tab the role is not offered is rewritten in place, so Back never steps
+  between two addresses for one screen.
 
 ## [0.1.14] — 2026-10-31
 

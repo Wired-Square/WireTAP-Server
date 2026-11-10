@@ -100,7 +100,8 @@ async fn run(config: Arc<Config>, logs: Logs) -> Result<(), String> {
     let keys = KeyStore::new(
         dbs.clone(),
         config.bootstrap_admin_key.as_ref().map(|k| k.expose()),
-    );
+    )
+    .with_ingest_key(config.ingest_key.as_ref().map(|k| k.expose()));
     keys.bootstrap().await?;
     if config.bootstrap_admin_key.is_none() {
         tracing::warn!("WIRETAP_ADMIN_KEY is not set — admin access requires a seeded key");
@@ -156,7 +157,7 @@ async fn run(config: Arc<Config>, logs: Logs) -> Result<(), String> {
         tracing::info!(
             "app socket listening on {}, under {}, for console uid {}",
             socket.path.display(),
-            socket.base_path,
+            socket.served_under(),
             socket.console_uid
         );
         let app = http::app_socket_router(app_state.clone(), &config, socket)

@@ -1,26 +1,34 @@
 /**
- * Signed in: the Capture screen, then the chassis's screens. Tabs are offered
- * by role so nobody is handed one that would 403; every route is gated in the
- * daemon regardless.
+ * Signed in: the Capture screen, the gateway's where one is bundled, then the
+ * chassis's screens. Tabs are offered by role so nobody is handed one that
+ * would 403; every route is gated in the daemon regardless.
  */
-import { Show, createMemo, createSignal } from "solid-js";
+import { Show, createEffect, createMemo, createResource, createSignal, onCleanup } from "solid-js";
 
 import {
   About,
   AccountSettings,
+  ApiError,
   AuditLog,
   Chrome,
   Logs,
+  accountView,
   allows,
+  api,
   useSession,
 } from "@wired-square/appliance-ui";
 import type { Role } from "@wired-square/appliance-types";
-import { TabPanel, Tabs } from "@wired-square/kit";
+import { Loaded, SchemePicker, TabPanel, Tabs, viewOf } from "@wired-square/kit";
 
-import { Capture } from "./Capture";
+import { BrandedTitle } from "./BrandedTitle";
+import { CAPTURE_VIEWS, Capture } from "./Capture";
+import { Gateway } from "./gateway/Gateway";
+import { type Caller, screensFor } from "./gateway/wire";
+import { type Route, followHash, pushRoute, replaceRoute, routeOf } from "./route";
 
 const TABS = [
   { id: "capture", label: "Capture", needs: "viewer" },
+  { id: "gateway", label: "Gateway", needs: "viewer" },
   { id: "users", label: "Users", needs: "viewer" },
   { id: "audit", label: "Audit log", needs: "admin" },
   { id: "logs", label: "Logs", needs: "admin" },
@@ -29,18 +37,24 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-const [openedTab, openedView] = window.location.hash.slice(1).split("/");
-const opened = (): TabId => TABS.find((t) => t.id === openedTab)?.id ?? "capture";
+/** The gateway bundled with this UI, if there is one: it 404s where there is none. */
+async function bundledGateway(): Promise<Caller | undefined> {
+  try {
+    return await api<Caller>("/api/gateway/v1/whoami");
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return undefined;
+    throw e;
+  }
+}
 
 export function App() {
   const { me } = useSession();
-  const [tab, setTab] = createSignal<TabId>(opened());
-  const [view, setView] = createSignal<string | undefined>(openedView);
-  const choose = (id: TabId, to?: string) => {
-    setTab(id);
-    setView(to);
-    history.replaceState(null, "", to ? `#${id}/${to}` : `#${id}`);
-  };
+  const [route, setRoute] = createSignal<Route>(routeOf(window.location.hash));
+  onCleanup(followHash(window, setRoute));
+  const tab = (): TabId => TABS.find((t) => t.id === route().tab)?.id ?? "capture";
+  const view = () => route().view;
+  const [gateway, { refetch }] = createResource(bundledGateway);
+  const hasGateway = () => gateway.state === "errored" || (gateway.state === "ready" && gateway() !== undefined);
 
   return (
     <Show when={me()}>
@@ -51,16 +65,51 @@ export function App() {
           return "enabled" in me ? me : undefined;
         };
         const offered = createMemo(() =>
-          TABS.filter((t) => allows(who().role, t.needs) && (t.id !== "users" || account())),
+          TABS.filter(
+            (t) =>
+              allows(who().role, t.needs) && (t.id !== "users" || account()) && (t.id !== "gateway" || hasGateway()),
+          ),
         );
         const shown = createMemo(() => (offered().some((t) => t.id === tab()) ? tab() : "capture"));
+        /** `tab` at the view it shows for `view`, unless it cannot say yet. */
+        const resolved = (tab: TabId, view: string | undefined): Route | undefined => {
+          if (tab === "capture") return { tab, view: viewOf(CAPTURE_VIEWS, view) };
+          if (tab === "users") return { tab, view: accountView(who().role, view) };
+          if (tab !== "gateway") return { tab, view: undefined };
+          const caller = gateway.state === "ready" ? gateway() : undefined;
+          return caller && { tab, view: viewOf(screensFor(caller.role), view) };
+        };
+        const choose = (id: TabId, to?: string) => {
+          const chosen = resolved(id, to) ?? { tab: id, view: to };
+          pushRoute(window, chosen);
+          setRoute(chosen);
+        };
+        createEffect(() => {
+          const now = gateway.loading ? undefined : resolved(shown(), view());
+          if (now && replaceRoute(window, now)) setRoute(now);
+        });
 
         return (
           <Chrome
             nav={<Tabs aria-label="Sections" tabs={offered()} selected={shown()} onChange={choose} />}
+            controls={
+              <>
+                <SchemePicker />
+                <BrandedTitle />
+              </>
+            }
           >
             <TabPanel id="capture" selected={shown()}>
-              <Capture me={who()} />
+              <Capture me={who()} view={view()} onView={(to) => choose("capture", to)} />
+            </TabPanel>
+            <TabPanel id="gateway" selected={shown()}>
+              <Loaded of={gateway} refetch={refetch} reading="the gateway">
+                {(caller) => (
+                  <Show when={caller()}>
+                    {(c) => <Gateway caller={c()} view={view()} onView={(to) => choose("gateway", to)} />}
+                  </Show>
+                )}
+              </Loaded>
             </TabPanel>
             <Show when={account()}>
               {(user) => (

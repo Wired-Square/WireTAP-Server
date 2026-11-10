@@ -1525,6 +1525,7 @@ pub(crate) mod tests {
             pg_password: Secret::new("unused"),
             default_database: "wiretap".into(),
             bootstrap_admin_key: None,
+            ingest_key: None,
             secret_files: Default::default(),
             auto_create_databases: false,
             auto_migrate,

@@ -1,0 +1,8 @@
+
+[forward]
+# The gateway in this image. Its key is WIRETAP_FORWARD_TOKEN, which the
+# entrypoint sets from /data/secrets/ingest-key.
+enable = true
+host = "127.0.0.1"
+port = 9323
+database = "capture"

@@ -38,7 +38,12 @@ One binary, chosen at start the chassis's way:
 
 Either way the daemon is `--daemon-socket` or `WIRETAP_SERVER_UI_DAEMON_SOCKET`,
 by default `/run/wiretap-server/control.sock`, and this process must be in the
-daemon's group to open it. Every other setting is the chassis's, under the
+daemon's group to open it. In the [gateway app](../wiretap-gateway/README.md)
+it is also given the gateway's app socket, `--gateway-socket` or
+`WIRETAP_SERVER_UI_GATEWAY_SOCKET`. Then it passes `/api/gateway/v1/…` to the
+gateway's `/v1/…` for anyone signed in, naming them in `Appliance-Identity`,
+and the gateway decides what they may do; About lists the gateway, and the
+shell is named WireTAP Gateway. Without it there is no `/api/gateway`. Every other setting is the chassis's, under the
 `WIRETAP_SERVER_UI_` prefix; `--help` lists the flags.
 
 Anyone signed in reads the status and the settings. Only an admin changes them
@@ -207,8 +212,13 @@ console on `app.sock` under `/apps/wiretap-server/`, which is also where
 ApplianceOS probes `healthz`. Under host networking a listener is a
 declaration only: ApplianceOS publishes nothing, and holds every declared
 port for clash checks whether it is on or off. So GVRET is declared on tcp 23,
-on, and the device-push listener on tcp 9324, off, clear of the gateway app's
-9323. The listener stays off until the UI or a config file turns it on.
+on, and the device-push listener on tcp 9324, off. The listener stays off
+until the UI or a config file turns it on.
+
+Don't install this app on a box that runs the
+[wiretap-gateway app](../wiretap-gateway/README.md): that app captures too, and
+both declare GVRET on tcp 23 and device push on tcp 9324. This one is for
+capturing on another box and forwarding to a gateway.
 
 Without `/run/appliance` the UI serves its own HTTPS on 8443, and the image's
 `HEALTHCHECK` asks it for `/healthz`.

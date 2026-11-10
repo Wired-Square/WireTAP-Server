@@ -23,6 +23,8 @@ pub struct Config {
     /// Break-glass admin API key, honoured until rotated (cannot be revoked
     /// from the admin UI). Optional — without it, keys must be seeded in SQL.
     pub bootstrap_admin_key: Option<Secret>,
+    /// An ingest key honoured beside the stored ones; never listed or rotated.
+    pub ingest_key: Option<Secret>,
     pub secret_files: SecretFiles,
     /// Allow ingest clients / imports to auto-create unknown databases.
     pub auto_create_databases: bool,
@@ -46,6 +48,17 @@ pub struct AppSocket {
     /// The only peer whose `Appliance-Identity` is believed.
     pub console_uid: u32,
     pub base_path: String,
+}
+
+impl AppSocket {
+    /// The base path as a log line names it: `/` for the root.
+    pub fn served_under(&self) -> &str {
+        if self.base_path.is_empty() {
+            "/"
+        } else {
+            &self.base_path
+        }
+    }
 }
 
 /// The uid every unmapped uid appears as under userns-remap, so it cannot tell
@@ -144,6 +157,7 @@ impl Config {
             pg_password,
             default_database: var_or("WIRETAP_DEFAULT_DB", "wiretap"),
             bootstrap_admin_key,
+            ingest_key: secret_var("WIRETAP_INGEST_KEY", "WIRETAP_INGEST_KEY_FILE")?.0,
             secret_files: SecretFiles {
                 pg_password: pg_password_file,
                 admin_key: admin_key_file,
@@ -173,7 +187,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalise_base_path, secret_var};
+    use super::{normalise_base_path, secret_var, AppSocket};
 
     /// Each test owns its variable names: the environment is the process's.
     #[test]
@@ -208,6 +222,21 @@ mod tests {
             ("/v1.2_x~y/", "/v1.2_x~y"),
         ] {
             assert_eq!(normalise_base_path(raw).as_deref(), Some(want), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_app_socket_at_the_root_is_logged_as_under_slash() {
+        for (base_path, want) in [
+            ("", "/"),
+            ("/apps/wiretap-gateway", "/apps/wiretap-gateway"),
+        ] {
+            let socket = AppSocket {
+                path: "app.sock".into(),
+                console_uid: 0,
+                base_path: base_path.into(),
+            };
+            assert_eq!(socket.served_under(), want);
         }
     }
 

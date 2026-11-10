@@ -7,8 +7,10 @@ import "@wired-square/appliance-ui/appliance.css";
 
 import { render } from "solid-js/web";
 import { FirstAccount, Shell, SignIn, useSession } from "@wired-square/appliance-ui";
+import { SchemePicker, applyScheme } from "@wired-square/kit";
 
 import { App } from "./App";
+import { BrandedTitle } from "./BrandedTitle";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("index.html has no #root to render into");
@@ -18,9 +20,30 @@ function FirstAdmin() {
   return <FirstAccount appName={branding()?.app_name ?? ""} onDone={refresh} />;
 }
 
+function tapWordmark(name: string) {
+  const at = name.indexOf("TAP");
+  if (at < 0) return name;
+  return (
+    <>
+      {name.slice(0, at)}
+      <span class="tap-wordmark">TAP</span>
+      {name.slice(at + 3)}
+    </>
+  );
+}
+
+applyScheme();
+
 render(
   () => (
     <Shell
+      wordmark={tapWordmark}
+      controls={
+        <>
+          <SchemePicker />
+          <BrandedTitle />
+        </>
+      }
       signIn={
         <SignIn
           help={

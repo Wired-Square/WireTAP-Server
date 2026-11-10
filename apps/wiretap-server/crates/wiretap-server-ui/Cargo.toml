@@ -24,10 +24,10 @@ wslib-appliance-https = { workspace = true }
 wslib-appliance-server = { workspace = true }
 wslib-appliance-store = { workspace = true }
 wslib-appliance-types = { workspace = true }
-wslib-build-id = { workspace = true }
 wslib-telemetry = { workspace = true, features = ["journald"] }
 
 [build-dependencies]
+toml = { workspace = true }
 wslib-build-id = { workspace = true }
 
 [dev-dependencies]
