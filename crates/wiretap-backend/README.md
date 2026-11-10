@@ -179,10 +179,10 @@ columns.
 `len` on each of `frames` and as `max_len` beside `max_dlc` in `inventory`.
 
 **A read can ask for one bus.** `inventory` takes `?bus=`, and `payloads` and
-every `/query/*` body take `"bus"`; only that bus's frames are read. `inventory`
-and `payloads` echo the `bus` they filtered on, as does each inventory entry, so
-a client can tell a gateway that predates the filter, which answers every bus
-merged and echoes nothing.
+every `/query/*` body take `"bus"`; only that bus's frames are read. Each answer
+echoes the `bus` it filtered on (`inventory` and its entries, `payloads`, and a
+query's `stats`), so a client can tell a gateway that predates the filter, which
+answers every bus merged and echoes nothing.
 
 **Each database carries its own events** — a user's annotations, a moment or a
 span with a note, kept beside the frames they describe and independent of

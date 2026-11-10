@@ -2773,9 +2773,9 @@ dependencies = [
 
 [[package]]
 name = "wslib-wiretap-gateway"
-version = "0.2.2"
+version = "0.2.3"
 source = "sparse+https://forge.wiredsquare.com/api/packages/wired-square/cargo/"
-checksum = "244a14c8676a2a4fc7d9361b86709a32d67e69b04470ae0ec01b26b2990e96e1"
+checksum = "bc331fa1615b28dd392efecbc13c7f80236a74e96fbe07db1322abfc55ba6ebc"
 dependencies = [
  "serde",
  "wslib-wiretap-protocol",

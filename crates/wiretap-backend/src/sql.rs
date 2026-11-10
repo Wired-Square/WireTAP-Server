@@ -156,6 +156,7 @@ fn stats(start: Instant, rows_scanned: usize, results_count: usize) -> QueryStat
         rows_scanned: rows_scanned as u64,
         results_count: results_count as u64,
         execution_time_ms: start.elapsed().as_millis() as u64,
+        bus: None,
     }
 }
 

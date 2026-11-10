@@ -896,7 +896,7 @@ async fn events_delete(
 
 /// Run a query with cancellation registered under its query_id.
 macro_rules! query_handler {
-    ($name:ident, $params:ty, $result:ty, $sql_fn:path) => {
+    ($name:ident, $params:ty, $result:ty, $sql_fn:path, $($bus:ident).+) => {
         async fn $name(
             State(state): State<St>,
             Extension(key): Extension<KeyInfo>,
@@ -913,7 +913,8 @@ macro_rules! query_handler {
                 format!("{}_{}", stringify!($name), nanos)
             });
             let _guard = running::QueryGuard::new(query_id, client.cancel_token()).await;
-            let result = $sql_fn(&client, &p).await?;
+            let mut result = $sql_fn(&client, &p).await?;
+            result.stats.bus = p.$($bus).+;
             Ok(Json(result))
         }
     };
@@ -923,55 +924,64 @@ query_handler!(
     q_byte_changes,
     crate::types::ByteChangesParams,
     crate::types::ByteChangeQueryResult,
-    sql::byte_changes
+    sql::byte_changes,
+    filter.bus
 );
 query_handler!(
     q_frame_changes,
     crate::types::FrameChangesParams,
     crate::types::FrameChangeQueryResult,
-    sql::frame_changes
+    sql::frame_changes,
+    filter.bus
 );
 query_handler!(
     q_mirror_validation,
     crate::types::MirrorValidationParams,
     crate::types::MirrorValidationQueryResult,
-    sql::mirror_validation
+    sql::mirror_validation,
+    bus
 );
 query_handler!(
     q_mux_statistics,
     crate::types::MuxStatisticsParams,
     crate::types::MuxStatisticsQueryResult,
-    sql::mux_statistics
+    sql::mux_statistics,
+    filter.bus
 );
 query_handler!(
     q_first_last,
     crate::types::FirstLastParams,
     crate::types::FirstLastQueryResult,
-    sql::first_last
+    sql::first_last,
+    filter.bus
 );
 query_handler!(
     q_frequency,
     crate::types::FrequencyParams,
     crate::types::FrequencyQueryResult,
-    sql::frequency
+    sql::frequency,
+    filter.bus
 );
 query_handler!(
     q_distribution,
     crate::types::DistributionParams,
     crate::types::DistributionQueryResult,
-    sql::distribution
+    sql::distribution,
+    filter.bus
 );
 query_handler!(
     q_gap_analysis,
     crate::types::GapAnalysisParams,
     crate::types::GapAnalysisQueryResult,
-    sql::gap_analysis
+    sql::gap_analysis,
+    filter.bus
 );
 query_handler!(
     q_pattern_search,
     crate::types::PatternSearchParams,
     crate::types::PatternSearchQueryResult,
-    sql::pattern_search
+    sql::pattern_search,
+    bus
 );
 
 async fn cancel_query(
@@ -2476,6 +2486,9 @@ mod tests {
         )
         .await;
         assert_eq!(found["results"].as_array().unwrap().len(), 2, "{found}");
+        assert_eq!(found["stats"]["bus"], 0, "{found}");
+        let unfiltered = post("query/first-last", serde_json::json!({ "frame_id": 256 })).await;
+        assert!(unfiltered["stats"].get("bus").is_none(), "{unfiltered}");
         dbs.delete_database(&name).await.unwrap();
     }
 
